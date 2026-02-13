@@ -1,0 +1,6 @@
+discussion/
+poetry.lock
+.env
+*.pyc
+__pycache__/
+.DS_Store
