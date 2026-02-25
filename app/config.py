@@ -56,6 +56,7 @@ class Settings(BaseSettings):
 
     # ── 博查搜索 ──
     BOCHA_API_KEY: str = ""  # 博查 Web Search API Key
+    BOCHA_API_URL: str = "https://api.bochaai.com/v1/web-search"  # 博查 API 端点（可替换为私有部署地址）
 
     # ── Milvus 向量数据库 ──
     MILVUS_URI: str = "http://127.0.0.1:19530"
@@ -79,9 +80,25 @@ class Settings(BaseSettings):
     PROMPT_SEARCH_THRESHOLD: float = 0.5  # Milvus 向量检索相似度阈值
     PROMPT_SEARCH_TOP_K: int = 3  # 检索返回 top-K 条结果
 
+    # ── 工具注册中心 ──
+    DEFAULT_TOOL_TIMEOUT_MS: int = 30_000  # 工具默认超时（毫秒），BaseTool 引用此值
+
+    # ── L3 执行层 ──
+    L3_MAX_ITERATIONS: int = 20        # ReAct 循环最大步数
+    L3_TIMEOUT_SECONDS: float = 300.0  # L3 整体超时（秒）
+    L3_MAX_LLM_CALLS: int = 50          # LLM 调用次数上限
+
+    # ── 冷存储（聊天记录持久化） ──
+    CHAT_PERSIST_ENABLED: bool = True       # 是否启用 PG 冷存储
+    CHAT_PERSIST_WRITE_BEHIND: bool = True  # write-behind 异步写入（False 则同步）
+
     # ── 工作记忆 ──
     WORKING_MEMORY_TTL: int = 1800  # 工作记忆 TTL（秒），默认 30min
     WORKING_MEMORY_MAX_TURNS: int = 20  # 对话历史最大保留轮次
+
+    # ── M06 输出校验 ──
+    OUTPUT_VALIDATOR_ENABLED: bool = True        # 是否启用输出校验器（全局开关）
+    OUTPUT_VALIDATOR_HALLUCINATION: bool = True  # 是否启用幻觉检测（额外 LLM 调用）
 
     # ── 应用 ──
     ENV: str = "development"  # development | production

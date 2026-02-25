@@ -3,28 +3,41 @@
 
 两种执行模式：
 - standard_l1: L1 标准执行，Bounded Loop + 固定工具集 + PromptService 检索
-- deep_l3: L3 深度推理（Week 7+），当前用通用 LLM 兜底
+- deep_l3: L3 深度推理，模块化 ReAct 循环（Thinker/Actor/Observer）
+
+关键设计（Q1 裁决）：L1 和 L3 共享同一个 ToolRegistry 实例，
+通过 get_all_schemas() / get_schemas_by_tier() 分别获取各自需要的工具集。
 """
 
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import structlog
 
 from app.execution.l1.fast_track import L1FastTrack
+from app.execution.l3.react_engine import L3ReActEngine
 from app.execution.schemas import ExecutionResult
 from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
+from app.skills.registry import SkillRegistry
+from app.subagents.registry import SubAgentRegistry
 from app.tools.builtin_tools import create_builtin_registry
+from app.tools.builtin_tools.skill_call import SkillCallTool
+from app.tools.builtin_tools.skill_exec import SkillExecTool
+from app.tools.builtin_tools.subagent_call import SubAgentCallTool
+
+# 内置 Skills 目录（项目自带）
+_BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "builtin_skills"
+# 用户自定义 Skills 目录（~/.sunny-agent/skills/）
+_USER_SKILLS_DIR = Path.home() / ".sunny-agent" / "skills"
+
+# 内置 SubAgents 目录
+_BUILTIN_AGENTS_DIR = Path(__file__).parent.parent / "subagents" / "builtin_agents"
+# 用户自定义 SubAgents 目录（~/.sunny-agent/agents/）
+_USER_AGENTS_DIR = Path.home() / ".sunny-agent" / "agents"
 
 log = structlog.get_logger()
-
-# L3 兜底基座人设
-_L3_BASE_PROMPT = (
-    "你是 Agent Sunny，舜宇集团的 AI 智能助手。"
-    "你乐于助人，回答专业准确，语言简洁友好。"
-    "请根据用户的问题给出有帮助的回复。"
-)
 
 
 class ExecutionRouter:
@@ -32,7 +45,30 @@ class ExecutionRouter:
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
-        self.l1 = L1FastTrack(llm, create_builtin_registry())
+        tool_registry = create_builtin_registry()
+
+        # 多目录加载 MarkdownSkill：内置目录 → 用户目录（同名用户覆盖内置）
+        # 脚本不注册为 Tool，由 SkillExecTool 按白名单执行
+        skill_registry = SkillRegistry.from_directories(
+            [_BUILTIN_SKILLS_DIR, _USER_SKILLS_DIR],
+        )
+
+        # 注册 skill_call 元工具（单一入口代理所有 Skill）
+        tool_registry.register(SkillCallTool(skill_registry))
+
+        # 注册 skill_exec 工具（Tier 3 脚本执行，白名单校验，须先调用 skill_call）
+        tool_registry.register(SkillExecTool(skill_registry))
+
+        # 多目录加载 SubAgent：内置目录 → 用户目录（同名用户覆盖内置）
+        agent_registry = SubAgentRegistry.from_directories(
+            [_BUILTIN_AGENTS_DIR, _USER_AGENTS_DIR],
+        )
+
+        # 注册 subagent_call 元工具（单一入口代理所有 SubAgent）
+        tool_registry.register(SubAgentCallTool(agent_registry, tool_registry, llm))
+
+        self.l1 = L1FastTrack(llm, tool_registry)
+        self.l3 = L3ReActEngine(llm, tool_registry)
 
     async def execute(
         self,
@@ -46,7 +82,7 @@ class ExecutionRouter:
         if route == "standard_l1":
             result = await self.l1.execute(intent_result, session_id)
         elif route == "deep_l3":
-            result = await self._deep_l3(intent_result)
+            result = await self.l3.execute(intent_result, session_id)
         else:
             log.warning("未知路由，降级到 standard_l1", route=route)
             result = await self.l1.execute(intent_result, session_id)
@@ -66,45 +102,9 @@ class ExecutionRouter:
             async for event in self.l1.execute_stream(intent_result, session_id):
                 yield event
         elif route == "deep_l3":
-            async for event in self._deep_l3_stream(intent_result):
+            async for event in self.l3.execute_stream(intent_result, session_id):
                 yield event
         else:
             log.warning("未知路由，降级到 standard_l1 流式", route=route)
             async for event in self.l1.execute_stream(intent_result, session_id):
                 yield event
-
-    # ── deep_l3: 通用 LLM 兜底（Week 7+ 实现完整多步推理） ──
-
-    async def _deep_l3(self, intent_result: IntentResult) -> ExecutionResult:
-        """L3 深度推理：当前用通用 LLM 兜底"""
-        messages = [
-            {"role": "system", "content": _L3_BASE_PROMPT},
-            *intent_result.history_messages[-10:],
-            {"role": "user", "content": intent_result.raw_input},
-        ]
-        response = await self.llm.chat(
-            messages=messages,
-            temperature=0.7,
-            max_tokens=4096,
-        )
-        return ExecutionResult(
-            reply=response.content,
-            source="deep_l3",
-        )
-
-    async def _deep_l3_stream(self, intent_result: IntentResult) -> AsyncIterator[dict]:
-        """L3 深度推理流式输出"""
-        messages = [
-            {"role": "system", "content": _L3_BASE_PROMPT},
-            *intent_result.history_messages[-10:],
-            {"role": "user", "content": intent_result.raw_input},
-        ]
-        async for chunk in self.llm.chat_stream(
-            messages=messages,
-            temperature=0.7,
-            max_tokens=4096,
-        ):
-            if chunk["type"] == "delta":
-                yield {"event": "delta", "data": chunk["content"]}
-            elif chunk["type"] == "finish":
-                yield {"event": "finish", "data": {}}

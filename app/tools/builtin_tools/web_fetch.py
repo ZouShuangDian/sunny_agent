@@ -65,6 +65,11 @@ class WebFetchTool(BaseTool):
     def params_model(self) -> type[BaseModel]:
         return WebFetchParams
 
+    @property
+    def timeout_ms(self) -> int:
+        """Registry 兜底超时 20s > 内部 httpx timeout 15s（W2 规范）"""
+        return 20_000
+
     async def execute(self, args: dict) -> ToolResult:
         url = args.get("url", "")
         max_length = args.get("max_length", _DEFAULT_MAX_LENGTH)

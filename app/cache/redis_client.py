@@ -49,6 +49,12 @@ class RedisKeys:
         """告警事件 Sorted Set"""
         return f"alert:{event_type}"
 
+    # ── Todo 列表 ──
+    @staticmethod
+    def todo(session_id: str) -> str:
+        """会话级 Todo 任务列表 (TTL 7天)"""
+        return f"todo:{session_id}"
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(

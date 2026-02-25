@@ -18,6 +18,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.config import get_settings
+
 
 @dataclass
 class ToolResult:
@@ -75,6 +77,23 @@ class BaseTool(ABC):
     async def execute(self, args: dict) -> ToolResult:
         """执行工具，返回标准化结果"""
         ...
+
+    # ── Week 7 新增（非抽象，有默认值，现有工具零改动即可兼容） ──
+
+    @property
+    def tier(self) -> list[str]:
+        """可用层级，默认 L1 + L3 都可用"""
+        return ["L1", "L3"]
+
+    @property
+    def timeout_ms(self) -> int:
+        """单次执行超时（毫秒），默认取全局配置。工具内部应自行管理更短的超时（见 W2 超时嵌套规范）"""
+        return get_settings().DEFAULT_TOOL_TIMEOUT_MS
+
+    @property
+    def risk_level(self) -> str:
+        """操作风险等级：read / suggest / write / critical（为 HITL 审批预留）"""
+        return "read"
 
     def schema(self) -> dict:
         """生成 OpenAI function calling 格式的 tool schema"""

@@ -31,7 +31,7 @@ SEED_PROMPTS = [
     {
         "name": "default_assistant",
         "tier": "L1",
-        "intent_tags": [],
+        "intent_tags": ["general_qa"],
         "match_text": (
             "通用对话助手。处理问候、闲聊、通用知识问答、以及无法归类到特定场景的任务。"
             "示例：你好、你是谁、今天天气怎么样、Python是什么语言、帮我查个东西、"
@@ -118,54 +118,7 @@ SEED_PROMPTS = [
         "description": "翻译任务专用 Prompt",
         "is_default": False,
         "sort_order": 10,
-    },
-    {
-        "name": "market_research_assistant",
-        "tier": "L1",
-        "intent_tags": ["market_research"],
-        "match_text": (
-            "市场调研助手。帮用户搜索和分析市场信息、行业动态、竞品情报。"
-            "包括但不限于：股价查询、行业报告、公司信息、竞争对手分析、市场趋势。"
-            "示例查询：查舜宇股价、搜索光学行业最新动态、"
-            "了解下华为最新消息、查一下竞品情况、"
-            "搜索新能源汽车市场分析、帮我调研一下这个行业"
-        ),
-        "template": (
-            "你是 Agent Sunny，一个专业的市场调研助手。"
-            "你可以使用 bocha_web_search 工具搜索最新的市场信息。"
-            "请根据搜索结果为用户提供准确、简洁的回答。"
-            "注意：\n"
-            "1. 引用数据时标注信息来源\n"
-            "2. 区分事实信息和分析观点\n"
-            "3. 如果搜索结果不包含所需信息，请如实告知用户"
-        ),
-        "description": "市场调研专用 Prompt（配合 bocha_web_search 工具）",
-        "is_default": False,
-        "sort_order": 10,
-    },
-    {
-        "name": "general_qa_assistant",
-        "tier": "L1",
-        "intent_tags": ["general_qa"],
-        "match_text": (
-            "知识问答助手。回答用户的通用知识类问题，涵盖科技、历史、文化、编程、数学等领域。"
-            "示例查询：Python怎么写快排、什么是机器学习、光学镜头的工作原理是什么、"
-            "制造业MES系统是什么、如何计算OEE、SPC控制图怎么看、"
-            "什么是六西格玛、FMEA分析怎么做"
-        ),
-        "template": (
-            "你是 Agent Sunny，舜宇集团的 AI 智能助手。"
-            "你在制造业、光学技术、质量管理等领域有专业知识。"
-            "请准确、专业地回答用户的问题。"
-            "注意：\n"
-            "1. 如果涉及专业概念，请给出通俗易懂的解释\n"
-            "2. 适当使用示例帮助理解\n"
-            "3. 对于不确定的信息，诚实说明"
-        ),
-        "description": "通用知识问答 Prompt",
-        "is_default": False,
-        "sort_order": 5,
-    },
+    }
 ]
 
 

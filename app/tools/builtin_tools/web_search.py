@@ -6,12 +6,10 @@ import httpx
 import structlog
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.tools.base import BaseTool, ToolResult
 
 log = structlog.get_logger()
-
-# 博查搜索 API 地址
-_BOCHA_API_URL = "https://api.bochaai.com/v1/web-search"
 
 
 class WebSearchParams(BaseModel):
@@ -39,6 +37,11 @@ class WebSearchTool(BaseTool):
     def params_model(self) -> type[BaseModel]:
         return WebSearchParams
 
+    @property
+    def timeout_ms(self) -> int:
+        """Registry 兜底超时 20s > 内部 httpx timeout 10s（W2 规范）"""
+        return 20_000
+
     async def execute(self, args: dict) -> ToolResult:
         query = args.get("query", "")
         count = args.get("count", 5)
@@ -48,9 +51,10 @@ class WebSearchTool(BaseTool):
             return self._mock_response(query)
 
         try:
+            api_url = get_settings().BOCHA_API_URL
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
-                    _BOCHA_API_URL,
+                    api_url,
                     headers={
                         "Authorization": f"Bearer {self._api_key}",
                         "Content-Type": "application/json",
