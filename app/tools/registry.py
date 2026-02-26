@@ -8,12 +8,22 @@ Week 7 增强：
 
 import asyncio
 import json
+import time
 
 import structlog
 
 from app.tools.base import BaseTool, ToolResult
 
 log = structlog.get_logger()
+
+# 工具入参/出参日志截断长度（避免刷屏）
+_LOG_TRUNCATE = 300
+
+
+def _truncate(s: str) -> str:
+    """截断长字符串，仅用于日志输出"""
+    s = str(s)
+    return s if len(s) <= _LOG_TRUNCATE else s[:_LOG_TRUNCATE] + f"…[共{len(s)}字]"
 
 
 class ToolRegistry:
@@ -67,12 +77,26 @@ class ToolRegistry:
         if not tool:
             return ToolResult.fail(f"未知工具: {name}").to_json()
 
+        log.debug(
+            "工具调用",
+            tool=name,
+            args=_truncate(json.dumps(arguments, ensure_ascii=False)),
+        )
+
+        _start = time.monotonic()
         try:
             result = await asyncio.wait_for(
                 tool.execute(arguments),
                 timeout=tool.timeout_ms / 1000,
             )
-            return result.to_json()
+            result_json = result.to_json()
+            log.debug(
+                "工具返回",
+                tool=name,
+                duration_ms=int((time.monotonic() - _start) * 1000),
+                result=_truncate(result_json),
+            )
+            return result_json
         except asyncio.TimeoutError:
             log.warning("工具执行超时（Registry 兜底）", tool=name, timeout_ms=tool.timeout_ms)
             return ToolResult.fail(f"工具 {name} 执行超时（{tool.timeout_ms}ms）").to_json()

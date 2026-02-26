@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     PROMPT_SEARCH_TOP_K: int = 3  # 检索返回 top-K 条结果
 
     # ── 工具注册中心 ──
-    DEFAULT_TOOL_TIMEOUT_MS: int = 30_000  # 工具默认超时（毫秒），BaseTool 引用此值
+    DEFAULT_TOOL_TIMEOUT_MS: int = 60_000  # 工具默认超时（毫秒），BaseTool 引用此值
 
     # ── L3 执行层 ──
     L3_MAX_ITERATIONS: int = 20        # ReAct 循环最大步数

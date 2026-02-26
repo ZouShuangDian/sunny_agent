@@ -193,20 +193,18 @@ class SubAgentCallTool(BaseTool):
             reset_agent_depth(depth_token)
             reset_session_id(sid_token)
 
+        llm_calls = sub_result.token_usage.get("llm_calls", 0) if sub_result.token_usage else 0
         log.info(
             "SubAgent(local_l3) 完成",
             agent=config.name,
             iterations=sub_result.iterations,
-            tokens=sub_result.token_usage.get("total_tokens", 0) if sub_result.token_usage else 0,
+            llm_calls=llm_calls,
         )
         return ToolResult.success(
             agent=config.name,
             report=sub_result.reply,
             iterations=sub_result.iterations,
-            tokens_used=(
-                sub_result.token_usage.get("total_tokens", 0)
-                if sub_result.token_usage else 0
-            ),
+            llm_calls=llm_calls,
             is_degraded=sub_result.is_degraded,
         )
 

@@ -270,11 +270,13 @@ class L3ReActEngine:
             updated[0] = {"role": "system", "content": base}
             return updated
 
-        # 有活跃 Todo：追加最新状态块
+        # 有活跃 Todo：追加最新状态块（含收尾强提醒）
         block = (
             f"{TODO_REMINDER_MARKER}\n"
-            f"当前 Todo 列表（自动同步，请检查进度并继续执行）：\n"
+            f"当前 Todo 列表（自动同步）：\n"
             f"```json\n{json.dumps(todos, ensure_ascii=False, indent=2)}\n```\n"
+            f"⚠️ 重要：若准备给出最终回答，必须先调用 `todo_write` 将所有已完成任务标记为 `completed`，"
+            f"不可在 in_progress 或 pending 状态下直接结束。\n"
             f"<!-- todo-reminder-end -->"
         )
         updated = list(messages)

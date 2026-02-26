@@ -63,12 +63,13 @@ class TodoWriteTool(BaseTool):
 
         await TodoStore.set(session_id, todos)
 
-        active_count = sum(
-            1 for t in todos
-            if t.get("status") not in ("completed", "cancelled")
-        )
+        in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
+        pending = sum(1 for t in todos if t.get("status") == "pending")
+        completed = sum(1 for t in todos if t.get("status") == "completed")
+        title = f"进行中 {in_progress}，待处理 {pending}，已完成 {completed}（共 {len(todos)} 项）"
+
         return ToolResult.success(
-            title=f"{active_count} 个进行中",
+            title=title,
             todos=todos,
             snapshot=json.dumps(todos, ensure_ascii=False, indent=2),
         )
