@@ -8,6 +8,11 @@ HTML 提取策略（三步降级）：
 1. 移除噪声节点（nav/header/footer/aside/script/style/noscript）及其全部内容
 2. 尝试提取语义主体（<article> 或 <main>）作为正文候选
 3. 若无语义主体，使用已清洗的全文作为 fallback
+
+编码处理：
+- 优先使用 HTTP 响应头 charset
+- 次选 HTML <meta> 标签声明的 charset（处理 GBK/GB2312 等中文财经网站）
+- 最终 fallback 到 UTF-8（错误字符用 ? 替换，不抛异常）
 """
 
 import re
@@ -28,6 +33,38 @@ _NOISE_TAGS = ("script", "style", "nav", "header", "footer", "aside", "noscript"
 
 # 语义主体标签：按优先级依次尝试提取
 _CONTENT_TAGS = ("article", "main")
+
+
+def _decode_html(raw_bytes: bytes, header_charset: str | None = None) -> str:
+    """
+    正确解码 HTML 字节流，处理 GBK/GB2312 等非 UTF-8 中文页面。
+
+    解码优先级：
+    1. HTTP 响应头中的 charset（由调用方传入）
+    2. HTML <meta> 标签声明的 charset
+    3. UTF-8（fallback，错误字符用 ? 替换）
+    """
+    # 用 latin-1 安全解码前 2048 字节，搜索 meta charset 声明
+    # latin-1 是单字节映射，任意字节序列都不会报错
+    head = raw_bytes[:2048].decode("latin-1")
+    meta_charset: str | None = None
+    m = re.search(
+        r'<meta[^>]+(?:charset=["\']?|content=["\'][^"\']*charset=)([a-zA-Z0-9_-]+)',
+        head,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        meta_charset = m.group(1)
+
+    # 按优先级逐一尝试解码
+    for charset in filter(None, [header_charset, meta_charset, "utf-8"]):
+        try:
+            return raw_bytes.decode(charset)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # 最终兜底：UTF-8 + 替换不可解码字符
+    return raw_bytes.decode("utf-8", errors="replace")
 
 
 def _html_to_text(html: str) -> str:
@@ -136,18 +173,25 @@ class WebFetchTool(BaseTool):
 
             content_type = resp.headers.get("content-type", "")
 
+            # 从响应头提取 charset（供 _decode_html 优先使用）
+            header_charset: str | None = None
+            m = re.search(r"charset=([a-zA-Z0-9_-]+)", content_type, re.IGNORECASE)
+            if m:
+                header_charset = m.group(1)
+
             # 非 HTML 内容直接返回前 N 个字符
             if "text/html" not in content_type:
-                raw_text = resp.text[:max_length]
+                decoded = _decode_html(resp.content, header_charset)
                 return ToolResult.success(
                     url=url,
-                    content=raw_text,
+                    content=decoded[:max_length],
                     content_type=content_type,
-                    truncated=len(resp.text) > max_length,
+                    truncated=len(decoded) > max_length,
                 )
 
-            # HTML → 纯文本
-            text = _html_to_text(resp.text)
+            # 正确解码（含 GBK/GB2312 等中文编码）再提取正文
+            html_content = _decode_html(resp.content, header_charset)
+            text = _html_to_text(html_content)
             truncated = len(text) > max_length
             text = text[:max_length]
 
