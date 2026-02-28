@@ -31,6 +31,8 @@ SESSION_TTL_SECONDS = 30 * 60
 
 import os
 SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "python:3.11-slim")
+SANDBOX_VOLUME_HOST = os.getenv("SANDBOX_VOLUME_HOST", "/Users/zoushuangdian/docker/volumes/sunny_agent")
+SANDBOX_VOLUME_CONTAINER = os.getenv("SANDBOX_VOLUME_CONTAINER", "/mnt")
 
 _docker_client: docker.DockerClient | None = None
 _containers: dict[str, docker.models.containers.Container] = {}
@@ -110,6 +112,9 @@ async def _get_or_create_container(session_id: str) -> docker.models.containers.
                 cpu_period=100000,
                 cpu_quota=100000,
                 network_mode="bridge",
+                volumes={
+                    SANDBOX_VOLUME_HOST: {"bind": SANDBOX_VOLUME_CONTAINER, "mode": "rw"},
+                },
                 detach=True,
             )
         

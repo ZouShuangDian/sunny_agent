@@ -12,4 +12,7 @@ services:
     environment:
       # 沙箱容器使用的镜像，默认 python:3.11-slim
       SANDBOX_IMAGE: python:3.11-slim
+      # 沙箱容器的卷挂载配置
+      SANDBOX_VOLUME_HOST: /Users/zoushuangdian/docker/volumes/sunny_agent
+      SANDBOX_VOLUME_CONTAINER: /mnt
     restart: unless-stopped
