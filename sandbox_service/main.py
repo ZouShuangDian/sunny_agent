@@ -46,18 +46,21 @@ async def _cleanup_loop() -> None:
         await asyncio.sleep(300)
         now = time.time()
         expired = [
-            sid for sid, last in list(_last_active.items())
+            key for key, last in list(_last_active.items())
             if now - last > SESSION_TTL_SECONDS
         ]
-        for sid in expired:
-            log.info("沙箱 TTL 过期，自动销毁", session_id=sid[:8])
-            await _destroy_session(sid)
+        for key in expired:
+            parts = key.split(":")
+            if len(parts) == 2:
+                user_id, session_id = parts
+                log.info("沙箱 TTL 过期，自动销毁", session_id=session_id[:8], user_id=user_id)
+            await _destroy_session(key)
 
 
-async def _destroy_session(session_id: str) -> None:
+async def _destroy_session(container_key: str) -> None:
     """销毁 session 对应的容器"""
-    container = _containers.pop(session_id, None)
-    _last_active.pop(session_id, None)
+    container = _containers.pop(container_key, None)
+    _last_active.pop(container_key, None)
     if container:
         try:
             await asyncio.to_thread(container.kill)
@@ -77,8 +80,8 @@ async def lifespan(app: FastAPI):
     log.info("Sandbox Service 启动", image=SANDBOX_IMAGE)
     yield
     _cleanup_task.cancel()
-    for sid in list(_containers.keys()):
-        await _destroy_session(sid)
+    for key in list(_containers.keys()):
+        await _destroy_session(key)
     await asyncio.to_thread(_docker_client.close)
     log.info("Sandbox Service 关闭，所有容器已清理")
 
@@ -88,6 +91,7 @@ app = FastAPI(title="Sandbox Service", lifespan=lifespan)
 
 class ExecRequest(BaseModel):
     session_id: str
+    user_id: str
     command: str
     timeout: int = 30
 
@@ -98,31 +102,37 @@ class ExecResponse(BaseModel):
     returncode: int
 
 
-async def _get_or_create_container(session_id: str) -> docker.models.containers.Container:
+async def _get_or_create_container(session_id: str, user_id: str) -> docker.models.containers.Container:
     """获取已有容器，或为新 session 创建一个"""
-    if session_id not in _containers:
-        log.info("创建沙箱容器", session_id=session_id[:8], image=SANDBOX_IMAGE)
+    container_key = f"{user_id}:{session_id}"
+    
+    if container_key not in _containers:
+        log.info("创建沙箱容器", session_id=session_id[:8], user_id=user_id, image=SANDBOX_IMAGE)
+        
+        user_volume_path = f"{SANDBOX_VOLUME_HOST}/users/{user_id}"
         
         def _create_container():
             return _docker_client.containers.run(
                 image=SANDBOX_IMAGE,
                 command=["sleep", "infinity"],
-                name=f"sandbox_{session_id[:12]}",
+                name=f"sandbox_{user_id}_{session_id[:8]}",
                 mem_limit="512m",
                 cpu_period=100000,
                 cpu_quota=100000,
                 network_mode="bridge",
                 volumes={
-                    SANDBOX_VOLUME_HOST: {"bind": SANDBOX_VOLUME_CONTAINER, "mode": "rw"},
+                    f"{SANDBOX_VOLUME_HOST}/skills": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/skills", "mode": "ro"},
+                    f"{user_volume_path}/uploads": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/uploads", "mode": "ro"},
+                    f"{user_volume_path}/outputs/{session_id}": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/outputs", "mode": "rw"},
                 },
                 detach=True,
             )
         
         container = await asyncio.to_thread(_create_container)
-        _containers[session_id] = container
+        _containers[container_key] = container
 
-    _last_active[session_id] = time.time()
-    return _containers[session_id]
+    _last_active[container_key] = time.time()
+    return _containers[container_key]
 
 
 @app.post("/exec", response_model=ExecResponse)
@@ -132,7 +142,7 @@ async def exec_command(req: ExecRequest) -> ExecResponse:
     同一 session 的多次调用共享同一容器，pip install 等状态跨调用保留。
     """
     try:
-        container = await _get_or_create_container(req.session_id)
+        container = await _get_or_create_container(req.session_id, req.user_id)
 
         def _exec_command():
             exec_result = container.exec_run(
@@ -171,19 +181,26 @@ async def exec_command(req: ExecRequest) -> ExecResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/session/{session_id}")
-async def destroy_session(session_id: str):
+@app.delete("/session/{user_id}/{session_id}")
+async def destroy_session(user_id: str, session_id: str):
     """销毁 session 对应的容器，清空所有安装的包和临时文件。"""
-    await _destroy_session(session_id)
-    log.info("沙箱容器已销毁", session_id=session_id[:8])
+    container_key = f"{user_id}:{session_id}"
+    await _destroy_session(container_key)
+    log.info("沙箱容器已销毁", session_id=session_id[:8], user_id=user_id)
     return {"ok": True}
 
 
 @app.get("/health")
 async def health():
     """健康检查，返回当前活跃 session 数量"""
+    sessions_list = []
+    for key in _containers:
+        parts = key.split(":")
+        if len(parts) == 2:
+            user_id, session_id = parts
+            sessions_list.append({"user_id": user_id, "session_id": session_id[:8]})
     return {
         "status": "ok",
         "active_sessions": len(_containers),
-        "sessions": [sid[:8] for sid in _containers],
+        "sessions": sessions_list,
     }
