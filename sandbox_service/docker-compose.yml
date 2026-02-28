@@ -1,0 +1,15 @@
+services:
+  sandbox-service:
+    build: .
+    container_name: sandbox-service
+    ports:
+      - "8020:8020"
+    volumes:
+      # 挂载宿主机 Docker socket，让 sandbox-service 能创建兄弟容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 挂载 sunny_agent 目录
+      - /Users/zoushuangdian/docker/volumes/sunny_agent:/mnt
+    environment:
+      # 沙箱容器使用的镜像，默认 python:3.11-slim
+      SANDBOX_IMAGE: python:3.11-slim
+    restart: unless-stopped
