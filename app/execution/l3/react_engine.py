@@ -32,6 +32,36 @@ from app.tools.registry import ToolRegistry
 log = structlog.get_logger()
 
 
+def _build_plugin_context_block(ctx: "PluginCommandContext") -> str:
+    """
+    将 PluginCommandContext 序列化为 system prompt 注入块。
+
+    内容：
+    1. 命令标识（plugin_name:command_name）
+    2. COMMAND.md 完整工作流指引
+    3. 插件内可用 Skill 列表（含容器内 SKILL.md 路径）
+    4. 使用规范（禁止走全局 skill_call）
+    """
+    skills_section = (
+        "\n".join(
+            f"- **{s['name']}**: `{s['skill_md_path']}`"
+            for s in ctx.plugin_skills
+        )
+        if ctx.plugin_skills
+        else "（此插件无内置 Skill）"
+    )
+    return (
+        f"\n\n---\n## Plugin 命令执行上下文\n\n"
+        f"你正在执行用户触发的 Plugin 命令 `/{ctx.plugin_name}:{ctx.command_name}`。\n\n"
+        f"### 工作流指引（COMMAND.md）\n\n"
+        f"{ctx.command_md_content}\n\n"
+        f"### 插件内可用 Skill\n\n"
+        f"{skills_section}\n\n"
+        f"使用插件 Skill 时：通过 `read_file` 读取对应 SKILL.md 路径，按指引操作。\n"
+        f"**禁止**通过 `skill_call` 调用——插件 Skill 不在全局 skill catalog 中。"
+    )
+
+
 class L3ReActEngine:
     """L3 深度推理引擎：编排 Thinker → Actor → Observer"""
 
@@ -68,6 +98,9 @@ class L3ReActEngine:
             observer = Observer(self.config)
             observer.start()
 
+            # 提取用户目标（用于 Layer 3 Reminder 复读，防止 LLM 在长任务中遗忘原始约束）
+            user_goal: str | None = intent_result.intent.user_goal or None
+
             # 组装初始 messages
             messages = self._build_initial_messages(intent_result)
 
@@ -83,7 +116,7 @@ class L3ReActEngine:
                     return self._graceful_degrade(observer, reason)
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
-                messages = await self._inject_todo_reminder(messages)
+                messages = await self._inject_todo_reminder(messages, user_goal)
 
                 # ── Think：LLM 决策 ──
                 # 最后一步不带 tools，强制总结（与 L1 一致）
@@ -99,8 +132,11 @@ class L3ReActEngine:
                 act_result = await self.actor.act(think_result)
                 observer.on_act(step, act_result)
 
-                # ── 追加消息到上下文 ──
+                # ── 追加消息到上下文，并压缩旧 tool result 防止 context 膨胀 ──
                 messages.extend(act_result.messages)
+                messages = self._compress_stale_tool_results(
+                    messages, observer.budget.llm_call_count
+                )
 
             return self._build_result(think_result, observer)
         finally:
@@ -131,6 +167,9 @@ class L3ReActEngine:
             observer = Observer(self.config)
             observer.start()
 
+            # 提取用户目标（用于 Layer 3 Reminder 复读）
+            user_goal: str | None = intent_result.intent.user_goal or None
+
             messages = self._build_initial_messages(intent_result)
             tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
 
@@ -142,14 +181,14 @@ class L3ReActEngine:
                     yield {"event": "delta", "data": degrade_result.reply}
                     yield {"event": "finish", "data": {
                         "iterations": observer.trace.step_count,
-                        "tokens_used": observer.budget.to_dict()["total_tokens"],
+                        "llm_calls": observer.budget.llm_call_count,
                         "is_degraded": True,
                         "degrade_reason": reason,
                     }}
                     return
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
-                messages = await self._inject_todo_reminder(messages)
+                messages = await self._inject_todo_reminder(messages, user_goal)
 
                 # ── Think ──
                 use_tools = tool_schemas if step < self.config.max_iterations - 1 else None
@@ -169,7 +208,7 @@ class L3ReActEngine:
                         yield {"event": "delta", "data": think_result.thought}
                     yield {"event": "finish", "data": {
                         "iterations": observer.trace.step_count,
-                        "tokens_used": observer.budget.to_dict()["total_tokens"],
+                        "llm_calls": observer.budget.llm_call_count,
                     }}
                     return
 
@@ -190,14 +229,18 @@ class L3ReActEngine:
                         "result": obs.result,
                     }}
 
+                # ── 追加消息到上下文，并压缩旧 tool result 防止 context 膨胀 ──
                 messages.extend(act_result.messages)
+                messages = self._compress_stale_tool_results(
+                    messages, observer.budget.llm_call_count
+                )
 
             # 达到 max_iterations 仍未完成 → 最后一步的 thought 即回答
             if think_result and think_result.thought:
                 yield {"event": "delta", "data": think_result.thought}
             yield {"event": "finish", "data": {
                 "iterations": observer.trace.step_count,
-                "tokens_used": observer.budget.to_dict()["total_tokens"],
+                "llm_calls": observer.budget.llm_call_count,
             }}
         finally:
             reset_session_id(sid_token)
@@ -235,17 +278,29 @@ class L3ReActEngine:
             act_result = await self.actor.act(think_result)
             observer.on_act(step, act_result)
             messages.extend(act_result.messages)
+            messages = self._compress_stale_tool_results(
+                messages, observer.budget.llm_call_count
+            )
 
         return self._build_result(think_result, observer)
 
-    async def _inject_todo_reminder(self, messages: list[dict]) -> list[dict]:
+    async def _inject_todo_reminder(
+        self,
+        messages: list[dict],
+        user_goal: str | None = None,
+    ) -> list[dict]:
         """
         Layer 3 干预层：在每次 Think 前，将最新 Todo 状态动态注入 system prompt 末尾。
+
+        注入内容：
+        1. user_goal 复读（防止 LLM 在长任务中遗忘原始约束）
+        2. 当前 Todo 列表（JSON 完整快照）
+        3. 收尾强提醒（最终回答前必须关闭所有 Todo）
 
         注入策略：
         - 有活跃 Todo（pending / in_progress）时：追加完整状态块到 messages[0] 末尾
         - 无活跃 Todo 时：剥离上次注入的状态块，还原干净的 system prompt
-        - 幂等：按 TODO_REMINDER_MARKER（来自 app.prompts.markers）截断后重新追加
+        - 幂等：按 TODO_REMINDER_MARKER 截断后重新追加
 
         注意：只修改 system message（messages[0]），不追加新消息，
         规避 Anthropic API 连续角色限制。
@@ -270,9 +325,11 @@ class L3ReActEngine:
             updated[0] = {"role": "system", "content": base}
             return updated
 
-        # 有活跃 Todo：追加最新状态块（含收尾强提醒）
+        # 有活跃 Todo：追加最新状态块（含用户目标复读 + 收尾强提醒）
+        goal_line = f"当前任务目标：{user_goal}\n\n" if user_goal else ""
         block = (
             f"{TODO_REMINDER_MARKER}\n"
+            f"{goal_line}"
             f"当前 Todo 列表（自动同步）：\n"
             f"```json\n{json.dumps(todos, ensure_ascii=False, indent=2)}\n```\n"
             f"⚠️ 重要：若准备给出最终回答，必须先调用 `todo_write` 将所有已完成任务标记为 `completed`，"
@@ -283,9 +340,68 @@ class L3ReActEngine:
         updated[0] = {"role": "system", "content": base + block}
         return updated
 
+    def _compress_stale_tool_results(
+        self,
+        messages: list[dict],
+        llm_call_count: int,
+    ) -> list[dict]:
+        """
+        将旧的 tool result 消息就地压缩，保留最近 N 步的完整内容。
+
+        动态窗口（根据 LLM 调用次数决定保留步数）：
+        - 前 4 次调用（会话早期）：保留最近 3 步
+        - 4-6 次调用（会话中期）：保留最近 2 步
+        - 7+ 次调用（会话较长）：保留最近 1 步，激进压缩
+
+        策略：
+        - 扫描带 tool_calls 的 assistant 消息确定步骤边界
+        - 窗口外的 role="tool" 消息替换为 1 行面包屑
+        - assistant/user/system 消息不变
+
+        效果：保持 context 始终在可控范围内，越旧的工具结果占用越少空间。
+        """
+        # 动态确定保留步数
+        if llm_call_count < 4:
+            keep_recent_steps = 3
+        elif llm_call_count < 7:
+            keep_recent_steps = 2
+        else:
+            keep_recent_steps = 1
+
+        # 找出所有步骤边界（带 tool_calls 的 assistant 消息下标）
+        step_boundaries: list[int] = [
+            i for i, msg in enumerate(messages)
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+        ]
+
+        # 步骤数未超过窗口，无需压缩
+        if len(step_boundaries) <= keep_recent_steps:
+            return messages
+
+        # 窗口外的最后一个步骤开始位置（此位置之前的 tool 消息全部压缩）
+        compress_before = step_boundaries[-keep_recent_steps]
+
+        result = list(messages)
+        for i in range(compress_before):
+            msg = result[i]
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                # 取前 80 字符作为面包屑预览
+                preview = content[:80].replace("\n", " ")
+                result[i] = {
+                    **msg,
+                    "content": f"[已处理] {preview}...",
+                }
+
+        return result
+
     def _build_initial_messages(self, intent_result: IntentResult) -> list[dict]:
-        """组装 ReAct 循环的初始消息列表"""
-        # 提取用户目标（如果 IntentResult 有此字段）
+        """
+        组装 ReAct 循环的初始消息列表。
+
+        若当前请求是 Plugin 命令触发（plugin_context ContextVar 已设置），
+        在 system prompt 末尾追加 COMMAND.md 工作流指引 + 插件 Skill 列表。
+        """
         user_goal = getattr(intent_result.intent, "user_goal", None)
 
         system_prompt = build_l3_system_prompt(
@@ -293,6 +409,12 @@ class L3ReActEngine:
             user_goal=user_goal,
             max_iterations=self.config.max_iterations,
         )
+
+        # Plugin 命令上下文注入（chat.py 在 execute() 前设置 ContextVar）
+        from app.execution.plugin_context import PluginCommandContext, get_plugin_context
+        plugin_ctx = get_plugin_context()
+        if plugin_ctx:
+            system_prompt += _build_plugin_context_block(plugin_ctx)
 
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
@@ -345,7 +467,7 @@ class L3ReActEngine:
             "L3 优雅降级",
             reason=reason,
             iterations=observer.trace.step_count,
-            tokens=observer.budget.to_dict()["total_tokens"],
+            llm_calls=observer.budget.llm_call_count,
             elapsed_ms=elapsed,
         )
 

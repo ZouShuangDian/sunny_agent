@@ -86,7 +86,6 @@ class Observer:
         if self.budget.is_exhausted():
             log.warning(
                 "L3 熔断：预算耗尽",
-                total_tokens=self.budget.to_dict()["total_tokens"],
                 llm_calls=self.budget.llm_call_count,
             )
             return True, "budget"

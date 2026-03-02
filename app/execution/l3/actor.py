@@ -10,8 +10,8 @@ Actor（执行者）：安全执行工具调用
 Skill 执行模型（M08-6 Prompt-Driven）：
 - skill_call 已注册为普通 Tool，Actor 无需特殊处理
 - LLM 调用 skill_call → ToolRegistry.execute("skill_call", {...})
-  → SkillCallTool.execute() → SkillRegistry.execute() → Tier 2 body 注入
-- LLM 读取 instructions 字段后，通过正常 ReAct 循环自主调用 web_search 等子工具
+  → SkillCallTool.execute() → 返回容器内 SKILL.md 路径（pull 模式）
+- LLM 读取 instructions_path 后，通过 read_file + bash_tool 自主执行
 """
 
 import asyncio

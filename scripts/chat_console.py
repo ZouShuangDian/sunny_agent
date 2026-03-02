@@ -30,7 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.cache.redis_client import redis_client
 from app.db.engine import async_session                          # [DB存储] PG session 工厂
 from app.db.models.user import User                              # [DB存储] 用于查询真实用户
+from app.execution.plugin_context import PluginCommandContext, reset_plugin_context, set_plugin_context
 from app.execution.router import ExecutionRouter
+from app.execution.user_context import reset_user_id, set_user_id
+from app.guardrails.schemas import IntentDetail, IntentResult
 from app.guardrails.validator import GuardrailsValidator
 from app.intent.clarify_handler import ClarifyHandler
 from app.intent.context_builder import ContextBuilder
@@ -41,6 +44,7 @@ from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence          # [DB存储] PG 冷存储
 from app.memory.schemas import LastIntent, Message
 from app.memory.working_memory import WorkingMemory
+from app.plugins.service import plugin_service
 from app.security.auth import AuthenticatedUser
 
 # ── 组件初始化 ──
@@ -89,6 +93,90 @@ async def _load_real_user() -> AuthenticatedUser:               # [DB存储] 从
     )
 
 
+def _is_plugin_command(message: str) -> bool:
+    """判断是否为 Plugin 命令格式（/{plugin}:{command} 开头）"""
+    if not message.startswith("/"):
+        return False
+    return ":" in message.split()[0]
+
+
+async def _handle_plugin_command(
+    message: str,
+    session_id: str,
+    memory: WorkingMemory,
+    mock_user: AuthenticatedUser,
+    show_debug: bool,
+) -> str:
+    """Plugin 命令快速路径（对标 chat.py 的 _handle_plugin_command）"""
+    start = time.time()
+    trace_id = str(uuid.uuid4())[:8]
+
+    cmd_part, _, user_context = message[1:].partition(" ")
+    plugin_name, _, command_name = cmd_part.partition(":")
+
+    # 记录用户消息
+    user_msg = Message(role="user", content=message, timestamp=time.time(), message_id=str(uuid.uuid4()))
+    await memory.append_message(session_id, user_msg)
+    chat_persistence.save_message_background(session_id, user_msg)  # [DB存储]
+
+    # 查询 Plugin 命令
+    info = await plugin_service.get_user_command(plugin_name, command_name, mock_user.usernumb)
+    if info is None:
+        reply = f"插件命令 `/{plugin_name}:{command_name}` 不存在或无权访问。"
+        print(f"\033[93m  Plugin 命令未找到\033[0m")
+    else:
+        command_md = plugin_service.read_command_content(info)
+        plugin_skills = plugin_service.scan_plugin_skills(info)
+
+        conv_history = await memory.get_history(session_id)
+        history_messages = [
+            {"role": m.role, "content": m.content}
+            for m in conv_history.messages[-10:]
+            if m.role in ("user", "assistant")
+        ]
+
+        plugin_ctx = PluginCommandContext(
+            plugin_name=plugin_name,
+            command_name=command_name,
+            command_md_content=command_md,
+            plugin_skills=plugin_skills,
+        )
+        plugin_token = set_plugin_context(plugin_ctx)
+        uid_token = set_user_id(mock_user.usernumb)
+
+        try:
+            intent_result = IntentResult(
+                route="deep_l3",
+                complexity="complex",
+                confidence=1.0,
+                intent=IntentDetail(
+                    primary="plugin_command",
+                    sub_intent=f"{plugin_name}:{command_name}",
+                    user_goal=f"执行 Plugin 命令 /{plugin_name}:{command_name}",
+                ),
+                raw_input=user_context or f"执行 {plugin_name}:{command_name}",
+                session_id=session_id,
+                trace_id=trace_id,
+                history_messages=history_messages,
+            )
+            exec_result = await execution_router.execute(intent_result=intent_result, session_id=session_id)
+            reply = exec_result.reply
+        finally:
+            reset_user_id(uid_token)
+            reset_plugin_context(plugin_token)
+
+        if show_debug:
+            duration = int((time.time() - start) * 1000)
+            print(f"\033[90m  ── Plugin Fast Path | /{plugin_name}:{command_name} | {duration}ms ──\033[0m")
+
+    assistant_msg = Message(role="assistant", content=reply, timestamp=time.time(), message_id=str(uuid.uuid4()))
+    await memory.append_message(session_id, assistant_msg)
+    await memory.increment_turn(session_id)
+    chat_persistence.save_message_background(session_id, assistant_msg)  # [DB存储]
+
+    return reply
+
+
 async def chat_once(
     message: str,
     session_id: str,
@@ -97,6 +185,10 @@ async def chat_once(
     show_debug: bool = True,
 ) -> str:
     """执行一轮完整对话，返回回复文本"""
+    # Plugin 命令快速路径（绕过意图分析）
+    if _is_plugin_command(message):
+        return await _handle_plugin_command(message, session_id, memory, mock_user, show_debug)
+
     start = time.time()
     trace_id = str(uuid.uuid4())[:8]
 

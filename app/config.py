@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     PROMPT_SEARCH_THRESHOLD: float = 0.5  # Milvus 向量检索相似度阈值
     PROMPT_SEARCH_TOP_K: int = 3  # 检索返回 top-K 条结果
 
+    # ── Sandbox Service（沙箱代码执行） ──
+    SANDBOX_SERVICE_URL: str = "http://localhost:8020"  # sandbox-service HTTP 地址
+    SANDBOX_HOST_VOLUME: str = "/Users/zoushuangdian/docker/volumes/sunny_agent"  # 宿主机挂载根目录
+    SANDBOX_BASH_TIMEOUT: int = 30  # bash_tool 单次执行超时（秒）
+
     # ── 工具注册中心 ──
     DEFAULT_TOOL_TIMEOUT_MS: int = 60_000  # 工具默认超时（毫秒），BaseTool 引用此值
 
