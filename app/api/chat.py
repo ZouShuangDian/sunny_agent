@@ -17,6 +17,7 @@ Week 7 新增：
 - reasoning_trace 独立传入 PG（W6）
 """
 
+import asyncio
 import json
 import time
 import uuid
@@ -43,7 +44,7 @@ from app.intent.intent_engine import IntentEngine
 from app.intent.output_assembler import OutputAssembler
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence
-from app.memory.schemas import LastIntent, Message
+from app.memory.schemas import L3Step, LastIntent, Message
 from app.memory.working_memory import WorkingMemory
 from app.observability.context import get_trace_id
 from app.validator.output_validator import OutputValidator
@@ -95,6 +96,80 @@ class ChatResponse(BaseModel):
     intent_result: IntentResult | None = None  # 结构化结果（调试用）
     needs_clarify: bool = False
     clarify_question: str | None = None
+
+
+# ── L3 Context 压缩辅助函数 ──
+
+async def _prune_l3_steps(session_id: str) -> None:
+    """
+    Level 1 DB 剪枝（task 6.1）：
+    从 l3_steps 尾部累加 token 估算，超出 PRUNE_PROTECT_TOKENS 的步骤标记为 compacted=True。
+    发后即忘，失败不影响主流程。
+    """
+    try:
+        steps = await chat_persistence.load_l3_steps(session_id)
+        if not steps:
+            return
+
+        prune_protect = settings.PRUNE_PROTECT_TOKENS
+        accumulated = 0
+        to_compact: list = []
+
+        for step in reversed(steps):
+            if step.compacted:
+                # 已压缩步骤按占位符长度计算（约 10 token）
+                accumulated += 10
+                continue
+            token_est = len(step.content) // 2
+            if accumulated + token_est <= prune_protect:
+                accumulated += token_est
+            else:
+                to_compact.append(step.id)
+
+        if to_compact:
+            await chat_persistence.mark_steps_compacted(to_compact)
+            log.debug(
+                "L3 DB 剪枝完成",
+                session_id=session_id,
+                compacted_count=len(to_compact),
+            )
+    except Exception as e:
+        log.warning("L3 DB 剪枝失败", session_id=session_id, error=str(e))
+
+
+def _schedule_l3_post_processing(
+    session_id: str,
+    message_id: str,
+    exec_result: "ExecutionResult",
+) -> None:
+    """
+    L3 执行完成后的异步后处理（task 4.3 + 6.2）：
+    1. 保存 l3_steps 到 PG（write-behind）
+    2. 触发 Level 1 DB 剪枝（write-behind）
+    调用方确保 exec_result.l3_steps 不为空。
+    """
+    if not exec_result.l3_steps:
+        return
+    l3_step_objs = [L3Step(**s) for s in exec_result.l3_steps]
+    chat_persistence.save_l3_steps_background(session_id, message_id, l3_step_objs)
+    # Level 1 DB 剪枝（发后即忘）
+    asyncio.create_task(_prune_l3_steps(session_id))
+
+
+def _save_compaction_genesis_block(session_id: str, summary_content: str) -> None:
+    """
+    Level 2 摘要生成后，将摘要写入 PG 作为 genesis block（task 7.4）。
+    存为 role=assistant, is_compaction=True 的消息。
+    """
+    genesis_msg = Message(
+        role="assistant",
+        content=summary_content,
+        timestamp=time.time(),
+        message_id=str(uuid.uuid4()),
+        is_compaction=True,
+    )
+    chat_persistence.save_message_background(session_id, genesis_msg)
+    log.info("Level 2 genesis block 已写入 PG", session_id=session_id)
 
 
 # ── Plugin 命令处理（快速路径，绕过意图分析直接进 L3）──
@@ -239,6 +314,13 @@ async def _handle_plugin_command(
     if settings.CHAT_PERSIST_ENABLED:
         trace_data = exec_result.reasoning_trace if exec_result and exec_result.reasoning_trace else None
         chat_persistence.save_message_background(session_id, assistant_msg, reasoning_trace=trace_data)
+        # L3 中间步骤持久化 + Level 1 DB 剪枝（task 4.3 + 6.2）
+        if exec_result and exec_result.l3_steps:
+            _schedule_l3_post_processing(session_id, assistant_msg.message_id, exec_result)
+        # Level 2 genesis block 持久化（task 7.4）
+        compaction_summary = execution_router.l3.last_compaction_summary
+        if compaction_summary:
+            _save_compaction_genesis_block(session_id, compaction_summary)
 
     # 10. 审计日志
     duration_ms = int((time.time() - start_time) * 1000)
@@ -371,6 +453,18 @@ async def _handle_plugin_command_stream(
     await memory.increment_turn(session_id)
     if settings.CHAT_PERSIST_ENABLED:
         chat_persistence.save_message_background(session_id, assistant_msg)
+        # L3 中间步骤持久化 + Level 1 DB 剪枝（与非流式 plugin 路径对称，task 4.3 + 6.2）
+        l3_steps_data = execution_router.l3.last_l3_steps
+        if l3_steps_data:
+            l3_step_objs = [L3Step(**s) for s in l3_steps_data]
+            chat_persistence.save_l3_steps_background(
+                session_id, assistant_msg.message_id, l3_step_objs
+            )
+            asyncio.create_task(_prune_l3_steps(session_id))
+        # Level 2 genesis block 持久化（task 7.4）
+        compaction_summary = execution_router.l3.last_compaction_summary
+        if compaction_summary:
+            _save_compaction_genesis_block(session_id, compaction_summary)
 
     duration_ms = int((time.time() - start_time) * 1000)
     audit_logger.log_background(
@@ -592,6 +686,14 @@ async def chat(
         chat_persistence.save_message_background(
             session_id, assistant_msg, reasoning_trace=trace_data,
         )
+        # L3 中间步骤持久化 + Level 1 DB 剪枝（task 4.3 + 6.2）
+        if exec_result and exec_result.l3_steps and final_result.route == "deep_l3":
+            _schedule_l3_post_processing(session_id, assistant_msg.message_id, exec_result)
+        # Level 2 genesis block 持久化（task 7.4）
+        if final_result.route == "deep_l3":
+            compaction_summary = execution_router.l3.last_compaction_summary
+            if compaction_summary:
+                _save_compaction_genesis_block(session_id, compaction_summary)
 
     # 5. 审计日志
     duration_ms = int((time.time() - start_time) * 1000)
@@ -740,6 +842,19 @@ async def chat_stream(
             # 持久化
             if settings.CHAT_PERSIST_ENABLED:
                 chat_persistence.save_message_background(session_id, assistant_msg)
+                # L3 中间步骤持久化 + Level 1 DB 剪枝（与非流式路径对称，task 4.3 + 6.2）
+                if final_result.route == "deep_l3":
+                    l3_steps_data = execution_router.l3.last_l3_steps
+                    if l3_steps_data:
+                        l3_step_objs = [L3Step(**s) for s in l3_steps_data]
+                        chat_persistence.save_l3_steps_background(
+                            session_id, assistant_msg.message_id, l3_step_objs
+                        )
+                        asyncio.create_task(_prune_l3_steps(session_id))
+                    # Level 2 genesis block 持久化（task 7.4）
+                    compaction_summary = execution_router.l3.last_compaction_summary
+                    if compaction_summary:
+                        _save_compaction_genesis_block(session_id, compaction_summary)
 
             # 6. 审计日志
             duration_ms = int((time.time() - start_time) * 1000)

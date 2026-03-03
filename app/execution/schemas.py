@@ -27,3 +27,4 @@ class ExecutionResult(BaseModel):
     token_usage: dict | None = None             # token 消耗明细
     is_degraded: bool = False                   # 是否触发了降级
     degrade_reason: str | None = None           # 降级原因
+    l3_steps: list[dict] | None = None          # L3 中间步骤原始消息（用于持久化到 l3_steps 表）

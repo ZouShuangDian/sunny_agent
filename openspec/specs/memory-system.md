@@ -71,6 +71,18 @@ class Message(BaseModel):
     intent_primary: str | None
     route: str | None
     tool_calls: list[ToolCall] | None
+    is_compaction: bool = False  # Level 2 摘要 genesis block 标记
+```
+
+**L3Step**
+```python
+class L3Step(BaseModel):
+    step_index: int
+    role: str           # 'assistant' | 'tool'
+    content: str
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    compacted: bool = False
 ```
 
 **ToolCall**
@@ -165,7 +177,32 @@ tool_calls JSONB,        -- list[ToolCall] JSON
 reasoning_trace JSONB,   -- L3 推理轨迹（仅 assistant 消息）
 intent_primary VARCHAR(100),
 route VARCHAR(50),
+is_compaction BOOLEAN DEFAULT FALSE,  -- Level 2 摘要 genesis block 标记
 created_at TIMESTAMPTZ
+```
+
+**l3_steps**（L3 中间步骤持久化表）
+```sql
+id UUID PRIMARY KEY,
+session_id VARCHAR(64),   -- 会话 ID，索引：(session_id, created_at), (session_id, compacted)
+message_id VARCHAR(64),   -- 关联的 assistant 最终消息
+step_index INTEGER,       -- 步骤序号（0-based）
+role VARCHAR(20),         -- 'assistant' | 'tool'
+content TEXT,             -- 消息内容（tool 消息的 result / assistant 的 tool_calls JSON）
+tool_name VARCHAR(100),   -- tool 消息专用
+tool_call_id VARCHAR(100),-- tool 消息专用
+compacted BOOLEAN DEFAULT FALSE,  -- Level 1 剪枝标记（原始内容保留，发给 LLM 时替换为占位符）
+created_at TIMESTAMPTZ
+```
+
+### load_history() 加载策略（compaction 感知）
+
+```python
+# 倒序扫描 chat_messages，遇到 is_compaction=True 停止
+# 只返回 compaction 节点及其之后的消息（genesis block 为历史起点）
+# 同时加载对应时间范围内的 l3_steps，还原为 LLM messages 格式
+# 无 compaction 节点 → 兼容旧逻辑（完整加载）
+# 无 l3_steps 记录（老会话） → 降级为 user/assistant 文本 + [-10:] 模式
 ```
 
 ---

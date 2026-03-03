@@ -107,3 +107,56 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
+
+    # compaction 标记（Level 2 摘要 genesis block）
+    is_compaction: Mapped[bool] = mapped_column(
+        default=False, server_default="false",
+        comment="是否为 Level 2 摘要节点，加载历史时遇到此标记即停止往前读取",
+    )
+
+
+class L3Step(Base):
+    """
+    L3 ReAct 中间步骤记录。
+
+    每次 L3 执行产生 N 个步骤（assistant tool_calls + tool results），
+    全部写入此表，支持：
+    - Level 1 剪枝：按 token 估算标记旧步骤为 compacted
+    - 跨轮 context 还原：下轮执行时加载上轮步骤
+    """
+
+    __tablename__ = "l3_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid7
+    )
+    session_id: Mapped[str] = mapped_column(
+        String(64), index=True, comment="所属会话 ID"
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+        comment="关联的 assistant 最终消息 ID（写入后回填）",
+    )
+    step_index: Mapped[int] = mapped_column(
+        comment="步骤序号（0-based，同一 message_id 内）"
+    )
+    role: Mapped[str] = mapped_column(
+        String(20), comment="角色: assistant | tool"
+    )
+    content: Mapped[str] = mapped_column(
+        Text, server_default="", comment="消息内容"
+    )
+    tool_name: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, comment="工具名称（tool 消息专用）"
+    )
+    tool_call_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True,
+        comment="工具调用 ID（tool 消息专用，关联 assistant tool_calls）",
+    )
+    compacted: Mapped[bool] = mapped_column(
+        default=False, server_default="false",
+        comment="Level 1 剪枝标记：True 表示内容已被替换为占位符",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )

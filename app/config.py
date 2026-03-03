@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     L3_TIMEOUT_SECONDS: float = 300.0  # L3 整体超时（秒）
     L3_MAX_LLM_CALLS: int = 50          # LLM 调用次数上限
 
+    # ── Context 压缩（上下文窗口管理） ──
+    MODEL_CONTEXT_LIMIT: int = 98_304        # 模型上下文 token 上限（实测精确值）
+    CONTEXT_PRUNE_TRIGGER: int = 73_728      # Level 1 剪枝触发阈值（75% of 98,304）
+    CONTEXT_SUMMARIZE_TRIGGER: int = 88_473  # Level 2 摘要触发阈值（90% of 98,304）
+    PRUNE_PROTECT_TOKENS: int = 20_000       # 保护区 token 数（最近步骤不被剪枝）
+    COMPRESS_MIN_SAVING: int = 10_000        # Level 2 摘要后至少需节省的 token 数
+    COMPACTION_MAX_TOKENS: int = 2_000       # 摘要生成 max_tokens
+
     # ── 冷存储（聊天记录持久化） ──
     CHAT_PERSIST_ENABLED: bool = True       # 是否启用 PG 冷存储
     CHAT_PERSIST_WRITE_BEHIND: bool = True  # write-behind 异步写入（False 则同步）
