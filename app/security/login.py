@@ -18,7 +18,7 @@ from app.cache.redis_client import RedisKeys, get_redis
 from app.config import get_settings
 from app.db.engine import get_db
 from app.db.models.user import Role, User
-from app.api.response import ok
+from app.api.response import ApiResponse, ok
 from app.security.auth import (
     AuthenticatedUser,
     bearer_scheme,
@@ -61,7 +61,7 @@ class RefreshRequest(BaseModel):
 
 # ── 接口 ──
 
-@router.post("/login")
+@router.post("/login", response_model=ApiResponse[TokenResponse])
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     """用户登录：校验密码，签发 JWT"""
     result = await db.execute(select(User).where(User.usernumb == body.usernumb))
@@ -90,7 +90,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     return ok(data=TokenResponse(access_token=access_token, refresh_token=refresh_token))
 
 
-@router.post("/refresh")
+@router.post("/refresh", response_model=ApiResponse[TokenResponse])
 async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     """刷新 Token：用 refresh_token 换取新的 access_token"""
     try:
@@ -125,7 +125,7 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     return ok(data=TokenResponse(access_token=access_token, refresh_token=refresh_token))
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=ApiResponse)
 async def logout(
     user: AuthenticatedUser = Depends(get_current_user),
     credentials=Depends(bearer_scheme),

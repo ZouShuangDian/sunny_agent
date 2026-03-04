@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api.response import ok
+from app.api.response import ApiResponse, ok
 from app.config import get_settings
 from app.db.engine import async_session
 from app.plugins.service import _parse_frontmatter, plugin_service
@@ -154,7 +154,7 @@ def _validate_commands(commands_dir: Path) -> list[dict]:
 
 # ── POST /api/plugins/upload ──────────────────────────────────
 
-@router.post("/upload")
+@router.post("/upload", response_model=ApiResponse)
 async def upload_plugin(
     file: UploadFile,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -325,7 +325,7 @@ async def upload_plugin(
 
 # ── GET /api/plugins/list ─────────────────────────────────────
 
-@router.get("/list")
+@router.get("/list", response_model=ApiResponse)
 async def list_plugins(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
@@ -336,7 +336,7 @@ async def list_plugins(
 
 # ── DELETE /api/plugins/{plugin_name} ────────────────────────
 
-@router.delete("/{plugin_name}")
+@router.delete("/{plugin_name}", response_model=ApiResponse)
 async def delete_plugin(
     plugin_name: str,
     user: AuthenticatedUser = Depends(get_current_user),
