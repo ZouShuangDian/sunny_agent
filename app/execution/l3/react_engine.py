@@ -9,9 +9,9 @@ Todo 三层机制（opencode 对标）：
 - Layer 2（感知层）：todo_write / todo_read 工具每次返回完整快照（工具层实现）
 - Layer 3（干预层）：_inject_todo_reminder() 在每次 Think 前动态注入最新 todo 状态
 
-Context 压缩（双层漏斗）：
-- Level 1（内存级剪枝）：每步无条件剪枝 + prompt_tokens 超阈值触发额外剪枝
-- Level 2（摘要截断）：prompt_tokens 接近上限时调用 LLM 生成摘要，重建 messages 列表
+Context 压缩：
+- Level 1（内存级剪枝）：每步 Act 后无条件剪枝（token 估算边界）
+- Level 2（摘要截断）：剩余空间 < COMPACTION_BUFFER 时触发 LLM 摘要，重建 messages 列表
 """
 
 import json
@@ -92,10 +92,6 @@ class L3ReActEngine:
         self.config = config or L3Config.from_settings()
         self.thinker = Thinker(llm)
         self.actor = Actor(tool_registry)
-        # Level 2 摘要内容暂存（供 chat.py 回调时持久化为 genesis block）
-        self.last_compaction_summary: str | None = None
-        # 流式执行收集的 l3_steps（供 chat_stream 回调时持久化，对称非流式路径）
-        self.last_l3_steps: list[dict] | None = None
 
     async def execute(
         self,
@@ -114,7 +110,6 @@ class L3ReActEngine:
         """
         # ① 设置 session_id ContextVar（Todo 三层机制 Layer 2/3 依赖此值）
         sid_token = set_session_id(session_id)
-        self.last_compaction_summary = None
         try:
             observer = Observer(self.config)
             observer.start()
@@ -125,10 +120,12 @@ class L3ReActEngine:
             # 组装初始 messages
             messages = self._build_initial_messages(intent_result)
 
-            # 获取 L3 可用工具集（skill_call / todo_write / todo_read 均在此）
-            tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+            # 获取全量工具集（统一 L3 后不再按 tier 过滤）
+            tool_schemas = self.tool_registry.get_all_schemas()
 
             think_result: ThinkResult | None = None
+            last_context_usage: dict | None = None
+            last_compaction_summary: str | None = None  # 局部变量，避免实例级竞态
 
             # 收集 L3 中间步骤消息（用于持久化到 l3_steps 表）
             collected_steps: list[dict] = []
@@ -138,26 +135,35 @@ class L3ReActEngine:
                 should_stop, reason = observer.should_stop()
                 if should_stop:
                     return self._build_result(
-                        think_result, observer, collected_steps, degrade_reason=reason
+                        think_result, observer, collected_steps,
+                        degrade_reason=reason, context_usage=last_context_usage,
+                        compaction_summary=last_compaction_summary,
                     )
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
                 messages = await self._inject_todo_reminder(messages, user_goal)
 
                 # ── Think：LLM 决策 ──
-                # 最后一步不带 tools，强制总结（与 L1 一致）
+                # 最后一步不带 tools，强制总结
                 use_tools = tool_schemas if step < self.config.max_iterations - 1 else None
                 think_result = await self.thinker.think(messages, use_tools)
                 observer.on_think(step, think_result)
 
-                # ── Level 1 检查：prompt_tokens 超阈值时额外剪枝 ──
+                # ── 上下文用量计算 + context_usage 推送 ──
                 prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
-                if prompt_tokens > settings.CONTEXT_PRUNE_TRIGGER:
-                    messages = self._compress_stale_tool_results(messages)
+                remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
+                last_context_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "remaining": remaining,
+                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
+                    "limit": settings.MODEL_CONTEXT_LIMIT,
+                }
 
-                # ── Level 2 摘要截断 ──
-                if prompt_tokens > settings.CONTEXT_SUMMARIZE_TRIGGER:
-                    messages = await self._compact_messages(messages)
+                # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
+                if remaining < settings.COMPACTION_BUFFER:
+                    messages, summary = await self._compact_messages(messages)
+                    if summary:
+                        last_compaction_summary = summary
 
                 # ── 任务完成 ──
                 if think_result.is_done:
@@ -175,7 +181,11 @@ class L3ReActEngine:
                 messages.extend(act_result.messages)
                 messages = self._compress_stale_tool_results(messages)
 
-            return self._build_result(think_result, observer, collected_steps)
+            return self._build_result(
+                think_result, observer, collected_steps,
+                context_usage=last_context_usage,
+                compaction_summary=last_compaction_summary,
+            )
         finally:
             # 精确还原 session_id，即使异常也安全
             reset_session_id(sid_token)
@@ -200,10 +210,9 @@ class L3ReActEngine:
         """
         # 设置 session_id ContextVar（与 execute() 保持一致）
         sid_token = set_session_id(session_id)
-        self.last_compaction_summary = None
-        self.last_l3_steps = None
-        # 收集 L3 中间步骤消息（与 execute() 对称，在 finally 中统一持久化）
+        # 收集 L3 中间步骤消息（通过 finish 事件传递给 chat.py）
         collected_steps: list[dict] = []
+        last_compaction_summary: str | None = None  # 局部变量，避免实例级竞态
         try:
             observer = Observer(self.config)
             observer.start()
@@ -212,7 +221,7 @@ class L3ReActEngine:
             user_goal: str | None = intent_result.intent.user_goal or None
 
             messages = self._build_initial_messages(intent_result)
-            tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+            tool_schemas = self.tool_registry.get_all_schemas()
 
             for step in range(self.config.max_iterations):
                 # ── 熔断检查 ──
@@ -220,12 +229,9 @@ class L3ReActEngine:
                 if should_stop:
                     degrade_result = self._build_result(None, observer, [], degrade_reason=reason)
                     yield {"event": "delta", "data": degrade_result.reply}
-                    yield {"event": "finish", "data": {
-                        "iterations": observer.trace.step_count,
-                        "llm_calls": observer.budget.llm_call_count,
-                        "is_degraded": True,
-                        "degrade_reason": reason,
-                    }}
+                    yield {"event": "finish", "data": self._build_finish_data(
+                        observer, collected_steps, last_compaction_summary, is_degraded=True,
+                    )}
                     return
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
@@ -243,23 +249,30 @@ class L3ReActEngine:
                         "content": think_result.thought,
                     }}
 
-                # ── Level 1 检查 ──
+                # ── 上下文用量计算 + context_usage 推送 ──
                 prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
-                if prompt_tokens > settings.CONTEXT_PRUNE_TRIGGER:
-                    messages = self._compress_stale_tool_results(messages)
+                remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
+                context_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "remaining": remaining,
+                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
+                    "limit": settings.MODEL_CONTEXT_LIMIT,
+                }
+                yield {"event": "context_usage", "data": context_usage}
 
-                # ── Level 2 摘要截断 ──
-                if prompt_tokens > settings.CONTEXT_SUMMARIZE_TRIGGER:
-                    messages = await self._compact_messages(messages)
+                # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
+                if remaining < settings.COMPACTION_BUFFER:
+                    messages, summary = await self._compact_messages(messages)
+                    if summary:
+                        last_compaction_summary = summary
 
                 # ── 任务完成 → 最终回答流式输出 ──
                 if think_result.is_done:
                     if think_result.thought:
                         yield {"event": "delta", "data": think_result.thought}
-                    yield {"event": "finish", "data": {
-                        "iterations": observer.trace.step_count,
-                        "llm_calls": observer.budget.llm_call_count,
-                    }}
+                    yield {"event": "finish", "data": self._build_finish_data(
+                        observer, collected_steps, last_compaction_summary,
+                    )}
                     return
 
                 # ── Act：执行工具（含 skill_call / todo_write / todo_read 等）──
@@ -289,13 +302,10 @@ class L3ReActEngine:
             # 达到 max_iterations 仍未完成 → 最后一步的 thought 即回答
             if think_result and think_result.thought:
                 yield {"event": "delta", "data": think_result.thought}
-            yield {"event": "finish", "data": {
-                "iterations": observer.trace.step_count,
-                "llm_calls": observer.budget.llm_call_count,
-            }}
+            yield {"event": "finish", "data": self._build_finish_data(
+                observer, collected_steps, last_compaction_summary, is_degraded=True,
+            )}
         finally:
-            # 所有退出路径（正常/熔断/异常）统一在此存储 l3_steps，供 chat_stream 回调持久化
-            self.last_l3_steps = self._convert_steps(collected_steps)
             reset_session_id(sid_token)
 
     async def execute_raw(self, messages: list[dict]) -> ExecutionResult:
@@ -313,7 +323,7 @@ class L3ReActEngine:
         observer = Observer(self.config)
         observer.start()
 
-        tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+        tool_schemas = self.tool_registry.get_all_schemas()
         think_result: ThinkResult | None = None
 
         for step in range(self.config.max_iterations):
@@ -461,7 +471,7 @@ class L3ReActEngine:
                     return tc.get("function", {}).get("name")
         return None
 
-    async def _compact_messages(self, messages: list[dict]) -> list[dict]:
+    async def _compact_messages(self, messages: list[dict]) -> tuple[list[dict], str | None]:
         """
         Level 2 摘要截断（task 7.1）：生成摘要并重建 messages 列表。
 
@@ -470,12 +480,12 @@ class L3ReActEngine:
         2. 提取保护区外的可压缩区内容
         3. 调用 LLM 生成结构化摘要（max_tokens=COMPACTION_MAX_TOKENS）
         4. 重建 messages：[system] → [user: 摘要] → [保护区消息]
-        5. 暂存摘要内容到 self.last_compaction_summary，供 chat.py 持久化为 genesis block
 
-        失败时降级：记录 warning，返回原 messages（接受超限风险）。
+        返回值：(重建后的 messages, 摘要内容)。摘要内容供调用方传递给 chat.py 持久化为 genesis block。
+        失败时降级：记录 warning，返回 (原 messages, None)。
         """
         if not messages:
-            return messages
+            return messages, None
 
         system_msg = messages[0] if messages[0].get("role") == "system" else None
         non_system = messages[1:] if system_msg else messages
@@ -499,7 +509,7 @@ class L3ReActEngine:
         compressible = non_system[: len(non_system) - len(protected)]
         if not compressible:
             log.warning("Level 2 摘要：无可压缩消息，跳过")
-            return messages
+            return messages, None
 
         # 将可压缩区拼接为对话文本，供 LLM 摘要
         history_text = "\n\n".join(
@@ -520,10 +530,7 @@ class L3ReActEngine:
                 raise ValueError("摘要内容为空")
         except Exception as e:
             log.warning("Level 2 摘要生成失败，跳过压缩", error=str(e))
-            return messages
-
-        # 暂存摘要内容，供 chat.py 在执行完成后持久化为 genesis block
-        self.last_compaction_summary = summary_content
+            return messages, None
 
         # 摘要注入 LLM 时使用 role=user（避免连续 assistant 消息违反 API 格式）
         summary_inject = (
@@ -548,7 +555,7 @@ class L3ReActEngine:
             summary_tokens=self._estimate_tokens(summary_content),
         )
 
-        return rebuilt
+        return rebuilt, summary_content
 
     def _build_initial_messages(self, intent_result: IntentResult) -> list[dict]:
         """
@@ -587,15 +594,15 @@ class L3ReActEngine:
     def _select_history_by_token(self, history_messages: list[dict]) -> list[dict]:
         """
         从 history_messages 尾部往前按 token 估算累积，
-        超出 PRUNE_PROTECT_TOKENS 的旧消息不注入（task 8.3）。
+        超出 HISTORY_TOKEN_BUDGET 的旧消息不注入。
         """
-        prune_protect = settings.PRUNE_PROTECT_TOKENS
+        budget = settings.HISTORY_TOKEN_BUDGET
         selected: list[dict] = []
         accumulated = 0
         for msg in reversed(history_messages):
             content = msg.get("content") or ""
             token_est = self._estimate_tokens(content)
-            if accumulated + token_est <= prune_protect:
+            if accumulated + token_est <= budget:
                 accumulated += token_est
                 selected.insert(0, msg)
             else:
@@ -608,6 +615,8 @@ class L3ReActEngine:
         observer: Observer,
         collected_steps: list[dict],
         degrade_reason: str | None = None,
+        context_usage: dict | None = None,
+        compaction_summary: str | None = None,
     ) -> ExecutionResult:
         """从最终的 ThinkResult 和 Observer 构建 ExecutionResult"""
         elapsed = int(observer.elapsed_seconds * 1000)
@@ -643,6 +652,8 @@ class L3ReActEngine:
                 is_degraded=True,
                 degrade_reason=degrade_reason,
                 l3_steps=self._convert_steps(collected_steps),
+                context_usage=context_usage,
+                compaction_summary=compaction_summary,
             )
 
         return ExecutionResult(
@@ -654,7 +665,27 @@ class L3ReActEngine:
             iterations=observer.trace.step_count,
             token_usage=observer.budget.to_dict(),
             l3_steps=self._convert_steps(collected_steps),
+            context_usage=context_usage,
+            compaction_summary=compaction_summary,
         )
+
+    @staticmethod
+    def _build_finish_data(
+        observer: Observer,
+        collected_steps: list[dict],
+        last_compaction_summary: str | None,
+        *,
+        is_degraded: bool = False,
+    ) -> dict:
+        """统一构建 finish 事件 data，确保三处 yield 点数据一致。"""
+        return {
+            "iterations": observer.trace.step_count,
+            "llm_calls": observer.budget.llm_call_count,
+            "is_degraded": is_degraded,
+            "l3_steps": L3ReActEngine._convert_steps(collected_steps),
+            "compaction_summary": last_compaction_summary,
+            "token_usage": observer.budget.to_dict(),
+        }
 
     @staticmethod
     def _convert_steps(raw_steps: list[dict]) -> list[dict] | None:

@@ -24,7 +24,6 @@ dependencies = [
     "litellm (>=1.40,<2.0) ; python_version >= \"3.11\" and python_version < \"4.0\"",
     "json-repair (>=0.25,<1.0) ; python_version >= \"3.11\" and python_version < \"4.0\"",
     "prometheus-client (>=0.24.1,<0.25.0)",
-    "pymilvus (>=2.6.9,<3.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "prompt-toolkit (>=3.0.52,<4.0.0)"
 ]
@@ -37,6 +36,6 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [[tool.poetry.source]]
-name = "taobao"
-url = "https://registry.npmmirror.com"
-priority = "explicit"
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+priority = "primary"

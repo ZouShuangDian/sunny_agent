@@ -2,7 +2,7 @@
 M04-4 降级处理器：校验失败时生成安全的降级结果
 
 降级结果特征：
-- route = standard_l1（最安全的路由，L1 标准执行）
+- route = deep_l3（统一执行路由）
 - complexity = simple
 - intent = general_qa
 - confidence = 0.0（标记为不可靠）
@@ -22,7 +22,7 @@ class FallbackHandler:
     ) -> IntentResult:
         """生成降级结果"""
         return IntentResult(
-            route="standard_l1",
+            route="deep_l3",
             complexity="simple",
             confidence=0.0,
             intent=IntentDetail(

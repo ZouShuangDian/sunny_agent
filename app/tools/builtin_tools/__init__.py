@@ -27,7 +27,7 @@ def create_builtin_registry() -> ToolRegistry:
     registry.register(WebSearchTool(api_key=settings.BOCHA_API_KEY))
     registry.register(WebFetchTool())
 
-    # Todo 工具（tier=L3，不暴露给 L1 FastTrack）
+    # Todo 工具（tier=L3）
     registry.register(TodoWriteTool())
     registry.register(TodoReadTool())
 
