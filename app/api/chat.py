@@ -20,6 +20,7 @@ import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from app.api.response import ok
 from app.cache.redis_client import get_redis
 from app.config import get_settings
 from app.db.engine import async_session
@@ -343,7 +344,7 @@ async def _init_session(
 
 # ── POST /chat — 非流式 JSON 响应 ──
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat")
 async def chat(
     body: ChatRequest,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -412,10 +413,10 @@ async def chat(
             },
         )
 
-        return ChatResponse(
+        return ok(data=ChatResponse(
             session_id=session_id, reply=reply_text,
             context_usage=exec_result.context_usage if exec_result else None,
-        )
+        ))
     finally:
         # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
         if plugin_token is not None:

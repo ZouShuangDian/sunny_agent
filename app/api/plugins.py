@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.response import ok
 from app.config import get_settings
 from app.db.engine import async_session
 from app.plugins.service import _parse_frontmatter, plugin_service
@@ -302,15 +303,19 @@ async def upload_plugin(
             command_count=len(commands),
         )
 
-        return {
-            "plugin": plugin_name,
-            "version": plugin_data["version"],
-            "description": plugin_data["description"],
-            "commands": [
-                {"name": c["name"], "description": c["description"]}
-                for c in commands
-            ],
-        }
+        return ok(
+            data={
+                "plugin": plugin_name,
+                "version": plugin_data["version"],
+                "description": plugin_data["description"],
+                "commands": [
+                    {"name": c["name"], "description": c["description"]}
+                    for c in commands
+                ],
+            },
+            message="Plugin 上传成功",
+            status_code=201,
+        )
 
     finally:
         # 始终清理临时目录
@@ -326,7 +331,7 @@ async def list_plugins(
 ):
     """列出当前用户所有 Plugin（含命令数）"""
     plugins = await plugin_service.list_user_plugins(user.usernumb)
-    return {"plugins": plugins, "total": len(plugins)}
+    return ok(data={"plugins": plugins, "total": len(plugins)})
 
 
 # ── DELETE /api/plugins/{plugin_name} ────────────────────────
@@ -381,4 +386,4 @@ async def delete_plugin(
         log.warning("Plugin 目录路径越界，跳过文件删除", path=plugin_path)
 
     log.info("Plugin 已删除", plugin_name=plugin_name, usernumb=user.usernumb)
-    return {"deleted": plugin_name}
+    return ok(message=f"Plugin '{plugin_name}' 已删除")
