@@ -8,10 +8,12 @@ from app.db.models.audit import AuditLog
 from app.db.models.chat import ChatSession, ChatMessage, L3Step
 from app.db.models.skill import Skill, UserSkillSetting
 from app.db.models.plugin import Plugin, PluginCommand
+from app.db.models.data_scope import DataScopePolicy
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
     "ChatSession", "ChatMessage", "L3Step",
     "Skill", "UserSkillSetting",
     "Plugin", "PluginCommand",
+    "DataScopePolicy",
 ]
