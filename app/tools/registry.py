@@ -52,14 +52,6 @@ class ToolRegistry:
             if name in self._tools
         ]
 
-    def get_schemas_by_tier(self, tier: str) -> list[dict]:
-        """按层级过滤工具 schema"""
-        return [
-            tool.schema()
-            for tool in self._tools.values()
-            if tier in tool.tier
-        ]
-
     async def execute(self, name: str, arguments: dict) -> str:
         """
         执行工具，返回 JSON 字符串结果。

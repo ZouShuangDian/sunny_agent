@@ -37,35 +37,18 @@ from app.execution.plugin_context import PluginCommandContext, reset_plugin_cont
 from app.execution.router import ExecutionRouter
 from app.execution.user_context import reset_user_id, set_user_id
 from app.guardrails.schemas import IntentDetail, IntentResult
-from app.guardrails.validator import GuardrailsValidator
-from app.intent.clarify_handler import ClarifyHandler
 from app.intent.context_builder import ContextBuilder
-from app.intent.context_strategy import AnalysisStrategy, MinimalStrategy, QueryStrategy
-from app.intent.intent_engine import IntentEngine
-from app.intent.output_assembler import OutputAssembler
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence          # [DB存储] PG 冷存储
-from app.memory.schemas import LastIntent, Message
+from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.plugins.service import plugin_service
 from app.security.auth import AuthenticatedUser
 
 # ── 组件初始化 ──
 llm_client = LLMClient()
-clarify_handler = ClarifyHandler()
-output_assembler = OutputAssembler()
-guardrails = GuardrailsValidator()
 execution_router = ExecutionRouter(llm_client)
 chat_persistence = ChatPersistence(async_session)                # [DB存储] 如不需要写 PG，注释此行
-
-# W4：Context Strategy 无状态单例（与 chat.py 保持一致）
-_context_strategies = {
-    "greeting": MinimalStrategy(),
-    "general_qa": MinimalStrategy(),
-    "writing": MinimalStrategy(),
-    "query": QueryStrategy(),
-    "analysis": AnalysisStrategy(),
-}
 
 
 async def _load_real_user() -> AuthenticatedUser:               # [DB存储] 从 DB 查询真实用户
@@ -110,7 +93,7 @@ async def _handle_plugin_command(
     mock_user: AuthenticatedUser,
     show_debug: bool,
 ) -> str:
-    """Plugin 命令快速路径（对标 chat.py 的 _handle_plugin_command）"""
+    """Plugin 命令快速路径（对标 chat.py 的 _build_plugin_intent）"""
     start = time.time()
     trace_id = str(uuid.uuid4())[:8]
 
@@ -125,18 +108,32 @@ async def _handle_plugin_command(
     # 查询 Plugin 命令
     info = await plugin_service.get_user_command(plugin_name, command_name, mock_user.usernumb)
     if info is None:
-        reply = f"插件命令 `/{plugin_name}:{command_name}` 不存在或无权访问。"
-        print(f"\033[93m  Plugin 命令未找到\033[0m")
+        # Plugin 未找到：构造错误 IntentResult 走 L3，与生产 chat.py 行为对齐
+        print(f"\033[93m  Plugin 命令未找到，走 L3 返回错误提示\033[0m")
+        intent_result = IntentResult(
+            intent=IntentDetail(
+                primary="plugin_command",
+                sub_intent="not_found",
+                user_goal=f"未找到 Plugin 命令 /{plugin_name}:{command_name}",
+            ),
+            raw_input=f"未找到 Plugin 命令 `/{plugin_name}:{command_name}`，请确认 Plugin 已上传且命令名正确。",
+            session_id=session_id,
+            trace_id=trace_id,
+            history_messages=[],
+        )
+        uid_token = set_user_id(mock_user.usernumb)
+        try:
+            exec_result = await execution_router.execute(intent_result=intent_result, session_id=session_id)
+            reply = exec_result.reply
+        finally:
+            reset_user_id(uid_token)
     else:
         command_md = plugin_service.read_command_content(info)
         plugin_skills = plugin_service.scan_plugin_skills(info)
 
-        conv_history = await memory.get_history(session_id)
-        history_messages = [
-            {"role": m.role, "content": m.content}
-            for m in conv_history.messages[-10:]
-            if m.role in ("user", "assistant")
-        ]
+        # 统一使用 to_llm_messages（含 compaction 节点包装）
+        context_builder = ContextBuilder(memory)
+        history_messages = await context_builder.load_history_messages(session_id)
 
         plugin_ctx = PluginCommandContext(
             plugin_name=plugin_name,
@@ -149,9 +146,6 @@ async def _handle_plugin_command(
 
         try:
             intent_result = IntentResult(
-                route="deep_l3",
-                complexity="complex",
-                confidence=1.0,
                 intent=IntentDetail(
                     primary="plugin_command",
                     sub_intent=f"{plugin_name}:{command_name}",
@@ -205,85 +199,37 @@ async def chat_once(
     await memory.append_message(session_id, user_msg)
     chat_persistence.save_message_background(session_id, user_msg)   # [DB存储] 用户消息写 PG
 
-    # 2. 阶段 1：基础上下文（一次 Redis 读取）
-    context_builder = ContextBuilder(memory, strategies=_context_strategies)
-    basic_context = await context_builder.build(
-        user_input=message,
-        user=mock_user,
-        session_id=session_id,
-    )
+    # 2. 加载历史 + 直接构造 IntentResult
+    context_builder = ContextBuilder(memory)
+    history_messages = await context_builder.load_history_messages(session_id)
 
-    # 3. 意图引擎
-    intent_engine = IntentEngine(llm_client)
-    intent_result = await intent_engine.analyze(
-        user_input=message,
-        context=basic_context,
-    )
-
-    # 阶段 2：增量加载扩展上下文（复用 basic_context，零次 Redis 读取）
-    context = await context_builder.enrich(
-        base_context=basic_context,
-        user_input=message,
-        session_id=session_id,
-        intent_hint=intent_result.intent_primary,
-    )
-
-    # 4. 追问检查
-    clarify_result = clarify_handler.check_and_clarify(intent_result)
-
-    # 5. 输出组装
-    assembled = output_assembler.assemble(
-        user_input=message,
-        intent_result=intent_result,
-        context=context,
-        clarify=clarify_result,
-        user=mock_user,
-        session_id=session_id,
-        trace_id=trace_id,
-    )
-
-    # 6. 护栏校验
-    guardrails_output = guardrails.validate(
-        raw_json=intent_result.raw_json,
+    intent_result = IntentResult(
+        intent=IntentDetail(primary="general", user_goal=message),
         raw_input=message,
         session_id=session_id,
         trace_id=trace_id,
-    )
-    final_result = assembled if not guardrails_output.fell_back else guardrails_output.result
-
-    # 7. 保存意图快照
-    await memory.save_last_intent(
-        session_id,
-        LastIntent(
-            primary=final_result.intent.primary,
-            sub_intent=final_result.intent.sub_intent,
-            route=final_result.route,
-            complexity=final_result.complexity,
-            confidence=final_result.confidence,
-            needs_clarify=final_result.needs_clarify,
-            clarify_question=final_result.clarify_question,
-        ),
+        history_messages=history_messages,
     )
 
-    # 8. 执行层
-    exec_result = None
-    if clarify_result.needs_clarify and clarify_result.question:
-        reply_text = clarify_result.question
-    else:
+    # 3. 执行层
+    uid_token = set_user_id(mock_user.usernumb)
+    try:
         exec_result = await execution_router.execute(
-            intent_result=final_result,
+            intent_result=intent_result,
             session_id=session_id,
         )
-        reply_text = exec_result.reply
+    finally:
+        reset_user_id(uid_token)
+    reply_text = exec_result.reply
 
-    # 9. 记录 assistant 消息
+    # 4. 记录 assistant 消息
     assistant_msg = Message(
         role="assistant",
         content=reply_text,
         timestamp=time.time(),
         message_id=str(uuid.uuid4()),
-        intent_primary=final_result.intent.primary,
-        route=final_result.route,
+        intent_primary=intent_result.intent.primary,
+        route=intent_result.route,
         tool_calls=exec_result.tool_calls if exec_result and exec_result.tool_calls else None,
     )
     await memory.append_message(session_id, assistant_msg)
@@ -299,13 +245,8 @@ async def chat_once(
 
     # 调试信息
     if show_debug:
-        print(f"\033[90m  ── route={final_result.route} | intent={final_result.intent.primary} "
-              f"| confidence={final_result.confidence:.2f} | complexity={final_result.complexity} "
+        print(f"\033[90m  ── route={intent_result.route} | intent={intent_result.intent.primary} "
               f"| {duration}ms ──\033[0m")
-        if guardrails_output.fell_back:
-            print(f"\033[93m  ⚠ 护栏降级触发\033[0m")
-        if clarify_result.needs_clarify:
-            print(f"\033[93m  ? 追问模式\033[0m")
         if exec_result and exec_result.iterations > 0:
             print(f"\033[90m  ── L3: {exec_result.iterations} 步 | tokens={exec_result.token_usage} ──\033[0m")
 

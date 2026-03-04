@@ -1,5 +1,5 @@
 """
-/chat 对话接口：串联意图理解 + 护栏校验 + 执行层全链路
+/chat 对话接口：直接构造 IntentResult + 执行层全链路
 
 端点：
 - POST /chat        — 非流式 JSON 响应
@@ -26,19 +26,10 @@ from app.db.engine import async_session
 from app.execution.router import ExecutionRouter
 from app.execution.schemas import ExecutionResult
 from app.guardrails.schemas import IntentDetail, IntentResult
-from app.guardrails.validator import GuardrailsValidator
-from app.intent.clarify_handler import ClarifyHandler, ClarifyResult
 from app.intent.context_builder import ContextBuilder
-from app.intent.context_strategy import (
-    AnalysisStrategy,
-    MinimalStrategy,
-    QueryStrategy,
-)
-from app.intent.intent_engine import IntentEngine
-from app.intent.output_assembler import OutputAssembler
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence
-from app.memory.schemas import L3Step, LastIntent, Message
+from app.memory.schemas import L3Step, Message
 from app.memory.working_memory import WorkingMemory
 from app.observability.context import get_trace_id
 from app.validator.output_validator import OutputValidator
@@ -58,22 +49,10 @@ log = structlog.get_logger()
 settings = get_settings()
 
 # ── 单例组件（无状态，可复用） ──
-clarify_handler = ClarifyHandler()
-output_assembler = OutputAssembler()
-guardrails = GuardrailsValidator()
 llm_client = LLMClient()
 execution_router = ExecutionRouter(llm_client)
 chat_persistence = ChatPersistence(async_session)
 output_validator = OutputValidator(llm_client)
-
-# W4：Context Strategy 无状态单例（应用启动时实例化一次，所有请求共享）
-_context_strategies: dict[str, object] = {
-    "greeting": MinimalStrategy(),
-    "general_qa": MinimalStrategy(),
-    "writing": MinimalStrategy(),
-    "query": QueryStrategy(),
-    "analysis": AnalysisStrategy(),
-}
 
 
 # ── 请求/响应模型 ──
@@ -86,9 +65,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
-    intent_result: IntentResult | None = None  # 结构化结果（调试用）
-    needs_clarify: bool = False
-    clarify_question: str | None = None
     context_usage: dict | None = None  # 上下文用量
 
 
@@ -257,19 +233,12 @@ async def _build_plugin_intent(
     )
     plugin_token = set_plugin_context(plugin_ctx)
 
-    # 加载历史消息
-    conv_history = await memory.get_history(session_id)
-    history_messages = [
-        {"role": m.role, "content": m.content}
-        for m in conv_history.messages[-10:]
-        if m.role in ("user", "assistant")
-    ]
+    # 加载历史消息（统一使用 to_llm_messages，含 compaction 节点包装）
+    context_builder = ContextBuilder(memory)
+    history_messages = await context_builder.load_history_messages(session_id)
 
     raw_input = user_context.strip() if user_context.strip() else f"执行 {plugin_name}:{command_name}"
     intent_result = IntentResult(
-        route="deep_l3",
-        complexity="complex",
-        confidence=1.0,
         intent=IntentDetail(
             primary="plugin_command",
             sub_intent=f"{plugin_name}:{command_name}",
@@ -288,9 +257,6 @@ def _build_plugin_error_result(message: str, session_id: str, trace_id: str) -> 
     cmd_part = message.split()[0][1:]  # 去掉 /
     plugin_name, _, command_name = cmd_part.partition(":")
     return IntentResult(
-        route="deep_l3",
-        complexity="simple",
-        confidence=1.0,
         intent=IntentDetail(
             primary="plugin_command",
             sub_intent="not_found",
@@ -312,88 +278,36 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
-) -> tuple[IntentResult, ClarifyResult, CtxToken | None]:
+) -> tuple[IntentResult, CtxToken | None]:
     """
-    公共意图理解管线，/chat 和 /chat/stream 共享。
-    返回 (final_intent_result, clarify_result, plugin_token)。
+    公共意图管线，/chat 和 /chat/stream 共享。
+    返回 (intent_result, plugin_token)。
 
-    Plugin 命令在此内部处理：跳过 LLM 意图分析，直接构造 synthetic intent。
+    Plugin 命令在此内部处理：跳过意图分析，直接构造 synthetic intent。
+    非 Plugin 路径：加载历史 + 直接构造 IntentResult。
     """
-    # Plugin 命令快速路径：跳过 LLM 意图分析，构造 synthetic intent
+    # Plugin 命令快速路径
     if message.startswith("/") and ":" in message.split()[0]:
         intent_result, plugin_token = await _build_plugin_intent(
             message, user, session_id, memory, trace_id,
         )
         if intent_result is not None:
-            # Plugin 命令不走追问
-            return intent_result, ClarifyResult(needs_clarify=False), plugin_token
-        # Plugin 未找到 → 直接返回错误（不降级到普通意图分析）
-        error_result = _build_plugin_error_result(message, session_id, trace_id)
-        return error_result, ClarifyResult(needs_clarify=False), None
+            return intent_result, plugin_token
+        # Plugin 未找到 → 直接返回错误
+        return _build_plugin_error_result(message, session_id, trace_id), None
 
-    # 正常意图分析流程
-    # 阶段 1：基础上下文（一次 Redis 读取）→ 意图分析
-    context_builder = ContextBuilder(memory, strategies=_context_strategies)
-    basic_context = await context_builder.build(
-        user_input=message,
-        user=user,
-        session_id=session_id,
-    )
+    # 非 Plugin：加载历史 + 直接构造 IntentResult
+    context_builder = ContextBuilder(memory)
+    history_messages = await context_builder.load_history_messages(session_id)
 
-    # 意图引擎（LLM）
-    intent_engine = IntentEngine(llm_client)
-    intent_result = await intent_engine.analyze(
-        user_input=message,
-        context=basic_context,
-    )
-
-    # 阶段 2：增量加载扩展上下文（复用 basic_context，零次 Redis 读取）
-    context = await context_builder.enrich(
-        base_context=basic_context,
-        user_input=message,
-        session_id=session_id,
-        intent_hint=intent_result.intent_primary,
-    )
-
-    # 追问检查
-    clarify_result = clarify_handler.check_and_clarify(intent_result)
-
-    # 输出组装
-    assembled = output_assembler.assemble(
-        user_input=message,
-        intent_result=intent_result,
-        context=context,
-        clarify=clarify_result,
-        user=user,
-        session_id=session_id,
-        trace_id=trace_id,
-    )
-
-    # 护栏校验
-    guardrails_output = guardrails.validate(
-        raw_json=intent_result.raw_json,
+    intent_result = IntentResult(
+        intent=IntentDetail(primary="general", user_goal=message),
         raw_input=message,
         session_id=session_id,
         trace_id=trace_id,
+        history_messages=history_messages,
     )
-
-    final_result = assembled if not guardrails_output.fell_back else guardrails_output.result
-
-    # 保存本轮意图快照（用于连续追问判断）
-    await memory.save_last_intent(
-        session_id,
-        LastIntent(
-            primary=final_result.intent.primary,
-            sub_intent=final_result.intent.sub_intent,
-            route=final_result.route,
-            complexity=final_result.complexity,
-            confidence=final_result.confidence,
-            needs_clarify=final_result.needs_clarify,
-            clarify_question=final_result.clarify_question,
-        ),
-    )
-
-    return final_result, clarify_result, None  # 非 Plugin 路径 plugin_token=None
+    return intent_result, None
 
 
 # ── 公共会话初始化（含 PG 回源） ──
@@ -435,7 +349,7 @@ async def chat(
     user: AuthenticatedUser = Depends(get_current_user),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """主对话入口：意图理解 + 护栏校验 + 执行层"""
+    """主对话入口：直接构造意图 + 执行层"""
     start_time = time.time()
     trace_id = get_trace_id()
     memory = WorkingMemory(redis)
@@ -443,19 +357,12 @@ async def chat(
     await _init_session(session_id, user, memory, body.message)
 
     # 意图管线（Plugin 命令在管线内部处理）
-    final_result, clarify_result, plugin_token = await _run_intent_pipeline(
+    final_result, plugin_token = await _run_intent_pipeline(
         message=body.message, user=user, session_id=session_id,
         memory=memory, redis=redis, trace_id=trace_id,
     )
 
     try:
-        # 追问
-        if clarify_result.needs_clarify and clarify_result.question:
-            return ChatResponse(
-                session_id=session_id, reply=clarify_result.question,
-                needs_clarify=True, clarify_question=clarify_result.question,
-            )
-
         # 执行（统一 L3）
         _uid_token = set_user_id(user.usernumb)
         try:
@@ -498,8 +405,6 @@ async def chat(
             input_text=body.message, duration_ms=duration_ms,
             metadata={
                 "intent": final_result.intent.primary,
-                "confidence": final_result.confidence,
-                "complexity": final_result.complexity,
                 **({"iterations": exec_result.iterations, "is_degraded": exec_result.is_degraded}
                    if exec_result and exec_result.iterations > 0 else {}),
                 **({"token_usage": exec_result.token_usage}
@@ -509,7 +414,6 @@ async def chat(
 
         return ChatResponse(
             session_id=session_id, reply=reply_text,
-            intent_result=final_result,
             context_usage=exec_result.context_usage if exec_result else None,
         )
     finally:
@@ -542,27 +446,13 @@ async def chat_stream(
             session_id = body.session_id or str(uuid.uuid4())
             await _init_session(session_id, user, memory, body.message)
 
-            yield _sse_event("status", {"phase": "understanding", "session_id": session_id})
-
-            # 返回三元组：Plugin 路径返回 plugin_token，非 Plugin 路径 plugin_token=None
-            final_result, clarify_result, plugin_token = await _run_intent_pipeline(
+            # 返回二元组：Plugin 路径返回 plugin_token，非 Plugin 路径 plugin_token=None
+            final_result, plugin_token = await _run_intent_pipeline(
                 message=body.message, user=user, session_id=session_id,
                 memory=memory, redis=redis, trace_id=trace_id,
             )
 
             try:
-                yield _sse_event("status", {
-                    "phase": "intent_done",
-                    "route": final_result.route,
-                    "intent": final_result.intent.primary,
-                })
-
-                # 追问
-                if clarify_result.needs_clarify and clarify_result.question:
-                    yield _sse_event("clarify", {"question": clarify_result.question, "session_id": session_id})
-                    yield _sse_event("done", {"session_id": session_id})
-                    return
-
                 # 执行（统一 L3）
                 yield _sse_event("status", {"phase": "executing"})
                 _uid_token = set_user_id(user.usernumb)
@@ -607,7 +497,6 @@ async def chat_stream(
                     input_text=body.message, duration_ms=duration_ms,
                     metadata={
                         "intent": final_result.intent.primary,
-                        "confidence": final_result.confidence,
                         **({"iterations": finish_meta["iterations"], "is_degraded": finish_meta["is_degraded"]}
                            if "iterations" in finish_meta else {}),
                         **({"token_usage": finish_meta["token_usage"]}

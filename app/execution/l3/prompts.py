@@ -73,8 +73,7 @@ _L3_REACT_TEMPLATE = """\
 ## 当前任务
 
 用户问题：{user_input}
-用户目标：{user_goal}
-当前日期：{today}"""
+{goal_line}当前日期：{today}"""
 
 
 def build_l3_system_prompt(
@@ -91,9 +90,13 @@ def build_l3_system_prompt(
         max_iterations: 最大推理步数（告知 LLM 合理规划步骤）
     """
     today = date.today().strftime("%Y年%m月%d日")
+    # user_goal == user_input 时省略"用户目标"行避免重复
+    goal_line = ""
+    if user_goal and user_goal != user_input:
+        goal_line = f"用户目标：{user_goal}\n"
     return _L3_REACT_TEMPLATE.format(
         user_input=user_input,
-        user_goal=user_goal or "回答用户的问题",
+        goal_line=goal_line,
         today=today,
         max_iterations=max_iterations,
     )
