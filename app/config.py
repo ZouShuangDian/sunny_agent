@@ -46,9 +46,6 @@ class Settings(BaseSettings):
     LLM_API_BASE: str | None = None  # 自定义 API 端点
     LLM_TIMEOUT: int = 60  # LLM 调用超时（秒）
 
-    # ── 码表缓存 ──
-    CODEBOOK_CACHE_TTL: int = 3600  # 码表缓存 TTL（秒），默认 1h
-
     # ── LLM 流式 ──
     LLM_STREAM_TIMEOUT: int = 30  # LLM 流式调用超时（秒）
 

@@ -17,7 +17,6 @@ from sqlalchemy import text
 from app.cache.redis_client import redis_client
 from app.config import get_settings
 from app.db.engine import async_session, engine
-from app.intent.codebook_service import CodebookService
 from app.observability.logging_config import setup_logging
 from app.observability.metrics_middleware import MetricsMiddleware
 from app.observability.request_logger import RequestLoggerMiddleware
@@ -41,16 +40,6 @@ async def lifespan(application: FastAPI):
 
     await redis_client.ping()
     log.info("Redis 连接正常")
-
-    # ── 码表缓存预热：避免启动后缓存击穿 ──
-    try:
-        async with async_session() as db:
-            codebook_svc = CodebookService(redis_client, db)
-            count = await codebook_svc.warm_cache()
-            log.info("码表缓存预热完成", count=count)
-    except Exception as e:
-        # 预热失败不阻止启动，但记录警告
-        log.warning("码表缓存预热失败，将降级为逐条回源", error=str(e), exc_info=True)
 
     yield
 
