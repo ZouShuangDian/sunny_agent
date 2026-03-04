@@ -134,22 +134,22 @@ _BASE_PROMPT = "你是 Agent Sunny，舜宇集团的 AI 智能助手..."
 - **Token Budget**（token_budget.py）：跟踪 LLM 调用次数、token 用量
 - **Trace**（推理轨迹）：记录每步 thought + tool_calls + observations，供输出校验和 PG 存储
 
-### 4.4 Context 压缩（双层漏斗）
+### 4.4 Context 压缩
 
-防止长对话 context 膨胀，实现 OpenCode 对标的双层漏斗（Double-Tier Funnel）：
+防止长对话 context 膨胀，参照 OpenCode 的简洁模型：
 
-**Level 1 内存级剪枝（`_compress_stale_tool_results()`，每步无条件运行）**
+**Level 1 内存级剪枝（`_compress_stale_tool_results()`，每步 Act 后无条件运行）**
 
 基于 token 估算（`len(content) // 2`）的保护区边界：
 - 从 messages 尾部往前累加 tool result 的 token 估算
 - 超出 `PRUNE_PROTECT_TOKENS`（20,000）的 tool result 内容替换为占位符
 - `skill_call` 的 tool result 始终保留（不被替换）
 - 每步 Act 后无条件执行（每步保洁）
-- Think 后 `prompt_tokens > CONTEXT_PRUNE_TRIGGER`（73,728）时额外触发
 
-**Level 2 摘要截断（`_compact_messages()`，接近 context 上限时触发）**
+**Level 2 摘要截断（`_compact_messages()`，上下文剩余空间不足时触发）**
 
-- Think 后 `prompt_tokens > CONTEXT_SUMMARIZE_TRIGGER`（88,473 = 90% of 98,304）时触发
+- Think 后计算 `remaining = MODEL_CONTEXT_LIMIT - prompt_tokens`
+- `remaining < COMPACTION_BUFFER`（20,000）时触发
 - 识别保护区（从尾部累积 PRUNE_PROTECT_TOKENS），提取可压缩区
 - 调用 LLM 生成结构化摘要（max_tokens=2,000）
 - 重建 messages：`[system] → [user: 历史摘要] → [保护区消息]`
@@ -159,7 +159,7 @@ _BASE_PROMPT = "你是 Agent Sunny，舜宇集团的 AI 智能助手..."
 
 | 用途 | 方法 |
 |------|------|
-| 触发判断（Level 1/2） | `think_result.usage["prompt_tokens"]`（服务端精确值） |
+| Level 2 触发判断 | `think_result.usage["prompt_tokens"]`（服务端精确值） |
 | 保护区边界计算 | `len(content) // 2`（字符估算，允许 ±20% 误差） |
 
 ### 4.5 优雅降级（`_build_result(degrade_reason=...)`）
@@ -217,16 +217,23 @@ async def execute_raw(self, messages: list[dict]) -> ExecutionResult
 
 ## 8. 流式执行（execute_stream）
 
-SSE 事件格式：
+SSE 事件格式（含 `context_usage`）：
 ```json
-{"event": "thought",      "data": {"step": 0, "content": "我需要先搜索..."}}
-{"event": "tool_call",    "data": {"step": 0, "name": "web_search", "args": {...}}}
-{"event": "tool_result",  "data": {"step": 0, "name": "web_search", "result": "..."}}
-{"event": "delta",        "data": "最终回答的文本片段"}
-{"event": "finish",       "data": {"iterations": 3, "llm_calls": 5}}
+{"event": "thought",        "data": {"step": 0, "content": "我需要先搜索..."}}
+{"event": "context_usage",  "data": {"prompt_tokens": 52000, "remaining": 46304, "percent": 52.9, "limit": 98304}}
+{"event": "tool_call",      "data": {"step": 0, "name": "web_search", "args": {...}}}
+{"event": "tool_result",    "data": {"step": 0, "name": "web_search", "result": "..."}}
+{"event": "delta",          "data": "最终回答的文本片段"}
+{"event": "finish",         "data": {"iterations": 3, "llm_calls": 5}}
 ```
 
+`context_usage` 事件在每步 Think 后、tool_call 之前推送。
 中间步骤（thought + tool_call + tool_result）非流式推送，最终回答（delta）流式推送。
+
+### 8.1 ExecutionResult 上下文用量
+
+`ExecutionResult` 包含 `context_usage: dict | None` 字段，存储最后一步 Think 的上下文用量快照。
+`ChatResponse` 包含 `context_usage: dict | None` 字段，透传给前端。
 
 ---
 
@@ -238,8 +245,8 @@ SSE 事件格式：
 | `L3_TIMEOUT_SECONDS` | 300.0 | 整体超时（秒） |
 | `L3_MAX_LLM_CALLS` | 50 | LLM 调用次数上限 |
 | `MODEL_CONTEXT_LIMIT` | 98,304 | 模型 context 上限（token，实测精确值） |
-| `CONTEXT_PRUNE_TRIGGER` | 73,728 | Level 1 剪枝触发阈值（75%） |
-| `CONTEXT_SUMMARIZE_TRIGGER` | 88,473 | Level 2 摘要触发阈值（90%） |
+| `COMPACTION_BUFFER` | 20,000 | Level 2 触发阈值（剩余空间低于此值触发摘要） |
 | `PRUNE_PROTECT_TOKENS` | 20,000 | 保护区 token 数（最近步骤不被剪枝） |
+| `HISTORY_TOKEN_BUDGET` | 60,000 | 历史消息加载预算 |
 | `COMPRESS_MIN_SAVING` | 10,000 | Level 2 摘要后至少需节省的 token 数 |
 | `COMPACTION_MAX_TOKENS` | 2,000 | 摘要生成 max_tokens |

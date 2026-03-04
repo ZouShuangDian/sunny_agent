@@ -15,10 +15,7 @@ from typing import Literal
 
 
 class ToolCall(BaseModel):
-    """
-    一次工具调用的完整记录。
-    Phase 2 的 L1 Fast Track 会生成 SQL 并执行，每次执行就是一个 ToolCall。
-    """
+    """一次工具调用的完整记录。"""
 
     tool_call_id: str  # 工具调用唯一ID（关联 tool 消息用）
     tool_name: str  # 工具名称，如 "sql_query", "api_call"

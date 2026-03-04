@@ -86,7 +86,7 @@ class ChatMessage(Base):
         String(50), comment="主意图"
     )
     route: Mapped[str | None] = mapped_column(
-        String(30), comment="路由: standard_l1 / deep_l3"
+        String(30), comment="执行路由（统一为 deep_l3）"
     )
     model: Mapped[str | None] = mapped_column(
         String(100), comment="使用的 LLM 模型"

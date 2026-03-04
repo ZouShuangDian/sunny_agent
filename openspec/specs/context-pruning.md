@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-Level 1 剪枝（Context Pruning）是双层漏斗压缩机制的第一层，通过标记而非删除的方式持续压缩旧 tool result，维持 context 在可控范围内。包含内存级（单次执行内）和 DB 级（跨轮持久化）两个维度。
+Level 1 剪枝（Context Pruning）通过标记而非删除的方式持续压缩旧 tool result，维持 context 在可控范围内。包含内存级（单次执行内）和 DB 级（跨轮持久化）两个维度。
 
 ---
 
@@ -11,7 +11,6 @@ Level 1 剪枝（Context Pruning）是双层漏斗压缩机制的第一层，通
 ### 触发时机
 
 - **每步 Act 后无条件执行**（每步保洁，低成本）
-- **Think 后精确值超阈值时额外触发**：`prompt_tokens > CONTEXT_PRUNE_TRIGGER`（73,728 = 75% of 98,304）
 
 ### 算法（token 估算边界，替代旧的步骤计数）
 
@@ -29,7 +28,28 @@ def _compress_stale_tool_results(messages: list[dict]) -> list[dict]:
 
 ---
 
-## 3. DB 级剪枝
+## 3. 历史加载预算
+
+`_select_history_by_token()` 使用独立的 `HISTORY_TOKEN_BUDGET`（60,000）作为历史消息加载预算，不再复用 `PRUNE_PROTECT_TOKENS`。
+
+```python
+def _select_history_by_token(self, history_messages: list[dict]) -> list[dict]:
+    budget = settings.HISTORY_TOKEN_BUDGET  # 60,000（独立预算）
+    selected = []
+    accumulated = 0
+    for msg in reversed(history_messages):
+        token_est = self._estimate_tokens(msg.get("content") or "")
+        if accumulated + token_est <= budget:
+            accumulated += token_est
+            selected.insert(0, msg)
+        else:
+            break
+    return selected
+```
+
+---
+
+## 4. DB 级剪枝
 
 ### 触发时机
 
@@ -58,20 +78,18 @@ async def _prune_l3_steps(session_id: str) -> None:
 
 ---
 
-## 4. Token 估算策略
+## 5. Token 估算策略
 
 | 场景 | 方法 |
 |------|------|
-| 触发判断 | `think_result.usage["prompt_tokens"]`（服务端精确值） |
+| Level 2 触发判断 | `think_result.usage["prompt_tokens"]`（服务端精确值） |
 | 保护区边界计算 | `len(content) // 2`（字符估算，中文 ≈ 1.92 chars/token） |
-
-字符估算允许 ±20% 误差，有 25K buffer（98,304 - 73,728）可容纳偏移。
 
 ---
 
-## 5. 配置参数
+## 6. 配置参数
 
 | 参数 | 值 | 说明 |
 |------|---|------|
-| `CONTEXT_PRUNE_TRIGGER` | 73,728 | Level 1 内存级额外触发阈值（75%） |
 | `PRUNE_PROTECT_TOKENS` | 20,000 | 保护区 token 数（最近步骤不被剪枝） |
+| `HISTORY_TOKEN_BUDGET` | 60,000 | 历史消息加载预算（独立于保护区） |

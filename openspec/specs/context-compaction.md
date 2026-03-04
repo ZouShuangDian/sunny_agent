@@ -2,16 +2,23 @@
 
 ## 1. 概述
 
-Level 2 摘要截断（Context Compaction）是双层漏斗压缩机制的第二层，在 L3 ReAct 单次执行的 context 接近模型上限时触发，通过 LLM 生成结构化摘要压缩历史，重建 messages 列表以避免 context 溢出。
+Level 2 摘要截断（Context Compaction）在 L3 ReAct 单次执行的 context 剩余空间不足时触发，通过 LLM 生成结构化摘要压缩历史，重建 messages 列表以避免 context 溢出。
 
 ---
 
 ## 2. 触发条件
 
-每步 Think 完成后，读取 `think_result.usage["prompt_tokens"]`：
-- `> CONTEXT_SUMMARIZE_TRIGGER`（88,473 = 98,304 × 90%）→ 触发 Level 2
+每步 Think 完成后，读取 `think_result.usage["prompt_tokens"]`，计算剩余空间：
+
+```python
+remaining = MODEL_CONTEXT_LIMIT - prompt_tokens
+if remaining < COMPACTION_BUFFER:
+    messages = await self._compact_messages(messages)
+```
 
 触发值使用服务端精确值（非估算），保证触发准确。
+
+`COMPACTION_BUFFER`（20,000）定义"剩余空间不足"的阈值，语义为"预留给后续操作的最小空间"。实际触发点为 `prompt_tokens > 78,304`（≈80% of 98,304）。
 
 ---
 
@@ -81,7 +88,7 @@ result = await self.llm.chat(messages=summary_messages, max_tokens=COMPACTION_MA
 | 参数 | 值 | 说明 |
 |------|---|------|
 | `MODEL_CONTEXT_LIMIT` | 98,304 | 模型 context 上限（token） |
-| `CONTEXT_SUMMARIZE_TRIGGER` | 88,473 | 触发阈值（90% of 98,304） |
+| `COMPACTION_BUFFER` | 20,000 | 剩余空间阈值（低于此值触发 Level 2） |
 | `PRUNE_PROTECT_TOKENS` | 20,000 | 保护区 token 数 |
 | `COMPACTION_MAX_TOKENS` | 2,000 | 摘要生成 max_tokens |
-| `COMPRESS_MIN_SAVING` | 10,000 | 摘要后至少节省 token 数（预留校验用） |
+| `COMPRESS_MIN_SAVING` | 10,000 | 摘要后至少节省 token 数 |

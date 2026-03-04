@@ -1,8 +1,8 @@
 """
 工具注册中心：统一管理所有工具的注册、Schema 获取和执行分发
 
-Week 7 增强：
-- get_schemas_by_tier：按层级过滤工具 schema（L1/L3）
+功能：
+- get_all_schemas：获取全量工具 schema
 - execute 增加 asyncio.wait_for 超时保护（见 W2 超时嵌套规范）
 """
 
@@ -53,7 +53,7 @@ class ToolRegistry:
         ]
 
     def get_schemas_by_tier(self, tier: str) -> list[dict]:
-        """按层级过滤工具 schema（L1 / L3）"""
+        """按层级过滤工具 schema"""
         return [
             tool.schema()
             for tool in self._tools.values()

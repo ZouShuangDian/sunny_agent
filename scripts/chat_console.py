@@ -27,6 +27,9 @@ from sqlalchemy import select
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.observability.logging_config import setup_logging
+setup_logging()  # 初始化 structlog，避免日志乱码
+
 from app.cache.redis_client import redis_client
 from app.db.engine import async_session                          # [DB存储] PG session 工厂
 from app.db.models.user import User                              # [DB存储] 用于查询真实用户
