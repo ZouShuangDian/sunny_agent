@@ -39,6 +39,26 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 天
+    
+    # ── SSO 配置 ──
+    SSO_ENABLED: bool = True
+    SSO_VALIDATE_URL: str = "https://sso.sunnyoptical.cn/serviceValidate"
+    SSO_LOGIN_URL: str = "https://sso.sunnyoptical.cn/login"
+    SSO_CALLBACK_BASE_URL: str = "http://localhost:8000"
+    
+    # SSO 属性映射
+    SSO_ATTRIBUTE_USER: str = "user"
+    SSO_ATTRIBUTE_NAME: str = "name"
+    SSO_ATTRIBUTE_EMAIL: str = "email"
+    SSO_ATTRIBUTE_DEPT: str = "dept"
+    SSO_ATTRIBUTE_COMPANY: str = "company"
+    
+    # 默认角色
+    DEFAULT_SSO_ROLE: str = "普通用户"
+    
+    # 数据隔离
+    DATA_ISOLATION_ENABLED: bool = True
+    DEFAULT_ISOLATION_LEVEL: str = "strict"
 
     # ── LLM（OpenAI 协议兼容） ──
     LLM_DEFAULT_MODEL: str = "openai/deepseek-ai/DeepSeek-V3"  # LiteLLM 格式：openai/{model}

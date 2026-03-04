@@ -10,10 +10,12 @@ from app.db.models.codebook import Codebook
 from app.db.models.skill import Skill, UserSkillSetting
 from app.db.models.template import PromptTemplate
 from app.db.models.plugin import Plugin, PluginCommand
+from app.db.models.data_scope import DataScopePolicy
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
     "ChatSession", "ChatMessage",
     "Codebook", "Skill", "UserSkillSetting", "PromptTemplate",
     "Plugin", "PluginCommand",
+    "DataScopePolicy",
 ]
