@@ -3,7 +3,7 @@ M04-3 默认值填充器：当 LLM 输出缺失字段时，按业务规则填入
 
 | 缺失字段            | 默认值            |
 |---------------------|-------------------|
-| route               | standard_l1       |
+| route               | deep_l3           |
 | complexity          | simple            |
 | confidence          | 0.5               |
 | intent.primary      | general_qa        |
@@ -17,7 +17,7 @@ class DefaultFiller:
 
     # 默认值映射
     _DEFAULTS: dict = {
-        "route": "standard_l1",
+        "route": "deep_l3",
         "complexity": "simple",
         "confidence": 0.5,
         "needs_clarify": False,

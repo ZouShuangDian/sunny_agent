@@ -15,10 +15,7 @@ from typing import Literal
 
 
 class ToolCall(BaseModel):
-    """
-    一次工具调用的完整记录。
-    Phase 2 的 L1 Fast Track 会生成 SQL 并执行，每次执行就是一个 ToolCall。
-    """
+    """一次工具调用的完整记录。"""
 
     tool_call_id: str  # 工具调用唯一ID（关联 tool 消息用）
     tool_name: str  # 工具名称，如 "sql_query", "api_call"
@@ -83,6 +80,38 @@ class Message(BaseModel):
     tool_call_id: str | None = None  # 关联到哪个 ToolCall
     tool_name: str | None = None  # 工具名称（冗余，方便日志/调试）
 
+    # ── compaction 标记 ──
+    is_compaction: bool = False  # True 表示这条消息是 Level 2 摘要 genesis block
+
+
+# ── L3 中间步骤（原始格式，用于持久化到 l3_steps 表）──
+
+
+class L3Step(BaseModel):
+    """
+    L3 ReAct 单步消息（assistant tool_calls 或 tool result）。
+
+    从 act_result.messages 中提取原始 LLM 格式消息，
+    写入 l3_steps 表，支持 Level 1 剪枝标记和跨轮 context 还原。
+    """
+
+    step_index: int  # 步骤序号（0-based）
+    role: str  # 'assistant' | 'tool'
+    content: str  # 消息内容（assistant 可能为空，tool 为工具返回值）
+    tool_name: str | None = None  # 工具名称（tool 消息专用）
+    tool_call_id: str | None = None  # 工具调用 ID（tool 消息专用）
+    compacted: bool = False  # Level 1 剪枝标记
+
+
+# 摘要注入 LLM 时的内容模板（role=user，明确语义框架）
+_COMPACTION_INJECT_TEMPLATE = (
+    "【系统自动生成的历史摘要】\n"
+    "以下内容由系统生成，帮助你了解之前的对话背景，请基于此继续执行任务。\n\n"
+    "{summary_content}\n\n"
+    "---\n"
+    "请继续基于以上历史背景执行当前任务。"
+)
+
 
 class ConversationHistory(BaseModel):
     """完整对话历史"""
@@ -120,9 +149,20 @@ class ConversationHistory(BaseModel):
         - user/assistant/system → {"role": ..., "content": ...}
         - tool → {"role": "tool", "content": ..., "tool_call_id": ...}
         - assistant 带 tool_calls → 附加 tool_calls 字段
+        - is_compaction=True 的 assistant 消息 → 注入为 role=user（含框架说明）
         """
         result = []
         for m in self.messages:
+            # compaction 节点：存储为 assistant，注入 LLM 时转为 user 并加上框架说明
+            if m.is_compaction:
+                result.append({
+                    "role": "user",
+                    "content": _COMPACTION_INJECT_TEMPLATE.format(
+                        summary_content=m.content
+                    ),
+                })
+                continue
+
             entry: dict = {"role": m.role, "content": m.content}
             if m.role == "assistant" and m.tool_calls:
                 entry["tool_calls"] = [

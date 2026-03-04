@@ -5,21 +5,15 @@
 - POST /chat        — 非流式 JSON 响应
 - POST /chat/stream — SSE 流式响应
 
-Plugin 命令快速路径：
-- 消息以 "/{plugin}:{command}" 开头时，绕过意图分析直接路由到 L3
-- COMMAND.md 内容通过 PluginCommandContext ContextVar 注入 system prompt
-
-所有用户输入统一走 IntentEngine（包括 greeting），不再有预分类拦截。
-
-Week 7 新增：
-- ChatPersistence 冷存储集成（PG write-behind）
-- assistant 消息携带 tool_calls（W7）
-- reasoning_trace 独立传入 PG（W6）
+Plugin 命令在意图管线内部处理（快速路径），不再需要独立的处理函数。
+所有请求统一通过 L3 ReAct 引擎执行。
 """
 
+import asyncio
 import json
 import time
 import uuid
+from contextvars import Token as CtxToken
 
 import redis.asyncio as aioredis
 import structlog
@@ -30,9 +24,10 @@ from app.cache.redis_client import get_redis
 from app.config import get_settings
 from app.db.engine import async_session
 from app.execution.router import ExecutionRouter
+from app.execution.schemas import ExecutionResult
 from app.guardrails.schemas import IntentDetail, IntentResult
 from app.guardrails.validator import GuardrailsValidator
-from app.intent.clarify_handler import ClarifyHandler
+from app.intent.clarify_handler import ClarifyHandler, ClarifyResult
 from app.intent.context_builder import ContextBuilder
 from app.intent.context_strategy import (
     AnalysisStrategy,
@@ -43,7 +38,7 @@ from app.intent.intent_engine import IntentEngine
 from app.intent.output_assembler import OutputAssembler
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence
-from app.memory.schemas import LastIntent, Message
+from app.memory.schemas import L3Step, LastIntent, Message
 from app.memory.working_memory import WorkingMemory
 from app.observability.context import get_trace_id
 from app.validator.output_validator import OutputValidator
@@ -72,13 +67,12 @@ chat_persistence = ChatPersistence(async_session)
 output_validator = OutputValidator(llm_client)
 
 # W4：Context Strategy 无状态单例（应用启动时实例化一次，所有请求共享）
-# Week 9 桩实现：codebook/knowledge/history Service 均为 None，Phase 3 替换
 _context_strategies: dict[str, object] = {
     "greeting": MinimalStrategy(),
     "general_qa": MinimalStrategy(),
     "writing": MinimalStrategy(),
-    "query": QueryStrategy(),       # Phase 3 注入 codebook_service, knowledge_service
-    "analysis": AnalysisStrategy(),  # Phase 3 注入 codebook_service, knowledge_service, history_service
+    "query": QueryStrategy(),
+    "analysis": AnalysisStrategy(),
 }
 
 
@@ -95,132 +89,74 @@ class ChatResponse(BaseModel):
     intent_result: IntentResult | None = None  # 结构化结果（调试用）
     needs_clarify: bool = False
     clarify_question: str | None = None
+    context_usage: dict | None = None  # 上下文用量
 
 
-# ── Plugin 命令处理（快速路径，绕过意图分析直接进 L3）──
+# ── 公共辅助函数 ──
 
-def _is_plugin_command(message: str) -> bool:
-    """判断消息是否为 Plugin 命令格式（/{plugin}:{command} 开头）"""
-    if not message.startswith("/"):
-        return False
-    first_token = message.split()[0]  # 取第一个空格前的内容
-    return ":" in first_token
-
-
-async def _handle_plugin_command(
-    body: "ChatRequest",
-    user: AuthenticatedUser,
-    redis: "aioredis.Redis",
-) -> "ChatResponse":
+async def _prune_l3_steps(session_id: str) -> None:
     """
-    Plugin 命令快速路径处理（非流式）。
-
-    解析命令 → 查 DB → 读文件 → 设置 ContextVar → L3 执行 → 记录消息 → 返回。
-    整个过程绕过意图理解管线，直接构造 synthetic IntentResult 进 L3。
+    Level 1 DB 剪枝：从 l3_steps 尾部累加 token 估算，
+    超出 PRUNE_PROTECT_TOKENS 的步骤标记为 compacted=True。
     """
-    trace_id = get_trace_id()
-    start_time = time.time()
-
-    # 1. 解析命令
-    cmd_part, _, user_context = body.message[1:].partition(" ")
-    plugin_name, _, command_name = cmd_part.partition(":")
-    plugin_name = plugin_name.strip()
-    command_name = command_name.strip()
-
-    if not plugin_name or not command_name:
-        return ChatResponse(
-            session_id=body.session_id or str(uuid.uuid4()),
-            reply="命令格式错误，请使用 `/{plugin-name}:{command-name}` 格式。",
-        )
-
-    # 2. 初始化 session（与正常路径完全相同）
-    memory = WorkingMemory(redis)
-    session_id = body.session_id or str(uuid.uuid4())
-    await _init_session(session_id, user, memory, body.message)
-
-    # 3. 查询 DB 获取命令信息
-    info = await plugin_service.get_user_command(plugin_name, command_name, user.usernumb)
-    if info is None:
-        reply = (
-            f"未找到 Plugin 命令 `/{plugin_name}:{command_name}`，"
-            f"请确认 Plugin 已上传且命令名正确。"
-        )
-        # 记录一轮消息（即使未找到命令，也保留对话历史）
-        user_msg = Message(
-            role="user", content=body.message,
-            timestamp=time.time(), message_id=str(uuid.uuid4()),
-        )
-        await memory.append_message(session_id, user_msg)
-        assistant_msg = Message(
-            role="assistant", content=reply,
-            timestamp=time.time(), message_id=str(uuid.uuid4()),
-        )
-        await memory.append_message(session_id, assistant_msg)
-        await memory.increment_turn(session_id)
-        return ChatResponse(session_id=session_id, reply=reply)
-
-    # 4. 读取 COMMAND.md + 扫描 Plugin Skills
     try:
-        command_content = plugin_service.read_command_content(info)
-    except FileNotFoundError:
-        return ChatResponse(
-            session_id=session_id,
-            reply="Plugin 命令文件不存在，请重新上传 Plugin 包。",
-        )
+        steps = await chat_persistence.load_l3_steps(session_id)
+        if not steps:
+            return
 
-    plugin_skills = plugin_service.scan_plugin_skills(info)
+        prune_protect = settings.PRUNE_PROTECT_TOKENS
+        accumulated = 0
+        to_compact: list = []
 
-    # 5. 加载历史消息（用于 IntentResult.history_messages）
-    conv_history = await memory.get_history(session_id)
-    history_messages = [
-        {"role": m.role, "content": m.content}
-        for m in conv_history.messages[-10:]
-        if m.role in ("user", "assistant")
-    ]
+        for step in reversed(steps):
+            if step.compacted:
+                accumulated += 10
+                continue
+            token_est = len(step.content) // 2
+            if accumulated + token_est <= prune_protect:
+                accumulated += token_est
+            else:
+                to_compact.append(step.id)
 
-    # 6. 构建 PluginCommandContext + 设置 ContextVar
-    plugin_ctx = PluginCommandContext(
-        plugin_name=plugin_name,
-        command_name=command_name,
-        command_md_content=command_content,
-        plugin_skills=plugin_skills,
+        if to_compact:
+            await chat_persistence.mark_steps_compacted(to_compact)
+            log.debug(
+                "L3 DB 剪枝完成",
+                session_id=session_id,
+                compacted_count=len(to_compact),
+            )
+    except Exception as e:
+        log.warning("L3 DB 剪枝失败", session_id=session_id, error=str(e))
+
+
+def _save_compaction_genesis_block(session_id: str, summary_content: str) -> None:
+    """Level 2 摘要写入 PG 作为 genesis block。"""
+    genesis_msg = Message(
+        role="assistant",
+        content=summary_content,
+        timestamp=time.time(),
+        message_id=str(uuid.uuid4()),
+        is_compaction=True,
     )
-    plugin_token = set_plugin_context(plugin_ctx)
+    chat_persistence.save_message_background(session_id, genesis_msg)
+    log.info("Level 2 genesis block 已写入 PG", session_id=session_id)
 
-    # 7. 构建 synthetic IntentResult（精确对标 IntentResult/IntentDetail 字段）
-    raw_input = user_context.strip() if user_context.strip() else f"执行 {plugin_name}:{command_name}"
-    synthetic_intent = IntentResult(
-        route="deep_l3",
-        complexity="complex",
-        confidence=1.0,
-        intent=IntentDetail(
-            primary="plugin_command",
-            sub_intent=f"{plugin_name}:{command_name}",
-            user_goal=f"执行 Plugin 命令 /{plugin_name}:{command_name}",
-        ),
-        raw_input=raw_input,
-        session_id=session_id,
-        trace_id=trace_id,
-        history_messages=history_messages,
-    )
 
-    # 8. 执行 L3
-    exec_result = None
-    _uid_token = set_user_id(user.usernumb)
-    try:
-        exec_result = await execution_router.execute(
-            intent_result=synthetic_intent,
-            session_id=session_id,
-        )
-    finally:
-        reset_user_id(_uid_token)
-        reset_plugin_context(plugin_token)
-
-    reply_text = exec_result.reply if exec_result else "Plugin 命令执行失败，请重试。"
-
-    # 9. 记录消息（与正常路径完全相同）
+async def _record_conversation(
+    session_id: str,
+    memory: WorkingMemory,
+    user_content: str,
+    reply_text: str,
+    intent_primary: str,
+    route: str,
+    exec_result: ExecutionResult | None = None,
+) -> tuple[Message, Message]:
+    """
+    统一消息记录：user + assistant → Redis + PG。
+    返回 (user_msg, assistant_msg) 供后续使用。
+    """
     user_msg = Message(
-        role="user", content=body.message,
+        role="user", content=user_content,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
     )
     await memory.append_message(session_id, user_msg)
@@ -230,86 +166,89 @@ async def _handle_plugin_command(
     assistant_msg = Message(
         role="assistant", content=reply_text,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
-        intent_primary="plugin_command",
-        route="deep_l3",
+        intent_primary=intent_primary, route=route,
         tool_calls=exec_result.tool_calls if exec_result and exec_result.tool_calls else None,
     )
     await memory.append_message(session_id, assistant_msg)
     await memory.increment_turn(session_id)
+
     if settings.CHAT_PERSIST_ENABLED:
         trace_data = exec_result.reasoning_trace if exec_result and exec_result.reasoning_trace else None
         chat_persistence.save_message_background(session_id, assistant_msg, reasoning_trace=trace_data)
 
-    # 10. 审计日志
-    duration_ms = int((time.time() - start_time) * 1000)
-    audit_logger.log_background(
-        trace_id=trace_id,
-        user_id=user.id,
-        usernumb=user.usernumb,
-        action="plugin_command",
-        route="deep_l3",
-        input_text=body.message,
-        duration_ms=duration_ms,
-        metadata={
-            "plugin_name": plugin_name,
-            "command_name": command_name,
-            "iterations": exec_result.iterations if exec_result else 0,
-        },
-    )
-
-    return ChatResponse(session_id=session_id, reply=reply_text)
+    return user_msg, assistant_msg
 
 
-async def _handle_plugin_command_stream(
-    body: "ChatRequest",
+def _post_process_execution(
+    session_id: str,
+    message_id: str,
+    exec_result: ExecutionResult | None = None,
+    compaction_summary: str | None = None,
+    l3_steps_override: list[dict] | None = None,
+) -> None:
+    """
+    统一执行后处理：l3_steps 持久化 + DB 剪枝 + genesis block。
+
+    参数说明：
+    - exec_result: 非流式路径传入完整 ExecutionResult（含 l3_steps）
+    - l3_steps_override: 流式路径传入（l3_steps 通过 finish 事件传递）
+    - compaction_summary: 显式传入摘要内容（通过返回值/事件传递，避免并发竞态）
+    """
+    if not settings.CHAT_PERSIST_ENABLED:
+        return
+
+    # l3_steps 持久化 + Level 1 DB 剪枝
+    l3_steps = None
+    if exec_result and exec_result.l3_steps:
+        l3_steps = exec_result.l3_steps
+    elif l3_steps_override:
+        l3_steps = l3_steps_override
+
+    if l3_steps:
+        l3_step_objs = [L3Step(**s) for s in l3_steps]
+        chat_persistence.save_l3_steps_background(session_id, message_id, l3_step_objs)
+        asyncio.create_task(_prune_l3_steps(session_id))
+
+    # Level 2 genesis block 持久化
+    if compaction_summary:
+        _save_compaction_genesis_block(session_id, compaction_summary)
+
+
+# ── Plugin 命令处理（集成到意图管线）──
+
+async def _build_plugin_intent(
+    message: str,
     user: AuthenticatedUser,
-    redis: "aioredis.Redis",
-):
+    session_id: str,
+    memory: WorkingMemory,
+    trace_id: str,
+) -> tuple[IntentResult, CtxToken] | tuple[None, None]:
     """
-    Plugin 命令快速路径处理（流式 SSE 版本）。
-    与 _handle_plugin_command 逻辑相同，但通过 execute_stream 推送事件。
-    """
-    trace_id = get_trace_id()
-    start_time = time.time()
+    Plugin 命令检测 + synthetic IntentResult 构造。
 
-    cmd_part, _, user_context = body.message[1:].partition(" ")
+    返回值：
+    - 成功：(IntentResult, plugin_context_token)
+    - 失败：(None, None)
+    """
+    cmd_part, _, user_context = message[1:].partition(" ")
     plugin_name, _, command_name = cmd_part.partition(":")
     plugin_name, command_name = plugin_name.strip(), command_name.strip()
 
     if not plugin_name or not command_name:
-        yield _sse_event("error", {"message": "命令格式错误，请使用 /{plugin-name}:{command-name} 格式。"})
-        yield _sse_event("done", {})
-        return
-
-    memory = WorkingMemory(redis)
-    session_id = body.session_id or str(uuid.uuid4())
-    await _init_session(session_id, user, memory, body.message)
-
-    yield _sse_event("status", {"phase": "plugin_command", "session_id": session_id,
-                                 "plugin": plugin_name, "command": command_name})
+        return None, None
 
     info = await plugin_service.get_user_command(plugin_name, command_name, user.usernumb)
     if info is None:
-        reply = f"未找到 Plugin 命令 `/{plugin_name}:{command_name}`，请确认 Plugin 已上传且命令名正确。"
-        yield _sse_event("delta", reply)
-        yield _sse_event("done", {"session_id": session_id})
-        return
+        return None, None
 
     try:
         command_content = plugin_service.read_command_content(info)
     except FileNotFoundError:
-        yield _sse_event("error", {"message": "Plugin 命令文件不存在，请重新上传 Plugin 包。"})
-        yield _sse_event("done", {"session_id": session_id})
-        return
+        return None, None
 
     plugin_skills = plugin_service.scan_plugin_skills(info)
-    conv_history = await memory.get_history(session_id)
-    history_messages = [
-        {"role": m.role, "content": m.content}
-        for m in conv_history.messages[-10:]
-        if m.role in ("user", "assistant")
-    ]
 
+    # 设置 PluginCommandContext ContextVar，返回 Token 供调用方 reset
     plugin_ctx = PluginCommandContext(
         plugin_name=plugin_name,
         command_name=command_name,
@@ -318,8 +257,16 @@ async def _handle_plugin_command_stream(
     )
     plugin_token = set_plugin_context(plugin_ctx)
 
+    # 加载历史消息
+    conv_history = await memory.get_history(session_id)
+    history_messages = [
+        {"role": m.role, "content": m.content}
+        for m in conv_history.messages[-10:]
+        if m.role in ("user", "assistant")
+    ]
+
     raw_input = user_context.strip() if user_context.strip() else f"执行 {plugin_name}:{command_name}"
-    synthetic_intent = IntentResult(
+    intent_result = IntentResult(
         route="deep_l3",
         complexity="complex",
         confidence=1.0,
@@ -333,53 +280,27 @@ async def _handle_plugin_command_stream(
         trace_id=trace_id,
         history_messages=history_messages,
     )
+    return intent_result, plugin_token
 
-    _uid_token = set_user_id(user.usernumb)
-    reply_chunks: list[str] = []
-    try:
-        async for event in execution_router.execute_stream(
-            intent_result=synthetic_intent,
-            session_id=session_id,
-        ):
-            evt_type = event["event"]
-            evt_data = event["data"]
-            if evt_type == "delta":
-                reply_chunks.append(evt_data)
-                yield _sse_event("delta", evt_data)
-            elif evt_type == "tool_call":
-                yield _sse_event("tool_call", evt_data)
-            elif evt_type == "tool_result":
-                yield _sse_event("tool_result", evt_data)
-            elif evt_type == "thought":
-                yield _sse_event("thought", evt_data)
-    finally:
-        reset_user_id(_uid_token)
-        reset_plugin_context(plugin_token)
 
-    reply_text = "".join(reply_chunks)
-
-    user_msg = Message(role="user", content=body.message,
-                       timestamp=time.time(), message_id=str(uuid.uuid4()))
-    await memory.append_message(session_id, user_msg)
-    if settings.CHAT_PERSIST_ENABLED:
-        chat_persistence.save_message_background(session_id, user_msg)
-
-    assistant_msg = Message(role="assistant", content=reply_text,
-                            timestamp=time.time(), message_id=str(uuid.uuid4()),
-                            intent_primary="plugin_command", route="deep_l3")
-    await memory.append_message(session_id, assistant_msg)
-    await memory.increment_turn(session_id)
-    if settings.CHAT_PERSIST_ENABLED:
-        chat_persistence.save_message_background(session_id, assistant_msg)
-
-    duration_ms = int((time.time() - start_time) * 1000)
-    audit_logger.log_background(
-        trace_id=trace_id, user_id=user.id, usernumb=user.usernumb,
-        action="plugin_command_stream", route="deep_l3",
-        input_text=body.message, duration_ms=duration_ms,
-        metadata={"plugin_name": plugin_name, "command_name": command_name},
+def _build_plugin_error_result(message: str, session_id: str, trace_id: str) -> IntentResult:
+    """Plugin 命令未找到时，构造一个直接返回错误提示的 IntentResult。"""
+    cmd_part = message.split()[0][1:]  # 去掉 /
+    plugin_name, _, command_name = cmd_part.partition(":")
+    return IntentResult(
+        route="deep_l3",
+        complexity="simple",
+        confidence=1.0,
+        intent=IntentDetail(
+            primary="plugin_command",
+            sub_intent="not_found",
+            user_goal=f"未找到 Plugin 命令 /{plugin_name}:{command_name}",
+        ),
+        raw_input=f"未找到 Plugin 命令 `/{plugin_name}:{command_name}`，请确认 Plugin 已上传且命令名正确。",
+        session_id=session_id,
+        trace_id=trace_id,
+        history_messages=[],
     )
-    yield _sse_event("done", {"session_id": session_id, "duration_ms": duration_ms})
 
 
 # ── 公共意图管线 ──
@@ -391,13 +312,26 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
-) -> tuple[IntentResult, "ClarifyResult"]:
+) -> tuple[IntentResult, ClarifyResult, CtxToken | None]:
     """
     公共意图理解管线，/chat 和 /chat/stream 共享。
-    返回 (final_intent_result, clarify_result)。
-    """
-    from app.intent.clarify_handler import ClarifyResult
+    返回 (final_intent_result, clarify_result, plugin_token)。
 
+    Plugin 命令在此内部处理：跳过 LLM 意图分析，直接构造 synthetic intent。
+    """
+    # Plugin 命令快速路径：跳过 LLM 意图分析，构造 synthetic intent
+    if message.startswith("/") and ":" in message.split()[0]:
+        intent_result, plugin_token = await _build_plugin_intent(
+            message, user, session_id, memory, trace_id,
+        )
+        if intent_result is not None:
+            # Plugin 命令不走追问
+            return intent_result, ClarifyResult(needs_clarify=False), plugin_token
+        # Plugin 未找到 → 直接返回错误（不降级到普通意图分析）
+        error_result = _build_plugin_error_result(message, session_id, trace_id)
+        return error_result, ClarifyResult(needs_clarify=False), None
+
+    # 正常意图分析流程
     # 阶段 1：基础上下文（一次 Redis 读取）→ 意图分析
     context_builder = ContextBuilder(memory, strategies=_context_strategies)
     basic_context = await context_builder.build(
@@ -459,7 +393,7 @@ async def _run_intent_pipeline(
         ),
     )
 
-    return final_result, clarify_result
+    return final_result, clarify_result, None  # 非 Plugin 路径 plugin_token=None
 
 
 # ── 公共会话初始化（含 PG 回源） ──
@@ -470,16 +404,11 @@ async def _init_session(
     memory: WorkingMemory,
     first_message: str,
 ) -> None:
-    """
-    初始化会话：Redis 优先，miss 时尝试从 PG 回源。
-
-    变更 1（Week 7）：增加 PG 回源逻辑。
-    """
+    """初始化会话：Redis 优先，miss 时尝试从 PG 回源。"""
     if await memory.exists(session_id):
         return
 
     if settings.CHAT_PERSIST_ENABLED:
-        # Redis miss → 尝试从 PG 恢复（load_history 已还原 tool_calls → ToolCall 对象）
         pg_history = await chat_persistence.load_history(session_id)
         if pg_history and pg_history.messages:
             await memory.init_session(session_id, user.id, user.usernumb)
@@ -507,45 +436,36 @@ async def chat(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     """主对话入口：意图理解 + 护栏校验 + 执行层"""
-
-    # ── Plugin 命令快速路径（绕过意图分析直接进 L3）──
-    if _is_plugin_command(body.message):
-        return await _handle_plugin_command(body, user, redis)
-
     start_time = time.time()
     trace_id = get_trace_id()
-
-    # 1. 初始化会话（含 PG 回源）
     memory = WorkingMemory(redis)
     session_id = body.session_id or str(uuid.uuid4())
     await _init_session(session_id, user, memory, body.message)
 
-    # 2. 意图管线
-    final_result, clarify_result = await _run_intent_pipeline(
-        message=body.message,
-        user=user,
-        session_id=session_id,
-        memory=memory,
-        redis=redis,
-        trace_id=trace_id,
+    # 意图管线（Plugin 命令在管线内部处理）
+    final_result, clarify_result, plugin_token = await _run_intent_pipeline(
+        message=body.message, user=user, session_id=session_id,
+        memory=memory, redis=redis, trace_id=trace_id,
     )
 
-    # 3. 执行层
-    exec_result = None
-    if clarify_result.needs_clarify and clarify_result.question:
-        reply_text = clarify_result.question
-    else:
-        # 设置 user_id ContextVar（供 bash_tool/read_file/write_file 读取，用于路径隔离）
+    try:
+        # 追问
+        if clarify_result.needs_clarify and clarify_result.question:
+            return ChatResponse(
+                session_id=session_id, reply=clarify_result.question,
+                needs_clarify=True, clarify_question=clarify_result.question,
+            )
+
+        # 执行（统一 L3）
         _uid_token = set_user_id(user.usernumb)
         try:
             exec_result = await execution_router.execute(
-                intent_result=final_result,
-                session_id=session_id,
+                intent_result=final_result, session_id=session_id,
             )
         finally:
             reset_user_id(_uid_token)
 
-        # M06 输出校验（执行层输出 → 校验 → 最终回复）
+        # 输出校验
         if settings.OUTPUT_VALIDATOR_ENABLED and exec_result.tool_calls:
             validator_out = await output_validator.validate(ValidatorInput(
                 execution_output=exec_result.reply,
@@ -557,74 +477,45 @@ async def chat(
         else:
             reply_text = exec_result.reply
 
-    # 4. 记录消息（user 消息在执行完成后写入，避免意图分析时产生重复）
-    user_msg = Message(
-        role="user",
-        content=body.message,
-        timestamp=time.time(),
-        message_id=str(uuid.uuid4()),
-    )
-    await memory.append_message(session_id, user_msg)
-    if settings.CHAT_PERSIST_ENABLED:
-        chat_persistence.save_message_background(session_id, user_msg)
-
-    # 变更 3（W7）：将执行层返回的 tool_calls 赋值到 Message
-    assistant_msg = Message(
-        role="assistant",
-        content=reply_text,
-        timestamp=time.time(),
-        message_id=str(uuid.uuid4()),
-        intent_primary=final_result.intent.primary,
-        route=final_result.route,
-        tool_calls=exec_result.tool_calls if exec_result and exec_result.tool_calls else None,
-    )
-    await memory.append_message(session_id, assistant_msg)
-    await memory.increment_turn(session_id)
-
-    # 变更 4（W6）：assistant 消息持久化——携带 reasoning_trace
-    if settings.CHAT_PERSIST_ENABLED:
-        # reasoning_trace 从 ExecutionResult 提取，不走 Message（W6 决策）
-        trace_data = (
-            exec_result.reasoning_trace
-            if exec_result and exec_result.reasoning_trace
-            else None
-        )
-        chat_persistence.save_message_background(
-            session_id, assistant_msg, reasoning_trace=trace_data,
+        # 统一消息记录
+        _, assistant_msg = await _record_conversation(
+            session_id, memory, body.message, reply_text,
+            final_result.intent.primary, final_result.route, exec_result,
         )
 
-    # 5. 审计日志
-    duration_ms = int((time.time() - start_time) * 1000)
-    audit_metadata = {
-        "intent": final_result.intent.primary,
-        "confidence": final_result.confidence,
-        "complexity": final_result.complexity,
-    }
-    # L3 额外审计字段
-    if exec_result and exec_result.iterations > 0:
-        audit_metadata["iterations"] = exec_result.iterations
-        audit_metadata["is_degraded"] = exec_result.is_degraded
-        if exec_result.token_usage:
-            audit_metadata["token_usage"] = exec_result.token_usage
+        # 统一执行后处理（compaction_summary 通过返回值传递，避免并发竞态）
+        _post_process_execution(
+            session_id, assistant_msg.message_id,
+            exec_result=exec_result,
+            compaction_summary=exec_result.compaction_summary if exec_result else None,
+        )
 
-    audit_logger.log_background(
-        trace_id=trace_id,
-        user_id=user.id,
-        usernumb=user.usernumb,
-        action="chat",
-        route=final_result.route,
-        input_text=body.message,
-        duration_ms=duration_ms,
-        metadata=audit_metadata,
-    )
+        # 审计
+        duration_ms = int((time.time() - start_time) * 1000)
+        audit_logger.log_background(
+            trace_id=trace_id, user_id=user.id, usernumb=user.usernumb,
+            action="chat", route=final_result.route,
+            input_text=body.message, duration_ms=duration_ms,
+            metadata={
+                "intent": final_result.intent.primary,
+                "confidence": final_result.confidence,
+                "complexity": final_result.complexity,
+                **({"iterations": exec_result.iterations, "is_degraded": exec_result.is_degraded}
+                   if exec_result and exec_result.iterations > 0 else {}),
+                **({"token_usage": exec_result.token_usage}
+                   if exec_result and exec_result.token_usage else {}),
+            },
+        )
 
-    return ChatResponse(
-        session_id=session_id,
-        reply=reply_text,
-        intent_result=final_result,
-        needs_clarify=clarify_result.needs_clarify,
-        clarify_question=clarify_result.question,
-    )
+        return ChatResponse(
+            session_id=session_id, reply=reply_text,
+            intent_result=final_result,
+            context_usage=exec_result.context_usage if exec_result else None,
+        )
+    finally:
+        # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
+        if plugin_token is not None:
+            reset_plugin_context(plugin_token)
 
 
 # ── POST /chat/stream — SSE 流式响应 ──
@@ -644,131 +535,98 @@ async def chat_stream(
     """SSE 流式对话入口"""
 
     async def event_generator():
-        # ── Plugin 命令快速路径（绕过意图分析直接进 L3）──
-        if _is_plugin_command(body.message):
-            async for evt in _handle_plugin_command_stream(body, user, redis):
-                yield evt
-            return
-
         start_time = time.time()
         trace_id = get_trace_id()
-
         try:
-            # 1. 初始化会话（含 PG 回源）
             memory = WorkingMemory(redis)
             session_id = body.session_id or str(uuid.uuid4())
             await _init_session(session_id, user, memory, body.message)
 
-            # 2. 意图理解阶段
             yield _sse_event("status", {"phase": "understanding", "session_id": session_id})
 
-            final_result, clarify_result = await _run_intent_pipeline(
-                message=body.message,
-                user=user,
-                session_id=session_id,
-                memory=memory,
-                redis=redis,
-                trace_id=trace_id,
+            # 返回三元组：Plugin 路径返回 plugin_token，非 Plugin 路径 plugin_token=None
+            final_result, clarify_result, plugin_token = await _run_intent_pipeline(
+                message=body.message, user=user, session_id=session_id,
+                memory=memory, redis=redis, trace_id=trace_id,
             )
 
-            yield _sse_event("status", {
-                "phase": "intent_done",
-                "route": final_result.route,
-                "intent": final_result.intent.primary,
-            })
-
-            # 3. 追问 → 直接返回追问内容
-            if clarify_result.needs_clarify and clarify_result.question:
-                yield _sse_event("clarify", {
-                    "question": clarify_result.question,
-                    "session_id": session_id,
-                })
-                yield _sse_event("done", {"session_id": session_id})
-                return
-
-            # 4. 执行阶段
-            yield _sse_event("status", {"phase": "executing", "route": final_result.route})
-
-            # 设置 user_id ContextVar（供沙箱工具读取，用于路径隔离）
-            _uid_token = set_user_id(user.usernumb)
-            reply_chunks: list[str] = []
             try:
-                async for event in execution_router.execute_stream(
-                    intent_result=final_result,
-                    session_id=session_id,
-                ):
-                    evt_type = event["event"]
-                    evt_data = event["data"]
-
-                    if evt_type == "delta":
-                        reply_chunks.append(evt_data)
-                        yield _sse_event("delta", evt_data)
-                    elif evt_type == "tool_call":
-                        yield _sse_event("tool_call", evt_data)
-                    elif evt_type == "tool_result":
-                        yield _sse_event("tool_result", evt_data)
-                    elif evt_type == "finish":
-                        pass  # 下面统一发 done
-            finally:
-                reset_user_id(_uid_token)
-
-            # 5. 记录消息（user 消息在执行完成后写入，避免意图分析时产生重复）
-            user_msg = Message(
-                role="user",
-                content=body.message,
-                timestamp=time.time(),
-                message_id=str(uuid.uuid4()),
-            )
-            await memory.append_message(session_id, user_msg)
-            if settings.CHAT_PERSIST_ENABLED:
-                chat_persistence.save_message_background(session_id, user_msg)
-
-            reply_text = "".join(reply_chunks)
-            assistant_msg = Message(
-                role="assistant",
-                content=reply_text,
-                timestamp=time.time(),
-                message_id=str(uuid.uuid4()),
-                intent_primary=final_result.intent.primary,
-                route=final_result.route,
-                # 流式模式下 tool_calls 暂不携带（execute_stream 未返回完整 ToolCall 列表）
-                # 后续 D8 实现 L3 流式时完善
-            )
-            await memory.append_message(session_id, assistant_msg)
-            await memory.increment_turn(session_id)
-
-            # 持久化
-            if settings.CHAT_PERSIST_ENABLED:
-                chat_persistence.save_message_background(session_id, assistant_msg)
-
-            # 6. 审计日志
-            duration_ms = int((time.time() - start_time) * 1000)
-            audit_logger.log_background(
-                trace_id=trace_id,
-                user_id=user.id,
-                usernumb=user.usernumb,
-                action="chat_stream",
-                route=final_result.route,
-                input_text=body.message,
-                duration_ms=duration_ms,
-                metadata={
+                yield _sse_event("status", {
+                    "phase": "intent_done",
+                    "route": final_result.route,
                     "intent": final_result.intent.primary,
-                    "confidence": final_result.confidence,
-                },
-            )
+                })
 
-            yield _sse_event("done", {"session_id": session_id, "duration_ms": duration_ms})
+                # 追问
+                if clarify_result.needs_clarify and clarify_result.question:
+                    yield _sse_event("clarify", {"question": clarify_result.question, "session_id": session_id})
+                    yield _sse_event("done", {"session_id": session_id})
+                    return
+
+                # 执行（统一 L3）
+                yield _sse_event("status", {"phase": "executing"})
+                _uid_token = set_user_id(user.usernumb)
+                reply_chunks: list[str] = []
+                finish_meta: dict = {}
+                try:
+                    async for event in execution_router.execute_stream(
+                        intent_result=final_result, session_id=session_id,
+                    ):
+                        evt_type = event["event"]
+                        evt_data = event["data"]
+                        if evt_type == "delta":
+                            reply_chunks.append(evt_data)
+                            yield _sse_event("delta", evt_data)
+                        elif evt_type in ("thought", "tool_call", "tool_result", "context_usage"):
+                            yield _sse_event(evt_type, evt_data)
+                        elif evt_type == "finish":
+                            finish_meta = evt_data if isinstance(evt_data, dict) else {}
+                finally:
+                    reset_user_id(_uid_token)
+
+                reply_text = "".join(reply_chunks)
+
+                # 统一消息记录
+                _, assistant_msg = await _record_conversation(
+                    session_id, memory, body.message, reply_text,
+                    final_result.intent.primary, final_result.route,
+                )
+
+                # 统一执行后处理（流式路径通过 finish_meta 传入）
+                _post_process_execution(
+                    session_id, assistant_msg.message_id,
+                    l3_steps_override=finish_meta.get("l3_steps"),
+                    compaction_summary=finish_meta.get("compaction_summary"),
+                )
+
+                # 审计（与非流式路径对称）
+                duration_ms = int((time.time() - start_time) * 1000)
+                audit_logger.log_background(
+                    trace_id=trace_id, user_id=user.id, usernumb=user.usernumb,
+                    action="chat_stream", route=final_result.route,
+                    input_text=body.message, duration_ms=duration_ms,
+                    metadata={
+                        "intent": final_result.intent.primary,
+                        "confidence": final_result.confidence,
+                        **({"iterations": finish_meta["iterations"], "is_degraded": finish_meta["is_degraded"]}
+                           if "iterations" in finish_meta else {}),
+                        **({"token_usage": finish_meta["token_usage"]}
+                           if "token_usage" in finish_meta else {}),
+                    },
+                )
+                yield _sse_event("done", {"session_id": session_id, "duration_ms": duration_ms, **finish_meta})
+            finally:
+                # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
+                if plugin_token is not None:
+                    reset_plugin_context(plugin_token)
 
         except Exception as e:
             log.error("SSE 流式处理异常", error=str(e), exc_info=True)
             yield _sse_event("error", {"message": "处理请求时发生错误，请稍后重试。"})
+            yield _sse_event("done", {"session_id": body.session_id or "", "error": True})
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )

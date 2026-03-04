@@ -1,15 +1,7 @@
 """
-执行路由器：根据 IntentResult.route 分发到对应的执行路径
-
-两种执行模式：
-- standard_l1: L1 标准执行，Bounded Loop + 固定工具集 + PromptService 检索
-- deep_l3: L3 深度推理，模块化 ReAct 循环（Thinker/Actor/Observer）
-
-关键设计（Q1 裁决）：L1 和 L3 共享同一个 ToolRegistry 实例，
-通过 get_all_schemas() / get_schemas_by_tier() 分别获取各自需要的工具集。
+执行路由器：统一通过 L3 ReAct 引擎执行
 
 Skill 加载策略（DB 驱动）：
-- 启动时无 Skill 扫描，无内存静态 SkillRegistry
 - 每次请求在 execute() / execute_stream() 入口处调用 SkillService 查询 DB，
   将结果设置到 skill_context ContextVar（try/finally 确保还原）
 - SkillCallTool 运行时从 ContextVar 动态读取当前用户的 Skill 列表
@@ -21,7 +13,6 @@ from pathlib import Path
 
 import structlog
 
-from app.execution.l1.fast_track import L1FastTrack
 from app.execution.l3.react_engine import L3ReActEngine
 from app.execution.schemas import ExecutionResult
 from app.execution.skill_context import reset_skill_catalog, set_skill_catalog
@@ -43,7 +34,7 @@ log = structlog.get_logger()
 
 
 class ExecutionRouter:
-    """执行层统一入口"""
+    """执行层统一入口（统一 L3）"""
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
@@ -60,7 +51,6 @@ class ExecutionRouter:
         # 注册 subagent_call 元工具（单一入口代理所有 SubAgent）
         tool_registry.register(SubAgentCallTool(agent_registry, tool_registry, llm))
 
-        self.l1 = L1FastTrack(llm, tool_registry)
         self.l3 = L3ReActEngine(llm, tool_registry)
 
     async def execute(
@@ -68,8 +58,7 @@ class ExecutionRouter:
         intent_result: IntentResult,
         session_id: str,
     ) -> ExecutionResult:
-        """非流式执行，根据 route 分发"""
-        route = intent_result.route
+        """非流式执行"""
         start = time.time()
 
         # 查询当前用户可用的 Skill 列表并设置到请求级 ContextVar
@@ -78,13 +67,7 @@ class ExecutionRouter:
         skill_token = set_skill_catalog(catalog)
 
         try:
-            if route == "standard_l1":
-                result = await self.l1.execute(intent_result, session_id)
-            elif route == "deep_l3":
-                result = await self.l3.execute(intent_result, session_id)
-            else:
-                log.warning("未知路由，降级到 standard_l1", route=route)
-                result = await self.l1.execute(intent_result, session_id)
+            result = await self.l3.execute(intent_result, session_id)
         finally:
             reset_skill_catalog(skill_token)
 
@@ -96,24 +79,14 @@ class ExecutionRouter:
         intent_result: IntentResult,
         session_id: str,
     ) -> AsyncIterator[dict]:
-        """流式执行，根据 route 分发"""
-        route = intent_result.route
-
+        """流式执行"""
         # 查询当前用户可用的 Skill 列表并设置到请求级 ContextVar
         usernumb = get_user_id()
         catalog = await skill_service.get_user_skills(usernumb)
         skill_token = set_skill_catalog(catalog)
 
         try:
-            if route == "standard_l1":
-                async for event in self.l1.execute_stream(intent_result, session_id):
-                    yield event
-            elif route == "deep_l3":
-                async for event in self.l3.execute_stream(intent_result, session_id):
-                    yield event
-            else:
-                log.warning("未知路由，降级到 standard_l1 流式", route=route)
-                async for event in self.l1.execute_stream(intent_result, session_id):
-                    yield event
+            async for event in self.l3.execute_stream(intent_result, session_id):
+                yield event
         finally:
             reset_skill_catalog(skill_token)

@@ -8,6 +8,10 @@ Todo 三层机制（opencode 对标）：
 - Layer 1（宪法层）：build_l3_system_prompt() 末尾的 Todo 规范静态约束
 - Layer 2（感知层）：todo_write / todo_read 工具每次返回完整快照（工具层实现）
 - Layer 3（干预层）：_inject_todo_reminder() 在每次 Think 前动态注入最新 todo 状态
+
+Context 压缩：
+- Level 1（内存级剪枝）：每步 Act 后无条件剪枝（token 估算边界）
+- Level 2（摘要截断）：剩余空间 < COMPACTION_BUFFER 时触发 LLM 摘要，重建 messages 列表
 """
 
 import json
@@ -16,6 +20,7 @@ from collections.abc import AsyncIterator
 
 import structlog
 
+from app.config import get_settings
 from app.execution.l3.actor import Actor
 from app.execution.l3.observer import Observer
 from app.execution.l3.prompts import build_l3_system_prompt
@@ -30,6 +35,17 @@ from app.todo.store import TodoStore
 from app.tools.registry import ToolRegistry
 
 log = structlog.get_logger()
+settings = get_settings()
+
+# Level 2 摘要生成 prompt（结构化，含制造业业务实体要求）
+COMPACTION_PROMPT = """请为以下对话历史生成结构化摘要，包含：
+1. 任务目标
+2. 已完成的操作步骤
+3. 重要发现和结论
+4. 操作过的文件、路径、数据
+5. 涉及的业务实体（产品型号、工单号、设备编号、指标名称等）
+6. 当前状态与下一步计划
+要求：摘要需足够详细，让继续任务的 AI 能无缝衔接。"""
 
 
 def _build_plugin_context_block(ctx: "PluginCommandContext") -> str:
@@ -89,8 +105,8 @@ class L3ReActEngine:
         1. 设置 session_id ContextVar（供 TodoWriteTool / TodoReadTool 读取）
         2. 组装初始 messages（System Prompt + 对话历史 + 用户输入）
         3. 获取 L3 可用工具集
-        4. 循环：熔断检查 → Layer 3 Todo 注入 → Think → Act → 追加到上下文
-        5. 返回最终结果（含推理轨迹）
+        4. 循环：熔断检查 → Layer 3 Todo 注入 → Think → 压缩检查 → Act → 追加到上下文
+        5. 返回最终结果（含推理轨迹 + l3_steps 原始消息）
         """
         # ① 设置 session_id ContextVar（Todo 三层机制 Layer 2/3 依赖此值）
         sid_token = set_session_id(session_id)
@@ -104,25 +120,50 @@ class L3ReActEngine:
             # 组装初始 messages
             messages = self._build_initial_messages(intent_result)
 
-            # 获取 L3 可用工具集（skill_call / todo_write / todo_read 均在此）
-            tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+            # 获取全量工具集（统一 L3 后不再按 tier 过滤）
+            tool_schemas = self.tool_registry.get_all_schemas()
 
             think_result: ThinkResult | None = None
+            last_context_usage: dict | None = None
+            last_compaction_summary: str | None = None  # 局部变量，避免实例级竞态
+
+            # 收集 L3 中间步骤消息（用于持久化到 l3_steps 表）
+            collected_steps: list[dict] = []
 
             for step in range(self.config.max_iterations):
                 # ── 熔断检查 ──
                 should_stop, reason = observer.should_stop()
                 if should_stop:
-                    return self._graceful_degrade(observer, reason)
+                    return self._build_result(
+                        think_result, observer, collected_steps,
+                        degrade_reason=reason, context_usage=last_context_usage,
+                        compaction_summary=last_compaction_summary,
+                    )
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
                 messages = await self._inject_todo_reminder(messages, user_goal)
 
                 # ── Think：LLM 决策 ──
-                # 最后一步不带 tools，强制总结（与 L1 一致）
+                # 最后一步不带 tools，强制总结
                 use_tools = tool_schemas if step < self.config.max_iterations - 1 else None
                 think_result = await self.thinker.think(messages, use_tools)
                 observer.on_think(step, think_result)
+
+                # ── 上下文用量计算 + context_usage 推送 ──
+                prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
+                remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
+                last_context_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "remaining": remaining,
+                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
+                    "limit": settings.MODEL_CONTEXT_LIMIT,
+                }
+
+                # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
+                if remaining < settings.COMPACTION_BUFFER:
+                    messages, summary = await self._compact_messages(messages)
+                    if summary:
+                        last_compaction_summary = summary
 
                 # ── 任务完成 ──
                 if think_result.is_done:
@@ -132,13 +173,19 @@ class L3ReActEngine:
                 act_result = await self.actor.act(think_result)
                 observer.on_act(step, act_result)
 
-                # ── 追加消息到上下文，并压缩旧 tool result 防止 context 膨胀 ──
-                messages.extend(act_result.messages)
-                messages = self._compress_stale_tool_results(
-                    messages, observer.budget.llm_call_count
-                )
+                # 收集步骤消息（持久化用，收集原始消息）
+                for msg in act_result.messages:
+                    collected_steps.append(msg)
 
-            return self._build_result(think_result, observer)
+                # ── 追加消息到上下文，并无条件执行内存级剪枝（每步保洁） ──
+                messages.extend(act_result.messages)
+                messages = self._compress_stale_tool_results(messages)
+
+            return self._build_result(
+                think_result, observer, collected_steps,
+                context_usage=last_context_usage,
+                compaction_summary=last_compaction_summary,
+            )
         finally:
             # 精确还原 session_id，即使异常也安全
             reset_session_id(sid_token)
@@ -163,6 +210,9 @@ class L3ReActEngine:
         """
         # 设置 session_id ContextVar（与 execute() 保持一致）
         sid_token = set_session_id(session_id)
+        # 收集 L3 中间步骤消息（通过 finish 事件传递给 chat.py）
+        collected_steps: list[dict] = []
+        last_compaction_summary: str | None = None  # 局部变量，避免实例级竞态
         try:
             observer = Observer(self.config)
             observer.start()
@@ -171,20 +221,17 @@ class L3ReActEngine:
             user_goal: str | None = intent_result.intent.user_goal or None
 
             messages = self._build_initial_messages(intent_result)
-            tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+            tool_schemas = self.tool_registry.get_all_schemas()
 
             for step in range(self.config.max_iterations):
                 # ── 熔断检查 ──
                 should_stop, reason = observer.should_stop()
                 if should_stop:
-                    degrade_result = self._graceful_degrade(observer, reason)
+                    degrade_result = self._build_result(None, observer, [], degrade_reason=reason)
                     yield {"event": "delta", "data": degrade_result.reply}
-                    yield {"event": "finish", "data": {
-                        "iterations": observer.trace.step_count,
-                        "llm_calls": observer.budget.llm_call_count,
-                        "is_degraded": True,
-                        "degrade_reason": reason,
-                    }}
+                    yield {"event": "finish", "data": self._build_finish_data(
+                        observer, collected_steps, last_compaction_summary, is_degraded=True,
+                    )}
                     return
 
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
@@ -202,19 +249,38 @@ class L3ReActEngine:
                         "content": think_result.thought,
                     }}
 
+                # ── 上下文用量计算 + context_usage 推送 ──
+                prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
+                remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
+                context_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "remaining": remaining,
+                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
+                    "limit": settings.MODEL_CONTEXT_LIMIT,
+                }
+                yield {"event": "context_usage", "data": context_usage}
+
+                # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
+                if remaining < settings.COMPACTION_BUFFER:
+                    messages, summary = await self._compact_messages(messages)
+                    if summary:
+                        last_compaction_summary = summary
+
                 # ── 任务完成 → 最终回答流式输出 ──
                 if think_result.is_done:
                     if think_result.thought:
                         yield {"event": "delta", "data": think_result.thought}
-                    yield {"event": "finish", "data": {
-                        "iterations": observer.trace.step_count,
-                        "llm_calls": observer.budget.llm_call_count,
-                    }}
+                    yield {"event": "finish", "data": self._build_finish_data(
+                        observer, collected_steps, last_compaction_summary,
+                    )}
                     return
 
                 # ── Act：执行工具（含 skill_call / todo_write / todo_read 等）──
                 act_result = await self.actor.act(think_result)
                 observer.on_act(step, act_result)
+
+                # 收集步骤消息（与 execute() 对称，供 chat_stream 持久化到 l3_steps 表）
+                collected_steps.extend(act_result.messages)
 
                 # 推送 tool_call / tool_result 事件
                 for obs in act_result.observations:
@@ -229,19 +295,16 @@ class L3ReActEngine:
                         "result": obs.result,
                     }}
 
-                # ── 追加消息到上下文，并压缩旧 tool result 防止 context 膨胀 ──
+                # ── 追加消息到上下文，并无条件执行内存级剪枝 ──
                 messages.extend(act_result.messages)
-                messages = self._compress_stale_tool_results(
-                    messages, observer.budget.llm_call_count
-                )
+                messages = self._compress_stale_tool_results(messages)
 
             # 达到 max_iterations 仍未完成 → 最后一步的 thought 即回答
             if think_result and think_result.thought:
                 yield {"event": "delta", "data": think_result.thought}
-            yield {"event": "finish", "data": {
-                "iterations": observer.trace.step_count,
-                "llm_calls": observer.budget.llm_call_count,
-            }}
+            yield {"event": "finish", "data": self._build_finish_data(
+                observer, collected_steps, last_compaction_summary, is_degraded=True,
+            )}
         finally:
             reset_session_id(sid_token)
 
@@ -260,13 +323,13 @@ class L3ReActEngine:
         observer = Observer(self.config)
         observer.start()
 
-        tool_schemas = self.tool_registry.get_schemas_by_tier("L3")
+        tool_schemas = self.tool_registry.get_all_schemas()
         think_result: ThinkResult | None = None
 
         for step in range(self.config.max_iterations):
             should_stop, reason = observer.should_stop()
             if should_stop:
-                return self._graceful_degrade(observer, reason)
+                return self._build_result(think_result, observer, [], degrade_reason=reason)
 
             use_tools = tool_schemas if step < self.config.max_iterations - 1 else None
             think_result = await self.thinker.think(messages, use_tools)
@@ -278,11 +341,9 @@ class L3ReActEngine:
             act_result = await self.actor.act(think_result)
             observer.on_act(step, act_result)
             messages.extend(act_result.messages)
-            messages = self._compress_stale_tool_results(
-                messages, observer.budget.llm_call_count
-            )
+            messages = self._compress_stale_tool_results(messages)
 
-        return self._build_result(think_result, observer)
+        return self._build_result(think_result, observer, [])
 
     async def _inject_todo_reminder(
         self,
@@ -340,67 +401,170 @@ class L3ReActEngine:
         updated[0] = {"role": "system", "content": base + block}
         return updated
 
-    def _compress_stale_tool_results(
-        self,
-        messages: list[dict],
-        llm_call_count: int,
-    ) -> list[dict]:
+    @staticmethod
+    def _estimate_tokens(content: str) -> int:
         """
-        将旧的 tool result 消息就地压缩，保留最近 N 步的完整内容。
+        估算字符串的 token 数（task 5.1）。
 
-        动态窗口（根据 LLM 调用次数决定保留步数）：
-        - 前 4 次调用（会话早期）：保留最近 3 步
-        - 4-6 次调用（会话中期）：保留最近 2 步
-        - 7+ 次调用（会话较长）：保留最近 1 步，激进压缩
-
-        策略：
-        - 扫描带 tool_calls 的 assistant 消息确定步骤边界
-        - 窗口外的 role="tool" 消息替换为 1 行面包屑
-        - assistant/user/system 消息不变
-
-        效果：保持 context 始终在可控范围内，越旧的工具结果占用越少空间。
+        策略：chars // 2
+        - 中文约 1.92 chars/token（实测）
+        - 英文约 4 chars/token（有利于保护区宽松）
+        - 混合文本 chars//2 为合理中间值，允许 ±20% 误差
         """
-        # 动态确定保留步数
-        if llm_call_count < 4:
-            keep_recent_steps = 3
-        elif llm_call_count < 7:
-            keep_recent_steps = 2
-        else:
-            keep_recent_steps = 1
+        return len(content) // 2
 
-        # 找出所有步骤边界（带 tool_calls 的 assistant 消息下标）
-        step_boundaries: list[int] = [
-            i for i, msg in enumerate(messages)
-            if msg.get("role") == "assistant" and msg.get("tool_calls")
-        ]
+    def _compress_stale_tool_results(self, messages: list[dict]) -> list[dict]:
+        """
+        Level 1 内存级剪枝：将旧 tool result 内容替换为占位符（task 5.2）。
 
-        # 步骤数未超过窗口，无需压缩
-        if len(step_boundaries) <= keep_recent_steps:
-            return messages
+        策略（token 估算边界，替代旧的步骤计数）：
+        1. 从 messages 尾部往前累加 tool result 的 _estimate_tokens(content)
+        2. 累积超出 PRUNE_PROTECT_TOKENS 的 tool result 替换为占位符
+        3. skill_call 的 tool result 始终保留（不被替换）
 
-        # 窗口外的最后一个步骤开始位置（此位置之前的 tool 消息全部压缩）
-        compress_before = step_boundaries[-keep_recent_steps]
-
+        优于旧方案（按 llm_call_count 决定保留步数）：
+        - token 感知，自适应大文件/长输出
+        - 与服务端精确值相关，允许 ±20% 偏差
+        """
+        prune_protect = settings.PRUNE_PROTECT_TOKENS
         result = list(messages)
-        for i in range(compress_before):
+
+        # 从尾部往前累加 tool result token 数，超出保护区的进行替换
+        accumulated = 0
+        for i in range(len(result) - 1, -1, -1):
             msg = result[i]
-            if msg.get("role") == "tool":
-                content = msg.get("content", "")
-                # 取前 80 字符作为面包屑预览
-                preview = content[:80].replace("\n", " ")
+            if msg.get("role") != "tool":
+                continue
+
+            content = msg.get("content", "")
+            token_est = self._estimate_tokens(content)
+
+            if accumulated + token_est <= prune_protect:
+                # 在保护区内，保留
+                accumulated += token_est
+            else:
+                # 超出保护区，判断是否为 skill_call（始终保护）
+                tool_call_id = msg.get("tool_call_id", "")
+                tool_name = self._find_tool_name(result, tool_call_id)
+                if tool_name == "skill_call":
+                    accumulated += token_est
+                    continue
                 result[i] = {
                     **msg,
-                    "content": f"[已处理] {preview}...",
+                    "content": (
+                        f"[已处理] {tool_name or 'tool'} 输出已压缩（原始内容保留在历史记录中）"
+                    ),
                 }
 
         return result
 
+    @staticmethod
+    def _find_tool_name(messages: list[dict], tool_call_id: str) -> str | None:
+        """从 messages 中反查 tool_call_id 对应的工具名称"""
+        if not tool_call_id:
+            return None
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if tc.get("id") == tool_call_id:
+                    return tc.get("function", {}).get("name")
+        return None
+
+    async def _compact_messages(self, messages: list[dict]) -> tuple[list[dict], str | None]:
+        """
+        Level 2 摘要截断（task 7.1）：生成摘要并重建 messages 列表。
+
+        流程：
+        1. 识别保护区（从尾部按 PRUNE_PROTECT_TOKENS 划定）
+        2. 提取保护区外的可压缩区内容
+        3. 调用 LLM 生成结构化摘要（max_tokens=COMPACTION_MAX_TOKENS）
+        4. 重建 messages：[system] → [user: 摘要] → [保护区消息]
+
+        返回值：(重建后的 messages, 摘要内容)。摘要内容供调用方传递给 chat.py 持久化为 genesis block。
+        失败时降级：记录 warning，返回 (原 messages, None)。
+        """
+        if not messages:
+            return messages, None
+
+        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        non_system = messages[1:] if system_msg else messages
+
+        # 计算保护区（从尾部往前，累积到 PRUNE_PROTECT_TOKENS 为止）
+        prune_protect = settings.PRUNE_PROTECT_TOKENS
+        protected: list[dict] = []
+        accumulated = 0
+        for msg in reversed(non_system):
+            content = msg.get("content") or ""
+            if not content and msg.get("tool_calls"):
+                content = json.dumps(msg["tool_calls"])
+            token_est = self._estimate_tokens(content)
+            if accumulated + token_est <= prune_protect:
+                accumulated += token_est
+                protected.insert(0, msg)
+            else:
+                break
+
+        # 可压缩区（保护区之前的所有消息）
+        compressible = non_system[: len(non_system) - len(protected)]
+        if not compressible:
+            log.warning("Level 2 摘要：无可压缩消息，跳过")
+            return messages, None
+
+        # 将可压缩区拼接为对话文本，供 LLM 摘要
+        history_text = "\n\n".join(
+            f"[{m.get('role', 'unknown')}]: {m.get('content', '')}"
+            for m in compressible
+        )
+        summary_messages = [
+            {"role": "user", "content": f"{COMPACTION_PROMPT}\n\n对话历史：\n{history_text}"},
+        ]
+
+        try:
+            summary_result = await self.llm.chat(
+                messages=summary_messages,
+                max_tokens=settings.COMPACTION_MAX_TOKENS,
+            )
+            summary_content = summary_result.content or ""
+            if not summary_content:
+                raise ValueError("摘要内容为空")
+        except Exception as e:
+            log.warning("Level 2 摘要生成失败，跳过压缩", error=str(e))
+            return messages, None
+
+        # 摘要注入 LLM 时使用 role=user（避免连续 assistant 消息违反 API 格式）
+        summary_inject = (
+            "【系统自动生成的历史摘要】\n"
+            "以下内容由系统生成，帮助你了解之前的对话背景，请基于此继续执行任务。\n\n"
+            f"{summary_content}\n\n"
+            "---\n"
+            "请继续基于以上历史背景执行当前任务。"
+        )
+
+        # 重建 messages：[system] → [user: 摘要] → [保护区消息]
+        rebuilt: list[dict] = []
+        if system_msg:
+            rebuilt.append(system_msg)
+        rebuilt.append({"role": "user", "content": summary_inject})
+        rebuilt.extend(protected)
+
+        log.info(
+            "Level 2 摘要完成，messages 已重建",
+            compressed_msgs=len(compressible),
+            protected_msgs=len(protected),
+            summary_tokens=self._estimate_tokens(summary_content),
+        )
+
+        return rebuilt, summary_content
+
     def _build_initial_messages(self, intent_result: IntentResult) -> list[dict]:
         """
-        组装 ReAct 循环的初始消息列表。
+        组装 ReAct 循环的初始消息列表（task 8.2）。
 
         若当前请求是 Plugin 命令触发（plugin_context ContextVar 已设置），
         在 system prompt 末尾追加 COMMAND.md 工作流指引 + 插件 Skill 列表。
+
+        历史消息注入：使用 token 动态边界（替代旧的 [-10:] 硬截断）。
         """
         user_goal = getattr(intent_result.intent, "user_goal", None)
 
@@ -416,20 +580,81 @@ class L3ReActEngine:
         if plugin_ctx:
             system_prompt += _build_plugin_context_block(plugin_ctx)
 
+        # 历史消息：token 动态边界（从尾部往前累加，超出 PRUNE_PROTECT_TOKENS 停止）
+        history_messages = intent_result.history_messages or []
+        selected_history = self._select_history_by_token(history_messages)
+
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
-            *intent_result.history_messages[-10:],
+            *selected_history,
             {"role": "user", "content": intent_result.raw_input},
         ]
         return messages
+
+    def _select_history_by_token(self, history_messages: list[dict]) -> list[dict]:
+        """
+        从 history_messages 尾部往前按 token 估算累积，
+        超出 HISTORY_TOKEN_BUDGET 的旧消息不注入。
+        """
+        budget = settings.HISTORY_TOKEN_BUDGET
+        selected: list[dict] = []
+        accumulated = 0
+        for msg in reversed(history_messages):
+            content = msg.get("content") or ""
+            token_est = self._estimate_tokens(content)
+            if accumulated + token_est <= budget:
+                accumulated += token_est
+                selected.insert(0, msg)
+            else:
+                break
+        return selected
 
     def _build_result(
         self,
         think_result: ThinkResult | None,
         observer: Observer,
+        collected_steps: list[dict],
+        degrade_reason: str | None = None,
+        context_usage: dict | None = None,
+        compaction_summary: str | None = None,
     ) -> ExecutionResult:
         """从最终的 ThinkResult 和 Observer 构建 ExecutionResult"""
         elapsed = int(observer.elapsed_seconds * 1000)
+
+        if degrade_reason:
+            # 熔断降级
+            summary = observer.trace.summarize_observations()
+            if summary:
+                reply = (
+                    f"由于处理时间/资源限制，我基于已收集到的信息为您总结：\n\n"
+                    f"{summary}\n\n"
+                    f"如需更详细的分析，建议您缩小问题范围后重新提问。"
+                )
+            else:
+                reply = "抱歉，该问题的分析超出了当前处理能力限制。建议您简化问题或拆分为多个小问题后重试。"
+
+            log.warning(
+                "L3 优雅降级",
+                reason=degrade_reason,
+                iterations=observer.trace.step_count,
+                llm_calls=observer.budget.llm_call_count,
+                elapsed_ms=elapsed,
+            )
+
+            return ExecutionResult(
+                reply=reply,
+                source="deep_l3",
+                tool_calls=observer.trace.to_tool_call_records(),
+                duration_ms=elapsed,
+                reasoning_trace=observer.trace.to_dict(),
+                iterations=observer.trace.step_count,
+                token_usage=observer.budget.to_dict(),
+                is_degraded=True,
+                degrade_reason=degrade_reason,
+                l3_steps=self._convert_steps(collected_steps),
+                context_usage=context_usage,
+                compaction_summary=compaction_summary,
+            )
 
         return ExecutionResult(
             reply=think_result.thought if think_result else "",
@@ -439,46 +664,64 @@ class L3ReActEngine:
             reasoning_trace=observer.trace.to_dict(),
             iterations=observer.trace.step_count,
             token_usage=observer.budget.to_dict(),
+            l3_steps=self._convert_steps(collected_steps),
+            context_usage=context_usage,
+            compaction_summary=compaction_summary,
         )
 
-    def _graceful_degrade(
-        self,
+    @staticmethod
+    def _build_finish_data(
         observer: Observer,
-        reason: str,
-    ) -> ExecutionResult:
+        collected_steps: list[dict],
+        last_compaction_summary: str | None,
+        *,
+        is_degraded: bool = False,
+    ) -> dict:
+        """统一构建 finish 事件 data，确保三处 yield 点数据一致。"""
+        return {
+            "iterations": observer.trace.step_count,
+            "llm_calls": observer.budget.llm_call_count,
+            "is_degraded": is_degraded,
+            "l3_steps": L3ReActEngine._convert_steps(collected_steps),
+            "compaction_summary": last_compaction_summary,
+            "token_usage": observer.budget.to_dict(),
+        }
+
+    @staticmethod
+    def _convert_steps(raw_steps: list[dict]) -> list[dict] | None:
         """
-        熔断时的优雅降级。
+        将 act_result.messages 格式转换为 l3_steps 存储格式（task 4.2）。
 
-        用已收集的工具结果拼接摘要，不做额外 LLM 调用（Q2 裁决）。
+        LLM 格式：
+        - assistant: {"role": "assistant", "content": "...", "tool_calls": [...]}
+        - tool:      {"role": "tool", "content": "...", "tool_call_id": "..."}
+
+        输出格式：每条记录含 step_index, role, content, tool_name, tool_call_id
         """
-        summary = observer.trace.summarize_observations()
-        elapsed = int(observer.elapsed_seconds * 1000)
+        if not raw_steps:
+            return None
 
-        if summary:
-            reply = (
-                f"由于处理时间/资源限制，我基于已收集到的信息为您总结：\n\n"
-                f"{summary}\n\n"
-                f"如需更详细的分析，建议您缩小问题范围后重新提问。"
-            )
-        else:
-            reply = "抱歉，该问题的分析超出了当前处理能力限制。建议您简化问题或拆分为多个小问题后重试。"
+        steps: list[dict] = []
+        for idx, msg in enumerate(raw_steps):
+            role = msg.get("role", "")
+            content = msg.get("content") or ""
+            tool_name: str | None = None
+            tool_call_id: str | None = None
 
-        log.warning(
-            "L3 优雅降级",
-            reason=reason,
-            iterations=observer.trace.step_count,
-            llm_calls=observer.budget.llm_call_count,
-            elapsed_ms=elapsed,
-        )
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                tool_name = msg.get("name")  # tool 消息携带的工具名（如有）
+            elif role == "assistant" and msg.get("tool_calls"):
+                # assistant tool_calls 消息：content 可能为空，序列化 tool_calls 作为内容
+                if not content:
+                    content = json.dumps(msg["tool_calls"], ensure_ascii=False)
 
-        return ExecutionResult(
-            reply=reply,
-            source="deep_l3",
-            tool_calls=observer.trace.to_tool_call_records(),
-            duration_ms=elapsed,
-            reasoning_trace=observer.trace.to_dict(),
-            iterations=observer.trace.step_count,
-            token_usage=observer.budget.to_dict(),
-            is_degraded=True,
-            degrade_reason=reason,
-        )
+            steps.append({
+                "step_index": idx,
+                "role": role,
+                "content": content,
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+            })
+
+        return steps

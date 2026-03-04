@@ -21,7 +21,7 @@ class IntentDetail(BaseModel):
 class IntentResult(BaseModel):
     """意图理解层最终输出（Data Contract）"""
 
-    route: Literal["standard_l1", "deep_l3"]
+    route: Literal["deep_l3"] = "deep_l3"
     complexity: Literal["simple", "moderate", "complex"]
     confidence: float = Field(ge=0.0, le=1.0)
     intent: IntentDetail

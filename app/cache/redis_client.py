@@ -37,12 +37,6 @@ class RedisKeys:
         """滑动窗口限流计数器 (TTL 1min)"""
         return f"rl:{user_id}:{window}"
 
-    # ── Prompt 模板缓存 ──
-    @staticmethod
-    def template(intent_pattern: str) -> str:
-        """Prompt 模板缓存 (TTL 由 TEMPLATE_CACHE_TTL 控制)"""
-        return f"tpl:{intent_pattern}"
-
     # ── 告警事件 ──
     @staticmethod
     def alert_event(event_type: str) -> str:

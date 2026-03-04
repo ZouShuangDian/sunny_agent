@@ -1,5 +1,5 @@
 """
-M03-4 意图引擎：调用 LLM 做意图识别 + 复杂度分级 + 路由决策
+M03-4 意图引擎：调用 LLM 做意图识别 + 复杂度分级
 
 输出 JSON 结构，解析失败时最多重试 1 次，仍然失败返回默认结果。
 JSON 解析统一委托给 M04 的 JsonRepairer，避免重复造轮子。
@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from app.services.prompt_service import prompt_service
 from app.guardrails.json_repairer import JsonRepairer
 from app.intent.context_builder import AssembledContext
 from app.llm.client import LLMClient
@@ -24,7 +23,7 @@ class IntentEngineResult:
     intent_primary: str  # 主意图
     sub_intent: str | None = None  # 子意图
     user_goal: str = ""  # 用户目标描述
-    route: str = "standard_l1"  # 路由
+    route: str = "deep_l3"  # 路由（统一为 deep_l3）
     complexity: str = "simple"  # 复杂度
     confidence: float = 0.5  # 置信度
     entity_hints: dict = field(default_factory=dict)  # 实体线索（弱类型）
@@ -33,33 +32,9 @@ class IntentEngineResult:
     raw_json: str = ""  # LLM 原始 JSON 输出（调试用）
 
 
-# ── 意图分析 Prompt 模板（{intent_categories} 运行时动态注入）──
+# ── 意图分析 Prompt 模板（{intent_categories} 编译时注入）──
 
 _INTENT_PROMPT_TEMPLATE = """你是意图分析引擎。根据用户输入和上下文，输出结构化的意图分析结果。
-
-## 路由决策（二选一）
-
-根据任务的 **推理深度** 和 **步骤复杂度** 选择路由：
-
-### standard_l1（标准执行）
-- **判断标准**：任务可以在 1-3 步内完成，不需要制定计划、不需要因果分析、不需要跨多个数据源对比。
-- **涵盖场景**：
-  - 直接回答：问候、闲聊、通用知识问答、拒绝超出能力范围的请求
-  - 内容生成：写作、翻译、总结、润色
-  - 简单检索：查股价、查天气、搜索信息
-- **简单规则**：如果你能一口气回答（可能用 1 个工具辅助），就选 `standard_l1`。
-
-### deep_l3（深度推理）
-- **判断标准**：任务需要先制定执行计划，需要多步推理、归因分析、或跨数据源综合判断才能得出结论。
-- **涵盖场景**：
-  - 调研类："帮我调研一下 XXX 的最新进展"、"搜索并整理 XXX 的相关信息"
-  - 对比分析类："A 和 B 哪个更好？给我详细对比"、"比较这几个方案的优劣"
-  - 多步骤执行类："先搜索 X，再根据结果做 Y"、"帮我完成这几件事：1. 2. 3."
-  - 归因分析类："为什么会出现这个问题？"、"分析一下原因"
-  - 需要综合多个信息源才能得出结论的任务
-- **简单规则**：如果你需要"先...然后...最后..."地分步思考，就选 `deep_l3`。
-
-**默认选 `standard_l1`**，只有明确需要多步推理时才选 `deep_l3`。
 
 ## 意图类别（intent.primary）
 
@@ -80,7 +55,6 @@ _INTENT_PROMPT_TEMPLATE = """你是意图分析引擎。根据用户输入和上
     "sub_intent": null,
     "user_goal": "帮用户撰写一份本周的工作周报，属于写作辅助任务"
   }},
-  "route": "standard_l1",
   "complexity": "simple",
   "confidence": 0.95,
   "entity_hints": {{}},
@@ -91,39 +65,28 @@ _INTENT_PROMPT_TEMPLATE = """你是意图分析引擎。根据用户输入和上
 字段说明：
 - intent.primary: 上述意图类别之一
 - intent.user_goal: 用一句完整的中文描述用户的核心需求（15-50字）
-- route: standard_l1 / deep_l3
 - complexity: simple / moderate / complex
 - confidence: 0.0 ~ 1.0
 - entity_hints: 从用户输入中识别到的关键实体线索（如 product, metric, period 等），只放有把握的
 - needs_clarify: 信息不足时设为 true，并在 clarify_question 中给出追问"""
 
-# 内置兜底分类（PromptCache 加载失败时使用）
-_FALLBACK_CATEGORIES = "- general_qa: 通用知识问答（默认）"
+# 意图分类常量（原 seed_prompts.py 中的 4 个分类）
+_INTENT_CATEGORIES = """- general_qa: 通用知识问答（默认）
+- writing: 写作辅助（周报、邮件、文案、翻译、润色等）
+- summarize: 内容总结（文档摘要、会议纪要、要点提取等）
+- translate: 翻译任务（中英互译、多语言翻译等）"""
 
 
-async def build_intent_prompt() -> str:
-    """动态构建意图分析 Prompt：从 PG 加载意图类别列表"""
-    try:
-        categories = await prompt_service.get_intent_categories()
-        if categories:
-            lines = [f"- {c['tag']}: {c['description']}" for c in categories]
-            # 追加兜底分类提示
-            tags = {c["tag"] for c in categories}
-            if "general_qa" not in tags:
-                lines.append("- general_qa: 通用知识问答（默认）")
-            category_text = "\n".join(lines)
-        else:
-            category_text = _FALLBACK_CATEGORIES
-    except Exception:
-        category_text = _FALLBACK_CATEGORIES
+def build_intent_prompt() -> str:
+    """构建意图分析 Prompt（意图分类硬编码，不再依赖 PG）"""
+    return _INTENT_PROMPT_TEMPLATE.format(intent_categories=_INTENT_CATEGORIES)
 
-    return _INTENT_PROMPT_TEMPLATE.format(intent_categories=category_text)
 
 # 默认结果：当 LLM 完全无法解析时使用
 DEFAULT_RESULT = IntentEngineResult(
     intent_primary="general_qa",
     user_goal="无法识别用户意图",
-    route="standard_l1",
+    route="deep_l3",
     complexity="simple",
     confidence=0.0,
 )
@@ -144,8 +107,7 @@ class IntentEngine:
         context: AssembledContext,
     ) -> IntentEngineResult:
         """调用 LLM 分析意图，返回结构化结果"""
-        # 动态加载意图类别（从 PG 缓存）
-        intent_prompt = await build_intent_prompt()
+        intent_prompt = build_intent_prompt()
 
         messages = [
             {"role": "system", "content": context.system_prompt + "\n\n" + intent_prompt},
@@ -163,13 +125,6 @@ class IntentEngine:
                 )
                 result = self._parse_response(response.content)
                 result.raw_json = response.content
-
-                # 校验 route 合法性，非法值降级为 standard_l1
-                valid_routes = {"standard_l1", "deep_l3"}
-                if result.route not in valid_routes:
-                    log.warning("意图引擎返回非法路由，降级处理", raw_route=result.route)
-                    result.route = "standard_l1"
-
                 return result
 
             except (ValueError, KeyError) as e:
@@ -202,7 +157,7 @@ class IntentEngine:
             intent_primary=intent.get("primary", "general_qa"),
             sub_intent=intent.get("sub_intent"),
             user_goal=intent.get("user_goal", ""),
-            route=data.get("route", "standard_l1"),
+            route="deep_l3",  # 统一路由，不再从 LLM 输出中读取
             complexity=data.get("complexity", "simple"),
             confidence=float(data.get("confidence", 0.5)),
             entity_hints=data.get("entity_hints", {}),

@@ -33,12 +33,22 @@ class OutputAssembler:
         - 实体线索：仅来源于 LLM 提取（用于调试/日志，不持久化）
         - 追问：以 ClarifyHandler 判断为准
         """
-        # 过滤 history：仅保留 user/assistant(有内容) 消息，供执行层使用
-        history_messages = [
-            {"role": m.role, "content": m.content}
-            for m in context.history.messages
-            if m.role in ("user", "assistant") and m.content
-        ][-10:]  # 最近 10 条
+        # 构建 history_messages：user/assistant 消息（compaction 节点转为 role=user 注入）
+        # [-10:] 硬截断已移除：由 L3ReActEngine._build_initial_messages() 做 token 动态边界
+        history_messages = []
+        for m in context.history.messages:
+            if m.role == "user" and m.content:
+                history_messages.append({"role": "user", "content": m.content})
+            elif m.role == "assistant" and m.content:
+                if m.is_compaction:
+                    # compaction 节点注入为 role=user，带框架说明（避免连续 assistant 消息）
+                    from app.memory.schemas import _COMPACTION_INJECT_TEMPLATE
+                    history_messages.append({
+                        "role": "user",
+                        "content": _COMPACTION_INJECT_TEMPLATE.format(summary_content=m.content),
+                    })
+                else:
+                    history_messages.append({"role": "assistant", "content": m.content})
 
         return IntentResult(
             route=intent_result.route,

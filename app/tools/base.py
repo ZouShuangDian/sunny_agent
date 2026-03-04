@@ -82,8 +82,8 @@ class BaseTool(ABC):
 
     @property
     def tier(self) -> list[str]:
-        """可用层级，默认 L1 + L3 都可用"""
-        return ["L1", "L3"]
+        """可用层级"""
+        return ["L3"]
 
     @property
     def timeout_ms(self) -> int:
