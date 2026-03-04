@@ -20,7 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.drop_table('prompt_templates', schema='sunny_agent')
+    op.execute('DROP TABLE IF EXISTS sunny_agent.prompt_templates')
 
 
 def downgrade() -> None:
