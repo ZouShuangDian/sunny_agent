@@ -20,7 +20,7 @@ import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from app.api.response import ok
+from app.api.response import ApiResponse, ok
 from app.cache.redis_client import get_redis
 from app.config import get_settings
 from app.db.engine import async_session
@@ -344,7 +344,7 @@ async def _init_session(
 
 # ── POST /chat — 非流式 JSON 响应 ──
 
-@router.post("/chat")
+@router.post("/chat", response_model=ApiResponse[ChatResponse])
 async def chat(
     body: ChatRequest,
     user: AuthenticatedUser = Depends(get_current_user),

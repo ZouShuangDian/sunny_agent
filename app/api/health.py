@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.response import fail, ok
+from app.api.response import ApiResponse, fail, ok
 from app.cache.redis_client import get_redis
 from app.db.engine import get_db
 
@@ -16,7 +16,7 @@ router = APIRouter(tags=["健康检查"])
 log = structlog.get_logger()
 
 
-@router.get("/health")
+@router.get("/health", response_model=ApiResponse)
 async def health_check(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
