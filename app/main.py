@@ -12,7 +12,6 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -98,14 +97,6 @@ async def unhandled_exception_handler(_request: Request, exc: Exception):
 # ── 中间件（执行顺序：从下往上注册，从上往下执行） ──
 app.add_middleware(RequestLoggerMiddleware)
 app.add_middleware(MetricsMiddleware)
-# CORS 最后注册 = 最外层，确保 preflight OPTIONS 请求在所有中间件之前被处理
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ── Prometheus 指标端点 ──
 metrics_app = make_asgi_app()

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.response import ok
 from app.db.engine import get_db
 from app.db.filters import CompanyFilter
 from app.db.models.user import Role, User
@@ -120,7 +121,7 @@ async def create_user(
     user_data: UserCreateSchema,
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> UserResponse:
+):
     """创建新用户（仅管理员）"""
     require_admin(current_user)
     
@@ -153,7 +154,7 @@ async def create_user(
     
     log.info("创建用户", usernumb=user.usernumb, creator=current_user.usernumb)
     
-    return user_to_response(user)
+    return ok(data=user_to_response(user), message="用户创建成功", status_code=201)
 
 
 @router.get("")
@@ -165,7 +166,7 @@ async def list_users(
     source: str | None = Query(None, description="按来源筛选"),
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> UserListResponse:
+):
     """查询用户列表（支持分页和筛选）"""
     require_admin(current_user)
     
@@ -201,12 +202,12 @@ async def list_users(
     count_result = await session.execute(select(func.count()).select_from(count_query.subquery()))
     total = count_result.scalar()
     
-    return UserListResponse(
+    return ok(data=UserListResponse(
         items=[user_to_response(u) for u in users],
         total=total,
         page=page,
         page_size=page_size,
-    )
+    ))
 
 
 @router.get("/{user_id}")
@@ -214,7 +215,7 @@ async def get_user(
     user_id: UUID,
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> UserResponse:
+):
     """获取用户详情"""
     user = await get_user_by_id(session, user_id)
     
@@ -223,7 +224,7 @@ async def get_user(
         if user.company != current_user.company:
             raise HTTPException(status_code=403, detail="无权查看其他公司用户")
     
-    return user_to_response(user)
+    return ok(data=user_to_response(user))
 
 
 @router.put("/{user_id}")
@@ -232,7 +233,7 @@ async def update_user(
     user_data: UserUpdateSchema,
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> UserResponse:
+):
     """更新用户信息（仅管理员）"""
     require_admin(current_user)
     
@@ -261,7 +262,7 @@ async def update_user(
     
     log.info("更新用户", usernumb=user.usernumb, updater=current_user.usernumb)
     
-    return user_to_response(user)
+    return ok(data=user_to_response(user), message="用户更新成功")
 
 
 @router.delete("/{user_id}")
@@ -269,7 +270,7 @@ async def delete_user(
     user_id: UUID,
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> dict:
+):
     """软删除用户（仅管理员）"""
     require_admin(current_user)
     
@@ -285,7 +286,7 @@ async def delete_user(
     
     log.info("删除用户", usernumb=user.usernumb, deleter=current_user.usernumb)
     
-    return {"status": "success", "message": "用户已删除"}
+    return ok(message="用户已删除")
 
 
 @router.post("/bulk-import")
@@ -293,7 +294,7 @@ async def bulk_import_users(
     file: UploadFile = File(..., description="CSV 或 Excel 文件"),
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> BulkImportResponse:
+):
     """批量导入用户（仅管理员）"""
     require_admin(current_user)
     
@@ -317,7 +318,7 @@ async def bulk_import_users(
     
     log.info("批量导入用户", success=results["success"], failed=results["failed"])
     
-    return BulkImportResponse(**results)
+    return ok(data=BulkImportResponse(**results), message="批量导入完成")
 
 
 async def import_from_csv(content: bytes, session: AsyncSession, results: dict) -> dict:
@@ -381,10 +382,10 @@ async def import_from_csv(content: bytes, session: AsyncSession, results: dict) 
 async def get_current_user_info(
     current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
-) -> UserResponse:
+):
     """获取当前用户信息"""
     user = await get_user_by_id(session, UUID(current_user.id))
-    return user_to_response(user)
+    return ok(data=user_to_response(user))
 
 
 @router.put("/me")
@@ -392,7 +393,7 @@ async def update_current_user_info(
     user_data: UserUpdateMeSchema,
     current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
-) -> UserResponse:
+):
     """更新当前用户信息"""
     user = await get_user_by_id(session, UUID(current_user.id))
     
@@ -409,7 +410,7 @@ async def update_current_user_info(
     
     log.info("更新当前用户信息", usernumb=user.usernumb)
     
-    return user_to_response(user)
+    return ok(data=user_to_response(user), message="个人信息更新成功")
 
 
 def user_to_response(user: User) -> UserResponse:

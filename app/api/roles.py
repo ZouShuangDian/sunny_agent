@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from app.api.response import ok
 from app.db.engine import get_db
 from app.db.models.user import Role
 from app.security.auth import AuthenticatedUser, get_current_user
@@ -74,7 +75,7 @@ async def create_role(
     role_data: RoleCreateSchema,
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> RoleResponse:
+):
     """创建角色（仅管理员）"""
     require_admin(current_user)
     
@@ -96,22 +97,22 @@ async def create_role(
     
     log.info("创建角色", role_name=role.name, creator=current_user.usernumb)
     
-    return role_to_response(role)
+    return ok(data=role_to_response(role), message="角色创建成功", status_code=201)
 
 
 @router.get("")
 async def list_roles(
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> RoleListResponse:
+):
     """获取所有角色"""
     result = await session.execute(select(Role).order_by(Role.name))
     roles = result.scalars().all()
     
-    return RoleListResponse(
+    return ok(data=RoleListResponse(
         items=[role_to_response(r) for r in roles],
         total=len(roles),
-    )
+    ))
 
 
 @router.get("/{role_id}")
@@ -119,10 +120,10 @@ async def get_role(
     role_id: UUID,
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> RoleResponse:
+):
     """获取角色详情"""
     role = await get_role_by_id(session, role_id)
-    return role_to_response(role)
+    return ok(data=role_to_response(role))
 
 
 @router.put("/{role_id}")
@@ -131,7 +132,7 @@ async def update_role(
     role_data: RoleUpdateSchema,
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> RoleResponse:
+):
     """更新角色（仅管理员）"""
     require_admin(current_user)
     
@@ -156,7 +157,7 @@ async def update_role(
     
     log.info("更新角色", role_name=role.name, updater=current_user.usernumb)
     
-    return role_to_response(role)
+    return ok(data=role_to_response(role), message="角色更新成功")
 
 
 @router.delete("/{role_id}")
@@ -164,7 +165,7 @@ async def delete_role(
     role_id: UUID,
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> dict:
+):
     """删除角色（仅管理员）"""
     require_admin(current_user)
     
@@ -185,7 +186,7 @@ async def delete_role(
     
     log.info("删除角色", role_name=role.name, deleter=current_user.usernumb)
     
-    return {"status": "success", "message": "角色已删除"}
+    return ok(message="角色已删除")
 
 
 @router.put("/{role_id}/permissions")
@@ -194,7 +195,7 @@ async def update_role_permissions(
     permissions_data: RolePermissionsSchema,
     session=Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
-) -> RoleResponse:
+):
     """更新角色权限（仅管理员）"""
     require_admin(current_user)
     
@@ -207,7 +208,7 @@ async def update_role_permissions(
     
     log.info("更新角色权限", role_name=role.name, updater=current_user.usernumb)
     
-    return role_to_response(role)
+    return ok(data=role_to_response(role), message="角色权限更新成功")
 
 
 def role_to_response(role: Role) -> RoleResponse:
