@@ -32,7 +32,7 @@ from app.security.auth import (
     create_refresh_token,
     get_current_user,
 )
-from app.services.user_sync import get_or_create_sso_user
+from app.services.user_sync import validate_sso_user
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 log = structlog.get_logger()
@@ -204,7 +204,7 @@ async def sso_callback(
     # 3. 创建/更新用户
     async with async_session() as session:
         try:
-            user = await get_or_create_sso_user(session, attributes)
+            user = await validate_sso_user(session, attributes)
             await session.commit()
             
             # 预加载 role 属性，避免 DetachedInstanceError
@@ -239,8 +239,8 @@ async def sso_callback(
             
         except Exception as e:
             await session.rollback()
-            log.error("SSO 用户同步失败", error=str(e), exc_info=True)
-            raise HTTPException(500, f"用户同步失败：{str(e)}")
+            log.error("SSO 登录失败", error=str(e), exc_info=True)
+            raise HTTPException(500, f"登录失败：{str(e)}")
 
 
 def _parse_cas_xml(xml_data: str) -> dict | None:
