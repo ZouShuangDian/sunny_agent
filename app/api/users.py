@@ -18,6 +18,7 @@ from app.db.engine import get_db
 from app.db.filters import CompanyFilter
 from app.db.models.user import Role, User
 from app.security.auth import AuthenticatedUser, get_current_user
+from app.security.auth import hash_password
 
 router = APIRouter(prefix="/api/users", tags=["用户管理"])
 log = structlog.get_logger()
@@ -103,7 +104,7 @@ class BulkImportResponse(BaseModel):
 
 def require_admin(user: AuthenticatedUser) -> None:
     """检查用户是否为管理员"""
-    if "admin" not in user.permissions:
+    if "*" not in user.permissions:
         raise HTTPException(status_code=403, detail="权限不足：需要管理员权限")
 
 
@@ -136,11 +137,12 @@ async def create_user(
     if not role:
         raise HTTPException(status_code=400, detail="角色不存在")
     
-    # 创建用户
+    # 创建用户，默认密码 123456
     user = User(
         usernumb=user_data.usernumb,
         username=user_data.username,
         email=user_data.email,
+        hashed_pwd=hash_password("123456"),
         role_id=user_data.role_id,
         department=user_data.department,
         company=user_data.company,
@@ -170,7 +172,7 @@ async def list_users(
     """查询用户列表（支持分页和筛选）"""
     require_admin(current_user)
     
-    query = select(User)
+    query = select(User).where(User.is_active == True)
     
     # 应用筛选条件
     if company:

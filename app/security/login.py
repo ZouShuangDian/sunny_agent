@@ -23,6 +23,8 @@ from app.config import get_settings
 from app.db.engine import async_session, get_db
 from app.db.models.user import Role, User
 from app.api.response import ApiResponse, ok
+from app.security.auth import hash_password, verify_password
+
 from app.security.auth import (
     AuthenticatedUser,
     bearer_scheme,
@@ -37,14 +39,6 @@ log = structlog.get_logger()
 settings = get_settings()
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """校验密码"""
-    return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
-
-
-def hash_password(password: str) -> str:
-    """生成密码哈希"""
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 # ── 请求/响应模型 ──
@@ -212,37 +206,41 @@ async def sso_callback(
         try:
             user = await get_or_create_sso_user(session, attributes)
             await session.commit()
+            
+            # 预加载 role 属性，避免 DetachedInstanceError
+            await session.refresh(user, attribute_names=['role'])
+            
+            # 4. 签发 JWT（在 session 有效期内）
+            access_token = create_access_token(
+                sub=str(user.id),
+                usernumb=user.usernumb,
+                role=user.role.name,
+                department=user.department,
+                company=user.company,
+                permissions=user.role.permissions,
+            )
+            
+            log.info("SSO 登录成功", user=user.usernumb, role=user.role.name)
+            
+            return ok(data={
+                "access_token": access_token,
+                "refresh_token": create_refresh_token(sub=str(user.id)),
+                "token_type": "bearer",
+                "user": {
+                    "id": str(user.id),
+                    "usernumb": user.usernumb,
+                    "username": user.username,
+                    "email": user.email,
+                    "company": user.company,
+                    "department": user.department,
+                    "role": user.role.name,
+                }
+            }, message="sso 单点登录成功")
+            
         except Exception as e:
             await session.rollback()
             log.error("SSO 用户同步失败", error=str(e), exc_info=True)
             raise HTTPException(500, f"用户同步失败：{str(e)}")
-    
-    # 4. 签发 JWT
-    access_token = create_access_token(
-        sub=str(user.id),
-        usernumb=user.usernumb,
-        role=user.role.name,
-        department=user.department,
-        company=user.company,
-        permissions=user.role.permissions,
-    )
-    
-    log.info("SSO 登录成功", user=user.usernumb, role=user.role.name)
-    
-    return {
-        "access_token": access_token,
-        "refresh_token": create_refresh_token(sub=str(user.id)),
-        "token_type": "bearer",
-        "user": {
-            "id": str(user.id),
-            "usernumb": user.usernumb,
-            "username": user.username,
-            "email": user.email,
-            "company": user.company,
-            "department": user.department,
-            "role": user.role.name,
-        }
-    }
 
 
 def _parse_cas_xml(xml_data: str) -> dict | None:
