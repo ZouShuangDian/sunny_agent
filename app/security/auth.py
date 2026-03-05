@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.cache.redis_client import RedisKeys, get_redis
 from app.config import get_settings
+from app.utils.token_util import hash_password, verify_password
 
 settings = get_settings()
 bearer_scheme = HTTPBearer()
@@ -27,6 +28,7 @@ class AuthenticatedUser:
     username: str = ""
     role: str = "viewer"
     department: str | None = None
+    company: str | None = None
     data_scope: dict = field(default_factory=dict)
     permissions: list[str] = field(default_factory=list)
 
@@ -39,6 +41,7 @@ def create_access_token(
     department: str | None = None,
     data_scope: dict | None = None,
     permissions: list[str] | None = None,
+    company: str | None = None,
 ) -> str:
     """签发 access_token"""
     now = datetime.now(timezone.utc)
@@ -50,6 +53,7 @@ def create_access_token(
         "department": department,
         "data_scope": data_scope or {},
         "permissions": permissions or [],
+        "company": company,
         "iat": now,
         "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     }
@@ -96,6 +100,7 @@ async def get_current_user(
         username=payload.get("username", ""),
         role=payload.get("role", "viewer"),
         department=payload.get("department"),
+        company=payload.get("company"),
         data_scope=payload.get("data_scope", {}),
         permissions=payload.get("permissions", []),
     )

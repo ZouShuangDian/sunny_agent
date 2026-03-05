@@ -58,7 +58,7 @@ def ok(
     - status_code: HTTP 状态码（默认 200，POST 创建资源可传 201）
     """
     if isinstance(data, BaseModel):
-        data = data.model_dump()
+        data = data.model_dump(mode="json")
     body = {"success": True, "code": 0, "message": message, "data": data}
     return JSONResponse(content=body, status_code=status_code)
 
