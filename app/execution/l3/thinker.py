@@ -9,6 +9,7 @@ Thinker 拥有 LLM 调用权，返回结构化的 ThinkResult。
 """
 
 import json
+from collections.abc import AsyncIterator
 
 import structlog
 
@@ -74,6 +75,28 @@ class Thinker:
             usage=response.usage,
             is_done=is_done,
         )
+
+    async def think_stream(
+        self,
+        messages: list[dict],
+        tool_schemas: list[dict] | None,
+    ) -> AsyncIterator[dict]:
+        """
+        统一流式 Think，适用于中间步骤（有工具）和最终步骤（无工具）。
+        直接透传 chat_stream() 的原始 chunk，上层自行处理。
+
+        chunk 格式：
+        - {"type": "delta",     "content": "..."}
+        - {"type": "tool_call", "id": "...", "name": "...", "arguments": "..."}
+        - {"type": "finish",    "reason": "stop", "usage": {...}}
+        """
+        async for chunk in self.llm.chat_stream(
+            messages=messages,
+            temperature=0.7,
+            max_tokens=4096,
+            tools=tool_schemas,
+        ):
+            yield chunk
 
     @staticmethod
     def _parse_tool_calls(raw_tool_calls) -> list[ToolCallRequest] | None:

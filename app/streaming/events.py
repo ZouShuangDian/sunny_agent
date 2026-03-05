@@ -5,7 +5,7 @@ SSE 事件协议规范（单一维护点）
 外部独立 Agent 接入时，只需遵守本文件定义的协议，前端无需特殊适配。
 
 事件流时序（主 Agent，正常路径）：
-    status → [thought → context_usage → tool_call → tool_result]* → delta → done
+    status → [delta? → context_usage → tool_call → tool_result]* → delta → context_usage → done
 
 事件流时序（含 SubAgent）：
     ... → subagent_start → [subagent_thought → subagent_tool_call → subagent_tool_result]* → subagent_finish → ...
@@ -91,22 +91,17 @@ class SSEEvent:
 
     THOUGHT = "thought"
     """
-    主 Agent 的单步推理内容（LLM 的"内心独白"，非最终回答）。
-    在每次 Think 阶段完成后推送；前端通常以折叠/灰色样式展示。
+    ⚠️ v2 废弃：execute_stream() 不再 emit 此事件。
+    LLM 文本内容（包含中间步骤推理和最终回答）统一通过 delta 实时推送，thought 与 delta 合并。
 
-    data: {
-        "step": int,      # 当前 ReAct 循环步骤编号（从 0 开始）
-        "content": str    # 本次推理文本
-    }
-
-    ⚠️ 与 delta 区别：
-      - thought：中间推理过程，任务尚未完成，可能还有后续工具调用。
-      - delta：最终回答的流式文本片段，表示 Agent 已判定任务完成，是给用户看的正式输出。
+    常量保留供：
+    - 历史日志分析（v1 日志中存在此事件名）
+    - SubAgent 事件名构造（subagent_thought 与本常量独立，不受影响）
     """
 
     CONTEXT_USAGE = "context_usage"
     """
-    上下文窗口用量快照，每次 Think 后随 thought 事件一起推送。
+    上下文窗口用量快照，每步流式 Think 完成后推送（v2：统一在每步 delta 之后推送）。
     前端可据此渲染进度条或在接近上限时给用户提示。
 
     data: {
@@ -119,17 +114,13 @@ class SSEEvent:
 
     DELTA = "delta"
     """
-    主 Agent 最终回答的文本内容。
-    仅在 Agent 判定任务完成时推送（think_result.is_done=True），或熔断降级时推送降级回答。
+    LLM 文本内容的流式片段（逐 token 实时推送）。
+    v2：所有步骤统一通过 delta 推送，中间步骤（function calling 模型）content 通常为空（delta 极少触发）；
+    最终步骤 delta 为用户可见的回答，逐 token 连续推送；熔断降级时为单次降级回答。
 
-    data: str  # 回答文本（纯字符串，非 dict）
+    data: {"content": str}  # 文本片段，前端 JSON.parse 后取 content 字段 append 拼接
 
-    ⚠️ 与 thought 区别：见 thought 说明。
-
-    【当前实现】：Thinker 使用非流式 LLM 调用（llm.chat），完整文本一次性返回，
-                  因此 delta 事件在一次请求中只推送一次，data 是完整回答。
-    【未来规划】：若 Thinker 改用流式 LLM 调用（llm.chat_stream），
-                  delta 事件将改为多次推送的 token 片段，前端需 append 拼接。
+    示例：{"content": "你好"}
     """
 
     # ── 工具调用 ──────────────────────────────────────────────────────────────
@@ -155,9 +146,9 @@ class SSEEvent:
     前端可据此展示工具输出，或结束 Loading 状态。
 
     data: {
-        "step": int,      # 当前 ReAct 循环步骤编号（与对应 tool_call 相同）
-        "name": str,      # 工具名称（与对应 tool_call 相同）
-        "result": str     # 工具返回内容（字符串形式）
+        "step": int,           # 当前 ReAct 循环步骤编号（与对应 tool_call 相同）
+        "name": str,           # 工具名称（与对应 tool_call 相同）
+        "result": str | dict   # 工具返回内容；JSON 可解析时自动反序列化为对象，否则保留字符串
     }
 
     ⚠️ 与 tool_call 区别：见 tool_call 说明。
@@ -259,10 +250,13 @@ def format_sse(event: str, data: str | dict) -> str:
 
     参数：
         event: 事件名（建议使用 SSEEvent 常量）
-        data:  事件数据，dict 自动序列化为 JSON；str 直接写入
+        data:  事件数据，统一经 json.dumps 序列化（str 和 dict 均处理）
 
     返回值：
         完整的 SSE 文本帧字符串（含末尾空行）
+
+    注意：所有 data 统一经 json.dumps 序列化，确保含 \\n 的文本不会截断 SSE 帧。
+          前端对每条事件均需 JSON.parse(event.data)；delta 事件解析后取 content 字段拼接。
     """
-    data_str = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else data
+    data_str = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {data_str}\n\n"
