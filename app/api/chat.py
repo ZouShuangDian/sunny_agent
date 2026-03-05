@@ -427,6 +427,9 @@ async def chat(
 
 _sse_event = format_sse  # 本地别名，保持调用处代码不变
 
+# done 事件字段白名单：内部持久化字段（l3_steps / compaction_summary）不透传给前端
+_DONE_FIELDS = {"iterations", "llm_calls", "is_degraded", "token_usage"}
+
 
 @router.post("/chat/stream")
 async def chat_stream(
@@ -463,12 +466,14 @@ async def chat_stream(
                         evt_type = event["event"]
                         evt_data = event["data"]
                         if evt_type == SSEEvent.DELTA:
-                            reply_chunks.append(evt_data)
+                            reply_chunks.append(evt_data.get("content", ""))
                             yield _sse_event(SSEEvent.DELTA, evt_data)
-                        elif evt_type in (SSEEvent.THOUGHT, SSEEvent.TOOL_CALL, SSEEvent.TOOL_RESULT, SSEEvent.CONTEXT_USAGE):
+                        elif evt_type in (SSEEvent.TOOL_CALL, SSEEvent.TOOL_RESULT, SSEEvent.CONTEXT_USAGE):
                             yield _sse_event(evt_type, evt_data)
                         elif evt_type == SSEEvent.FINISH:
                             finish_meta = evt_data if isinstance(evt_data, dict) else {}
+                        else:
+                            log.debug("execute_stream 产生了未处理的事件类型，已丢弃", evt_type=evt_type)
                 finally:
                     reset_user_id(_uid_token)
 
@@ -501,7 +506,8 @@ async def chat_stream(
                            if "token_usage" in finish_meta else {}),
                     },
                 )
-                yield _sse_event(SSEEvent.DONE, {"session_id": session_id, "duration_ms": duration_ms, **finish_meta})
+                done_meta = {k: finish_meta[k] for k in _DONE_FIELDS if k in finish_meta}
+                yield _sse_event(SSEEvent.DONE, {"session_id": session_id, "duration_ms": duration_ms, **done_meta})
             finally:
                 # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
                 if plugin_token is not None:

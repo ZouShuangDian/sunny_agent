@@ -24,12 +24,13 @@ from app.config import get_settings
 from app.execution.l3.actor import Actor
 from app.execution.l3.observer import Observer
 from app.execution.l3.prompts import build_l3_system_prompt
-from app.execution.l3.schemas import L3Config, ThinkResult
+from app.execution.l3.schemas import L3Config, ThinkResult, ToolCallRequest
 from app.execution.l3.thinker import Thinker
 from app.execution.schemas import ExecutionResult
 from app.execution.session_context import get_session_id, reset_session_id, set_session_id
 from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
+from app.execution.plugin_context import PluginCommandContext, get_plugin_context
 from app.prompts.markers import TODO_REMINDER_MARKER
 from app.streaming.events import SSEEvent
 from app.todo.store import TodoStore
@@ -49,7 +50,15 @@ COMPACTION_PROMPT = """请为以下对话历史生成结构化摘要，包含：
 要求：摘要需足够详细，让继续任务的 AI 能无缝衔接。"""
 
 
-def _build_plugin_context_block(ctx: "PluginCommandContext") -> str:
+def _parse_tool_arguments(s: str) -> dict:
+    """安全解析 LLM tool_call arguments JSON，失败时返回空 dict。"""
+    try:
+        return json.loads(s) if s else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _build_plugin_context_block(ctx: PluginCommandContext) -> str:
     """
     将 PluginCommandContext 序列化为 system prompt 注入块。
 
@@ -200,36 +209,36 @@ class L3ReActEngine:
         流式 ReAct 执行。
 
         SSE 事件格式：
-        - {"event": "thought", "data": {"step": 0, "content": "..."}}
-        - {"event": "tool_call", "data": {"step": 0, "name": "...", "args": {...}}}
-        - {"event": "tool_result", "data": {"step": 0, "name": "...", "result": "..."}}
-        - {"event": "delta", "data": "最终回答的文本片段"}
-        - {"event": "finish", "data": {"iterations": 2, "tokens_used": 3500}}
+        - {"event": "tool_call",     "data": {"step": 0, "name": "...", "args": {...}}}
+        - {"event": "tool_result",   "data": {"step": 0, "name": "...", "result": "..."}}
+        - {"event": "delta",         "data": "文本片段（逐 token）"}
+        - {"event": "context_usage", "data": {"prompt_tokens": ..., "remaining": ..., ...}}
+        - {"event": "finish",        "data": {"iterations": 2, ...}}
 
-        中间步骤用非流式（thought + tool_call + tool_result），
-        最终回答用流式（delta）。
+        所有步骤统一使用 think_stream() 流式 Think，delta 实时推送。
+        中间步骤（function calling 模型）content 通常为空，delta 极少触发。
         """
-        # 设置 session_id ContextVar（与 execute() 保持一致）
         sid_token = set_session_id(session_id)
-        # 收集 L3 中间步骤消息（通过 finish 事件传递给 chat.py）
         collected_steps: list[dict] = []
-        last_compaction_summary: str | None = None  # 局部变量，避免实例级竞态
+        last_compaction_summary: str | None = None
         try:
             observer = Observer(self.config)
             observer.start()
 
-            # 提取用户目标（用于 Layer 3 Reminder 复读）
             user_goal: str | None = intent_result.intent.user_goal or None
 
             messages = self._build_initial_messages(intent_result)
             tool_schemas = self.tool_registry.get_all_schemas()
+
+            think_result: ThinkResult | None = None
+            context_limit = settings.MODEL_CONTEXT_LIMIT  # 提到循环外，作用域明确
 
             for step in range(self.config.max_iterations):
                 # ── 熔断检查 ──
                 should_stop, reason = observer.should_stop()
                 if should_stop:
                     degrade_result = self._build_result(None, observer, [], degrade_reason=reason)
-                    yield {"event": SSEEvent.DELTA, "data": degrade_result.reply}
+                    yield {"event": SSEEvent.DELTA, "data": {"content": degrade_result.reply}}
                     yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                         observer, collected_steps, last_compaction_summary, is_degraded=True,
                     )}
@@ -238,71 +247,94 @@ class L3ReActEngine:
                 # ── Layer 3 干预：注入当前 Todo 状态到 system prompt ──
                 messages = await self._inject_todo_reminder(messages, user_goal)
 
-                # ── Think ──
-                use_tools = tool_schemas if step < self.config.max_iterations - 1 else None
-                think_result = await self.thinker.think(messages, use_tools)
-                observer.on_think(step, think_result)
+                # 中间步骤带工具；最后一步不带（强制 LLM 总结，不调用工具）
+                tool_schemas_for_step = tool_schemas if step < self.config.max_iterations - 1 else None
 
-                # 推送 thought 事件（让前端展示推理过程）
-                if think_result.thought:
-                    yield {"event": SSEEvent.THOUGHT, "data": {
-                        "step": step,
-                        "content": think_result.thought,
+                # ── 统一流式 Think ──
+                collected_tool_calls: list[dict] = []
+                content_tokens: list[str] = []
+                final_usage: dict = {}
+
+                async for chunk in self.thinker.think_stream(messages, tool_schemas_for_step):
+                    if chunk["type"] == "delta":
+                        # 所有步骤的 LLM 文本内容直接实时推送
+                        # 中间步骤：content 通常为空（function calling 模型），delta 极少触发
+                        # 最终步骤：delta = 真正的用户回答，逐 token 推送
+                        content_tokens.append(chunk["content"])
+                        yield {"event": SSEEvent.DELTA, "data": {"content": chunk["content"]}}
+                    elif chunk["type"] == "tool_call":
+                        collected_tool_calls.append(chunk)
+                    elif chunk["type"] == "finish":
+                        final_usage = chunk.get("usage", {})
+
+                # ── context_usage：统一在流式完成后推送 ──
+                prompt_tokens = final_usage.get("prompt_tokens", 0)
+                if prompt_tokens > 0:
+                    yield {"event": SSEEvent.CONTEXT_USAGE, "data": {
+                        "prompt_tokens": prompt_tokens,
+                        "remaining": context_limit - prompt_tokens,
+                        "percent": round(prompt_tokens / context_limit * 100, 1),
+                        "limit": context_limit,
                     }}
 
-                # ── 上下文用量计算 + context_usage 推送 ──
-                prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
-                remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
-                context_usage = {
-                    "prompt_tokens": prompt_tokens,
-                    "remaining": remaining,
-                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
-                    "limit": settings.MODEL_CONTEXT_LIMIT,
-                }
-                yield {"event": SSEEvent.CONTEXT_USAGE, "data": context_usage}
-
-                # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
+                # ── Level 2 溢出检测（prompt_tokens 已可用）──
+                remaining = context_limit - prompt_tokens
                 if remaining < settings.COMPACTION_BUFFER:
                     messages, summary = await self._compact_messages(messages)
                     if summary:
                         last_compaction_summary = summary
 
-                # ── 任务完成 → 最终回答流式输出 ──
+                # ── 构建 ThinkResult（供 observer / Act 使用）──
+                think_result = ThinkResult(
+                    thought="".join(content_tokens),
+                    tool_calls=[
+                        ToolCallRequest(
+                            id=c["id"],
+                            name=c["name"],
+                            arguments=_parse_tool_arguments(c["arguments"]),
+                        )
+                        for c in collected_tool_calls
+                    ] or None,
+                    usage=final_usage,
+                    is_done=not collected_tool_calls,
+                )
+                observer.on_think(step, think_result)
+
                 if think_result.is_done:
-                    if think_result.thought:
-                        yield {"event": SSEEvent.DELTA, "data": think_result.thought}
+                    # 最终回答已全部通过 delta 实时推送完毕，直接 finish
                     yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                         observer, collected_steps, last_compaction_summary,
                     )}
                     return
 
                 # ── Act：执行工具（含 skill_call / todo_write / todo_read 等）──
+                # [P2 注] tool_call 事件当前在 act() 完成后从 observations 批量推送
+                # SubAgent SSE v3 的 actor._execute_one() 改造将实现实时发送
                 act_result = await self.actor.act(think_result)
                 observer.on_act(step, act_result)
 
-                # 收集步骤消息（与 execute() 对称，供 chat_stream 持久化到 l3_steps 表）
                 collected_steps.extend(act_result.messages)
 
-                # 推送 tool_call / tool_result 事件
                 for obs in act_result.observations:
                     yield {"event": SSEEvent.TOOL_CALL, "data": {
                         "step": step,
                         "name": obs.tool_name,
                         "args": obs.arguments,
                     }}
+                    try:
+                        parsed_result = json.loads(obs.result)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_result = obs.result
                     yield {"event": SSEEvent.TOOL_RESULT, "data": {
                         "step": step,
                         "name": obs.tool_name,
-                        "result": obs.result,
+                        "result": parsed_result,
                     }}
 
-                # ── 追加消息到上下文，并无条件执行内存级剪枝 ──
                 messages.extend(act_result.messages)
                 messages = self._compress_stale_tool_results(messages)
 
-            # 达到 max_iterations 仍未完成 → 最后一步的 thought 即回答
-            if think_result and think_result.thought:
-                yield {"event": SSEEvent.DELTA, "data": think_result.thought}
+            # 达到 max_iterations 仍未完成（防御性兜底，content_tokens 已逐 token 推送完毕）
             yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                 observer, collected_steps, last_compaction_summary, is_degraded=True,
             )}
@@ -576,7 +608,6 @@ class L3ReActEngine:
         )
 
         # Plugin 命令上下文注入（chat.py 在 execute() 前设置 ContextVar）
-        from app.execution.plugin_context import PluginCommandContext, get_plugin_context
         plugin_ctx = get_plugin_context()
         if plugin_ctx:
             system_prompt += _build_plugin_context_block(plugin_ctx)
