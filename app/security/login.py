@@ -23,7 +23,7 @@ from app.config import get_settings
 from app.db.engine import async_session, get_db
 from app.db.models.user import Role, User
 from app.api.response import ApiResponse, ok
-from app.security.auth import hash_password, verify_password
+from app.utils.token_util import hash_password, verify_password
 
 from app.security.auth import (
     AuthenticatedUser,

@@ -6,7 +6,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
-import bcrypt
 import jwt
 import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException
@@ -14,19 +13,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.cache.redis_client import RedisKeys, get_redis
 from app.config import get_settings
+from app.utils.token_util import hash_password, verify_password
 
 settings = get_settings()
 bearer_scheme = HTTPBearer()
-
-
-def hash_password(password: str) -> str:
-    """生成密码哈希"""
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """校验密码"""
-    return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
 
 
 @dataclass
