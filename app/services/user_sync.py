@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.user import Role, User
+from app.security.auth import hash_password
 
 
 async def get_or_create_sso_user(
@@ -89,7 +90,7 @@ async def get_or_create_sso_user(
     # 3. 创建新用户
     # 查询"普通用户"角色
     result = await session.execute(
-        select(Role).where(Role.name == "普通用户")
+        select(Role).where(Role.name == "user")
     )
     role = result.scalar_one_or_none()
     
@@ -123,11 +124,9 @@ async def get_or_create_sso_user(
 
 def generate_random_password() -> str:
     """
-    生成随机密码（SSO 用户不需要密码登录）
-    使用 cryptographically secure 的随机数生成器
+    生成默认密码哈希（所有新用户默认密码 123456）
     """
-    return secrets.token_urlsafe(32)
-
+    return hash_password("123456")
 
 # 避免循环导入，延迟导入 HTTPException
 from fastapi import HTTPException

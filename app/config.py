@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # ── JWT ──
     JWT_SECRET: str = "dev-secret-change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30 * 48
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 天
     
     # ── SSO 配置 ──

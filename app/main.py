@@ -117,12 +117,16 @@ from app.api.chat import router as chat_router
 from app.api.files import router as files_router
 from app.api.plugins import router as plugins_router
 from app.security.login import router as auth_router
+from app.api.users import router as users_router
+from app.api.roles import router as roles_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(plugins_router)
+app.include_router(users_router)
+app.include_router(roles_router)
 
 
 if __name__ == "__main__":
@@ -130,4 +134,4 @@ if __name__ == "__main__":
     # 允许直接运行 python app/main.py 启动服务
     # 如果配置中没有设置端口，默认使用 8000
     port = getattr(settings, "APP_PORT", 8000)
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
