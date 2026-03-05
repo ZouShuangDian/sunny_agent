@@ -14,13 +14,13 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'g2f3e4d5c6b7'
-down_revision: Union[str, None] = 'f1e2d3c4b5a6'
+down_revision: Union[str, None] = '9a8b7c6d5e4f'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.drop_table('prompt_templates', schema='sunny_agent')
+    op.execute('DROP TABLE IF EXISTS sunny_agent.prompt_templates')
 
 
 def downgrade() -> None:

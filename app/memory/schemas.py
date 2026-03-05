@@ -186,15 +186,11 @@ class ConversationHistory(BaseModel):
 
 
 class LastIntent(BaseModel):
-    """上一轮意图结果快照，用于指代消解和连续追问判断"""
+    """上一轮意图结果快照，用于指代消解"""
 
     primary: str  # 主意图
     sub_intent: str | None = None  # 子意图
-    route: str  # 路由
-    complexity: str  # 复杂度
-    confidence: float  # 置信度
-    needs_clarify: bool = False  # 是否在追问中
-    clarify_question: str | None = None  # 追问话术
+    route: str = "deep_l3"  # 路由
 
 
 # ── 会话元数据 ──

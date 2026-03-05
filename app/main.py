@@ -10,14 +10,15 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from prometheus_client import make_asgi_app
 from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.cache.redis_client import redis_client
 from app.config import get_settings
 from app.db.engine import async_session, engine
-from app.intent.codebook_service import CodebookService
 from app.observability.logging_config import setup_logging
 from app.observability.metrics_middleware import MetricsMiddleware
 from app.observability.request_logger import RequestLoggerMiddleware
@@ -42,16 +43,6 @@ async def lifespan(application: FastAPI):
     await redis_client.ping()
     log.info("Redis 连接正常")
 
-    # ── 码表缓存预热：避免启动后缓存击穿 ──
-    try:
-        async with async_session() as db:
-            codebook_svc = CodebookService(redis_client, db)
-            count = await codebook_svc.warm_cache()
-            log.info("码表缓存预热完成", count=count)
-    except Exception as e:
-        # 预热失败不阻止启动，但记录警告
-        log.warning("码表缓存预热失败，将降级为逐条回源", error=str(e), exc_info=True)
-
     yield
 
     # 关闭数据库连接池
@@ -66,6 +57,42 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# ── 全局异常处理器：统一响应信封 ──
+from app.api.response import fail  # noqa: E402
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(_request: Request, exc: StarletteHTTPException):
+    """HTTPException → 统一信封（code = HTTP 状态码 × 100）"""
+    return fail(
+        code=exc.status_code * 100,
+        message=str(exc.detail),
+        status_code=exc.status_code,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    """Pydantic 请求校验错误 → 统一信封（code=42200）"""
+    errors = [
+        {
+            "field": ".".join(str(loc) for loc in err["loc"]),
+            "message": err["msg"],
+            "type": err["type"],
+        }
+        for err in exc.errors()
+    ]
+    return fail(code=42200, message="请求参数校验失败", status_code=422, data=errors)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    """未捕获异常 → 统一信封（code=50000）"""
+    log.error("未捕获异常", error=str(exc), exc_info=True)
+    message = str(exc) if settings.ENV == "development" else "服务器内部错误，请稍后重试"
+    return fail(code=50000, message=message, status_code=500)
+
 
 # ── 中间件（执行顺序：从下往上注册，从上往下执行） ──
 app.add_middleware(RequestLoggerMiddleware)

@@ -25,12 +25,6 @@ class RedisKeys:
         """会话级工作记忆 Hash Key (TTL 30min)"""
         return f"wm:{session_id}"
 
-    # ── 码表缓存 ──
-    @staticmethod
-    def codebook(entity_type: str, alias: str) -> str:
-        """码表查询缓存 (TTL 1h)"""
-        return f"cb:{entity_type}:{alias}"
-
     # ── 限流计数器 ──
     @staticmethod
     def rate_limit(user_id: str, window: str) -> str:
