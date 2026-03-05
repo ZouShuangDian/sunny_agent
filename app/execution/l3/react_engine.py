@@ -31,6 +31,7 @@ from app.execution.session_context import get_session_id, reset_session_id, set_
 from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
 from app.prompts.markers import TODO_REMINDER_MARKER
+from app.streaming.events import SSEEvent
 from app.todo.store import TodoStore
 from app.tools.registry import ToolRegistry
 
@@ -228,8 +229,8 @@ class L3ReActEngine:
                 should_stop, reason = observer.should_stop()
                 if should_stop:
                     degrade_result = self._build_result(None, observer, [], degrade_reason=reason)
-                    yield {"event": "delta", "data": degrade_result.reply}
-                    yield {"event": "finish", "data": self._build_finish_data(
+                    yield {"event": SSEEvent.DELTA, "data": degrade_result.reply}
+                    yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                         observer, collected_steps, last_compaction_summary, is_degraded=True,
                     )}
                     return
@@ -244,7 +245,7 @@ class L3ReActEngine:
 
                 # 推送 thought 事件（让前端展示推理过程）
                 if think_result.thought:
-                    yield {"event": "thought", "data": {
+                    yield {"event": SSEEvent.THOUGHT, "data": {
                         "step": step,
                         "content": think_result.thought,
                     }}
@@ -258,7 +259,7 @@ class L3ReActEngine:
                     "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
                     "limit": settings.MODEL_CONTEXT_LIMIT,
                 }
-                yield {"event": "context_usage", "data": context_usage}
+                yield {"event": SSEEvent.CONTEXT_USAGE, "data": context_usage}
 
                 # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
                 if remaining < settings.COMPACTION_BUFFER:
@@ -269,8 +270,8 @@ class L3ReActEngine:
                 # ── 任务完成 → 最终回答流式输出 ──
                 if think_result.is_done:
                     if think_result.thought:
-                        yield {"event": "delta", "data": think_result.thought}
-                    yield {"event": "finish", "data": self._build_finish_data(
+                        yield {"event": SSEEvent.DELTA, "data": think_result.thought}
+                    yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                         observer, collected_steps, last_compaction_summary,
                     )}
                     return
@@ -284,12 +285,12 @@ class L3ReActEngine:
 
                 # 推送 tool_call / tool_result 事件
                 for obs in act_result.observations:
-                    yield {"event": "tool_call", "data": {
+                    yield {"event": SSEEvent.TOOL_CALL, "data": {
                         "step": step,
                         "name": obs.tool_name,
                         "args": obs.arguments,
                     }}
-                    yield {"event": "tool_result", "data": {
+                    yield {"event": SSEEvent.TOOL_RESULT, "data": {
                         "step": step,
                         "name": obs.tool_name,
                         "result": obs.result,
@@ -301,8 +302,8 @@ class L3ReActEngine:
 
             # 达到 max_iterations 仍未完成 → 最后一步的 thought 即回答
             if think_result and think_result.thought:
-                yield {"event": "delta", "data": think_result.thought}
-            yield {"event": "finish", "data": self._build_finish_data(
+                yield {"event": SSEEvent.DELTA, "data": think_result.thought}
+            yield {"event": SSEEvent.FINISH, "data": self._build_finish_data(
                 observer, collected_steps, last_compaction_summary, is_degraded=True,
             )}
         finally:

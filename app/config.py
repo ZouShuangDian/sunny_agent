@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     OUTPUT_VALIDATOR_ENABLED: bool = True        # 是否启用输出校验器（全局开关）
     OUTPUT_VALIDATOR_HALLUCINATION: bool = True  # 是否启用幻觉检测（额外 LLM 调用）
 
+    # ── CORS ──
+    CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表
+
     # ── 应用 ──
     ENV: str = "development"  # development | production
     APP_NAME: str = "agent-sunny"
