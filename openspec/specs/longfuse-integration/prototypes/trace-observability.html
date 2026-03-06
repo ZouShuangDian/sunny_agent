@@ -61,6 +61,20 @@
     .table-row:hover {
       background-color: #F8FAFC;
     }
+    .config-section {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease-out;
+    }
+    .config-section.expanded {
+      max-height: 500px;
+    }
+    .expand-btn svg {
+      transition: transform 0.2s ease;
+    }
+    .expand-btn.expanded svg {
+      transform: rotate(180deg);
+    }
   </style>
 </head>
 <body class="bg-bg-main min-h-screen">
@@ -112,7 +126,7 @@
           <!-- Langfuse Status Card -->
           <div class="bg-white rounded-xl border border-border-light p-5">
             <div class="flex items-start justify-between">
-              <div>
+              <div class="flex-1">
                 <h4 class="text-lg font-semibold text-text-primary mb-1">Langfuse</h4>
                 <p class="text-sm text-text-secondary mb-4">Agent 执行链路追踪与监控平台</p>
 
@@ -129,6 +143,127 @@
                   </svg>
                   打开 Langfuse 控制台
                 </a>
+              </div>
+
+              <!-- Config Toggle Button (Admin Only) -->
+              <button id="configToggle" class="expand-btn flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-text-secondary hover:text-text-primary border border-border-light rounded-lg hover:bg-gray-50 transition-colors cursor-pointer">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                配置
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </button>
+            </div>
+
+            <!-- Config Section (Admin Only) - Collapsible -->
+            <div id="configSection" class="config-section">
+              <div class="mt-5 pt-5 border-t border-border-light">
+                <div class="flex items-center gap-2 mb-4">
+                  <svg class="w-4 h-4 text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                  </svg>
+                  <span class="text-sm font-medium text-text-primary">环境配置</span>
+                  <span class="text-xs text-warning bg-warning/10 px-2 py-0.5 rounded">仅管理员</span>
+                </div>
+
+                <div class="space-y-5">
+                  <!-- Step 1: Choose Service Mode -->
+                  <div class="p-4 border border-border-light rounded-lg">
+                    <div class="flex items-center gap-2 mb-3">
+                      <span class="w-5 h-5 bg-primary text-white text-xs font-medium rounded-full flex items-center justify-center">1</span>
+                      <span class="text-sm font-medium text-text-primary">选择 Langfuse 服务</span>
+                      <span id="step1Status" class="ml-auto text-xs text-success bg-success/10 px-2 py-0.5 rounded hidden">已连接</span>
+                    </div>
+
+                    <!-- Service Mode Tabs -->
+                    <div class="flex border border-border-light rounded-lg overflow-hidden mb-4">
+                      <button id="builtinTab" class="flex-1 px-4 py-2.5 text-sm font-medium bg-primary text-white cursor-pointer">
+                        内置服务
+                      </button>
+                      <button id="externalTab" class="flex-1 px-4 py-2.5 text-sm font-medium bg-gray-50 text-text-secondary hover:bg-gray-100 cursor-pointer">
+                        外部服务
+                      </button>
+                    </div>
+
+                    <!-- Built-in Service Panel -->
+                    <div id="builtinPanel">
+                      <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg mb-3">
+                        <div>
+                          <p class="text-sm font-medium text-text-primary">Langfuse v3 内置服务</p>
+                          <p class="text-xs text-text-muted">包含 ClickHouse、Redis、MinIO、PostgreSQL</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <span class="w-2 h-2 bg-success rounded-full animate-pulse"></span>
+                          <span class="text-xs text-success font-medium">运行中</span>
+                        </div>
+                      </div>
+                      <div class="flex gap-2">
+                        <button id="startBuiltinBtn" class="px-4 py-2 text-sm font-medium text-white bg-success rounded-lg hover:bg-success/90 transition-colors cursor-pointer hidden">
+                          启动服务
+                        </button>
+                        <button id="stopBuiltinBtn" class="px-4 py-2 text-sm font-medium text-danger border border-danger rounded-lg hover:bg-danger/5 transition-colors cursor-pointer">
+                          停止服务
+                        </button>
+                      </div>
+                      <p class="mt-2 text-xs text-text-muted">内置服务地址: http://localhost:3000</p>
+                    </div>
+
+                    <!-- External Service Panel -->
+                    <div id="externalPanel" class="hidden">
+                      <div class="flex gap-2">
+                        <input type="url" value="" placeholder="https://langfuse.example.com" class="flex-1 px-3 py-2 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+                        <button id="validateBtn" class="px-4 py-2 text-sm font-medium text-primary border border-primary rounded-lg hover:bg-primary/5 transition-colors cursor-pointer">
+                          验证连接
+                        </button>
+                      </div>
+                      <p id="validateResult" class="mt-1.5 text-xs text-success hidden">
+                        <span class="inline-flex items-center gap-1">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                          </svg>
+                          连接成功，版本 3.63.0，延迟 125ms
+                        </span>
+                      </p>
+                      <p class="mt-2 text-xs text-text-muted">输入已有 Langfuse 服务的地址</p>
+                    </div>
+                  </div>
+
+                  <!-- Step 2: Auto Initialization Status -->
+                  <div class="p-4 border border-border-light rounded-lg">
+                    <div class="flex items-center gap-2 mb-3">
+                      <span class="w-5 h-5 bg-primary text-white text-xs font-medium rounded-full flex items-center justify-center">2</span>
+                      <span class="text-sm font-medium text-text-primary">项目初始化</span>
+                      <span id="step2Status" class="ml-auto text-xs text-success bg-success/10 px-2 py-0.5 rounded">已初始化</span>
+                    </div>
+
+                    <!-- Initialization Status -->
+                    <div class="p-3 bg-success/5 border border-success/20 rounded-lg">
+                      <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-4 h-4 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                        </svg>
+                        <span class="text-sm font-medium text-success">自动初始化完成</span>
+                      </div>
+                      <p class="text-xs text-text-secondary mb-2">API Key 已自动写入 .env 文件</p>
+                      <div class="text-xs text-text-muted font-mono bg-white p-2 rounded border border-border-light">
+                        <div>LANGFUSE_HOST=http://localhost:3000</div>
+                        <div>LANGFUSE_PUBLIC_KEY=pk-lf-xxx...</div>
+                        <div>LANGFUSE_SECRET_KEY=sk-lf-***</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Info -->
+                  <div class="flex items-start gap-2 p-3 bg-blue-50 rounded-lg">
+                    <svg class="w-4 h-4 text-primary mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <p class="text-xs text-primary">选择服务后系统自动初始化项目，API Key 自动写入 .env 文件，无需手动配置。</p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -149,17 +284,34 @@
           <!-- Filters -->
           <div class="flex items-center gap-4 mb-5">
             <div class="flex items-center gap-2">
-              <label class="text-sm text-text-secondary">时间范围:</label>
-              <select class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
-                <option>当天</option>
-                <option selected>7 天</option>
-                <option>30 天</option>
-                <option>90 天</option>
-              </select>
+              <label class="text-sm text-text-secondary">起始日期:</label>
+              <input type="date" value="2026-03-06" class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
             </div>
             <div class="flex items-center gap-2">
-              <label class="text-sm text-text-secondary">起始日期:</label>
-              <input type="date" value="2026-03-04" class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
+              <label class="text-sm text-text-secondary">终止日期:</label>
+              <input type="date" value="2026-03-06" class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
+            </div>
+            <button class="px-4 py-1.5 text-sm font-medium text-white bg-primary rounded-lg hover:bg-primary-hover transition-colors cursor-pointer">
+              查询
+            </button>
+            <div class="ml-auto relative">
+              <button id="exportBtn" class="flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-text-secondary border border-border-light rounded-lg hover:bg-gray-50 transition-colors cursor-pointer">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                </svg>
+                导出
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </button>
+              <div id="exportDropdown" class="hidden absolute right-0 mt-1 w-36 bg-white border border-border-light rounded-lg shadow-lg z-20">
+                <button class="w-full px-4 py-2 text-sm text-left text-text-primary hover:bg-gray-50 rounded-t-lg cursor-pointer">
+                  导出为 JSON
+                </button>
+                <button class="w-full px-4 py-2 text-sm text-left text-text-primary hover:bg-gray-50 rounded-b-lg cursor-pointer">
+                  导出为 CSV
+                </button>
+              </div>
             </div>
           </div>
 
@@ -201,7 +353,7 @@
               <div class="flex items-start gap-4">
                 <div class="w-12 h-12 bg-violet-50 rounded-xl flex items-center justify-center">
                   <svg class="w-6 h-6 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                   </svg>
                 </div>
                 <div>
@@ -262,6 +414,70 @@
   </div>
 
   <script>
+    // Config Toggle
+    const configToggle = document.getElementById('configToggle');
+    const configSection = document.getElementById('configSection');
+
+    configToggle.addEventListener('click', () => {
+      configToggle.classList.toggle('expanded');
+      configSection.classList.toggle('expanded');
+    });
+
+    // Service Mode Tabs
+    const builtinTab = document.getElementById('builtinTab');
+    const externalTab = document.getElementById('externalTab');
+    const builtinPanel = document.getElementById('builtinPanel');
+    const externalPanel = document.getElementById('externalPanel');
+
+    builtinTab.addEventListener('click', () => {
+      builtinTab.classList.add('bg-primary', 'text-white');
+      builtinTab.classList.remove('bg-gray-50', 'text-text-secondary');
+      externalTab.classList.remove('bg-primary', 'text-white');
+      externalTab.classList.add('bg-gray-50', 'text-text-secondary');
+      builtinPanel.classList.remove('hidden');
+      externalPanel.classList.add('hidden');
+    });
+
+    externalTab.addEventListener('click', () => {
+      externalTab.classList.add('bg-primary', 'text-white');
+      externalTab.classList.remove('bg-gray-50', 'text-text-secondary');
+      builtinTab.classList.remove('bg-primary', 'text-white');
+      builtinTab.classList.add('bg-gray-50', 'text-text-secondary');
+      externalPanel.classList.remove('hidden');
+      builtinPanel.classList.add('hidden');
+    });
+
+    // Validate Button (External Service)
+    const validateBtn = document.getElementById('validateBtn');
+    const validateResult = document.getElementById('validateResult');
+    const step1Status = document.getElementById('step1Status');
+
+    validateBtn.addEventListener('click', () => {
+      validateBtn.textContent = '验证中...';
+      validateBtn.disabled = true;
+
+      setTimeout(() => {
+        validateBtn.textContent = '验证连接';
+        validateBtn.disabled = false;
+        validateResult.classList.remove('hidden');
+        step1Status.classList.remove('hidden');
+      }, 1000);
+    });
+
+
+    // Export Dropdown
+    const exportBtn = document.getElementById('exportBtn');
+    const exportDropdown = document.getElementById('exportDropdown');
+
+    exportBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      exportDropdown.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => {
+      exportDropdown.classList.add('hidden');
+    });
+
     // Trend Chart
     const ctx = document.getElementById('trendChart').getContext('2d');
     new Chart(ctx, {

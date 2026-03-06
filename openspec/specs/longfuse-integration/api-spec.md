@@ -157,7 +157,317 @@ GET /api/v1/observability/console-url
 
 ---
 
-### 1.3 获取用量汇总统计
+### 1.3 获取 Langfuse 配置
+
+获取当前 Langfuse 服务配置信息。
+
+```http
+GET /api/v1/observability/config
+```
+
+**权限**: 管理员
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "serviceMode": "builtin",
+    "builtinService": {
+      "enabled": true,
+      "status": "running",
+      "url": "http://localhost:3000"
+    },
+    "externalService": {
+      "url": "",
+      "configured": false
+    },
+    "langfuseUrl": "http://localhost:3000",
+    "publicKey": "pk-lf-xxx",
+    "secretKeyConfigured": true,
+    "projectInitialized": true,
+    "initializedAt": "2026-03-06T08:00:00Z"
+  }
+}
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| serviceMode | string | 服务模式: `builtin`（内置）, `external`（外部）, `none`（未配置） |
+| builtinService | object | 内置服务状态 |
+| builtinService.enabled | boolean | 内置服务是否启用 |
+| builtinService.status | string | 内置服务状态: `running`, `stopped`, `starting`, `error` |
+| builtinService.url | string | 内置服务访问地址 |
+| externalService | object | 外部服务配置 |
+| externalService.url | string | 外部服务地址 |
+| externalService.configured | boolean | 外部服务是否已配置 |
+| langfuseUrl | string | 当前使用的 Langfuse 服务地址 |
+| publicKey | string | Public Key（部分脱敏显示） |
+| secretKeyConfigured | boolean | Secret Key 是否已配置 |
+| projectInitialized | boolean | 项目是否已初始化 |
+| initializedAt | string | 初始化时间 |
+
+---
+
+### 1.4 启动内置 Langfuse 服务
+
+启动内置的 Langfuse v3 服务（含完整依赖栈）。
+
+```http
+POST /api/v1/observability/builtin-service/start
+```
+
+**权限**: 管理员
+
+**请求体**: 无
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "success": true,
+    "status": "starting",
+    "url": "http://localhost:3000",
+    "message": "内置服务正在启动，预计需要 30-60 秒"
+  }
+}
+```
+
+---
+
+### 1.5 停止内置 Langfuse 服务
+
+停止内置的 Langfuse 服务及相关组件。
+
+```http
+POST /api/v1/observability/builtin-service/stop
+```
+
+**权限**: 管理员
+
+**请求体**: 无
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "success": true,
+    "status": "stopped",
+    "message": "内置服务已停止"
+  }
+}
+```
+
+---
+
+### 1.6 获取内置服务状态
+
+获取内置 Langfuse 服务的详细状态。
+
+```http
+GET /api/v1/observability/builtin-service/status
+```
+
+**权限**: 管理员
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "enabled": true,
+    "status": "running",
+    "url": "http://localhost:3000",
+    "version": "3.63.0",
+    "components": {
+      "langfuse": "running",
+      "clickhouse": "running",
+      "redis": "running",
+      "minio": "running",
+      "postgres": "running"
+    },
+    "startedAt": "2026-03-06T08:00:00Z",
+    "uptime": 3600
+  }
+}
+```
+
+---
+
+### 1.7 更新 Langfuse 配置
+
+更新 Langfuse 服务配置（服务模式、URL 和 API Keys）。
+
+```http
+PUT /api/v1/observability/config
+```
+
+**权限**: 管理员
+
+**请求体**:
+
+```json
+{
+  "langfuseUrl": "https://langfuse.example.com",
+  "publicKey": "pk-lf-xxx",
+  "secretKey": "sk-lf-xxx"
+}
+```
+
+**请求参数说明**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| langfuseUrl | string | 是 | Langfuse 服务地址 |
+| publicKey | string | 否 | Public Key（不传则保持原值） |
+| secretKey | string | 否 | Secret Key（不传则保持原值） |
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "success": true,
+    "langfuseUrl": "https://langfuse.example.com",
+    "connectionValid": true,
+    "message": "配置更新成功，连接验证通过"
+  }
+}
+```
+
+**错误响应**:
+
+```json
+{
+  "code": 50001,
+  "message": "Langfuse 服务连接失败",
+  "data": {
+    "success": false,
+    "langfuseUrl": "https://langfuse.example.com",
+    "connectionValid": false,
+    "message": "无法连接到指定的 Langfuse 服务，请检查 URL 是否正确"
+  }
+}
+```
+
+---
+
+### 1.8 验证 Langfuse 连接
+
+验证指定的 Langfuse URL 是否可连接（不保存配置）。
+
+```http
+POST /api/v1/observability/config/validate
+```
+
+**权限**: 管理员
+
+**请求体**:
+
+```json
+{
+  "langfuseUrl": "https://langfuse.example.com"
+}
+```
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "valid": true,
+    "version": "3.63.0",
+    "latency": 125,
+    "message": "连接成功"
+  }
+}
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| valid | boolean | 连接是否有效 |
+| version | string | Langfuse 服务版本（连接成功时返回） |
+| latency | number | 连接延迟（毫秒） |
+| message | string | 验证结果描述 |
+
+---
+
+### 1.9 初始化 Langfuse 项目
+
+在已连接的 Langfuse 服务上自动创建项目并生成 API Key。
+
+```http
+POST /api/v1/observability/config/initialize
+```
+
+**权限**: 管理员
+
+**请求体**: 无（使用已配置的 Langfuse 服务地址）
+
+**响应**:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "success": true,
+    "projectId": "proj_xxx",
+    "projectName": "SunnyAgent",
+    "publicKey": "pk-lf-xxx",
+    "secretKeyConfigured": true,
+    "initializedAt": "2026-03-06T10:00:00Z",
+    "message": "项目初始化成功"
+  }
+}
+```
+
+**错误响应**:
+
+```json
+{
+  "code": 50001,
+  "message": "初始化失败",
+  "data": {
+    "success": false,
+    "error": "LANGFUSE_NOT_CONNECTED",
+    "message": "请先配置并验证 Langfuse 服务地址"
+  }
+}
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | boolean | 初始化是否成功 |
+| projectId | string | 创建的项目 ID |
+| projectName | string | 项目名称 |
+| publicKey | string | 生成的 Public Key |
+| secretKeyConfigured | boolean | Secret Key 是否已配置 |
+| initializedAt | string | 初始化时间 |
+
+---
+
+### 1.10 获取用量汇总统计
 
 获取指定时间范围内的 Token 用量汇总。
 
@@ -223,7 +533,7 @@ GET /api/v1/observability/usage/summary?startDate=2026-03-01&endDate=2026-03-06
 
 ---
 
-### 1.4 获取用量趋势（按日）
+### 1.11 获取用量趋势（按日）
 
 获取按日维度的用量趋势数据，用于绘制趋势图。
 
@@ -279,7 +589,7 @@ GET /api/v1/observability/usage/daily
 
 ---
 
-### 1.5 获取用户分布统计
+### 1.12 获取用户分布统计
 
 获取按用户维度的用量分布，用于管理员查看所有用户的使用情况。
 
@@ -343,7 +653,7 @@ GET /api/v1/observability/usage/by-user
 
 ---
 
-### 1.6 刷新用量数据
+### 1.13 刷新用量数据
 
 手动触发用量数据刷新，从 Langfuse 同步最新数据。
 
@@ -378,6 +688,102 @@ POST /api/v1/observability/usage/refresh
 | lastSyncAt | string | 最后同步时间 |
 | syncDuration | number | 同步耗时（毫秒） |
 | recordsUpdated | number | 更新的记录数 |
+
+---
+
+### 1.14 导出 Trace 数据
+
+导出指定时间范围内的 Trace 数据为 JSON 或 CSV 格式。
+
+```http
+GET /api/v1/observability/traces/export
+```
+
+**权限**:
+- 管理员: 可导出所有用户或指定用户的数据
+- 普通用户: 仅导出自己的数据
+
+**请求参数**:
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| startDate | string | 是 | - | 起始日期 (YYYY-MM-DD) |
+| endDate | string | 是 | - | 结束日期 (YYYY-MM-DD) |
+| format | string | 是 | - | 导出格式: `json`, `csv` |
+| userId | string | 否 | 当前用户 | 用户ID（仅管理员可指定，传 `all` 导出所有用户） |
+
+**请求示例**:
+```http
+GET /api/v1/observability/traces/export?startDate=2026-03-01&endDate=2026-03-06&format=json
+```
+
+**响应**:
+
+- Content-Type: `application/json` 或 `text/csv`
+- Content-Disposition: `attachment; filename="traces_2026-03-01_2026-03-06.json"`
+
+**JSON 格式响应示例**:
+```json
+{
+  "exportedAt": "2026-03-06T10:30:00Z",
+  "period": {
+    "startDate": "2026-03-01",
+    "endDate": "2026-03-06"
+  },
+  "totalCount": 27,
+  "traces": [
+    {
+      "traceId": "trace_xxx",
+      "userId": "user_001",
+      "sessionId": "session_xxx",
+      "name": "agent_execution",
+      "startTime": "2026-03-05T09:15:00Z",
+      "endTime": "2026-03-05T09:15:03Z",
+      "duration": 3000,
+      "status": "success",
+      "inputTokens": 1500,
+      "outputTokens": 200,
+      "totalTokens": 1700,
+      "estimatedCost": 0.0046,
+      "metadata": {}
+    }
+  ]
+}
+```
+
+**CSV 格式响应示例**:
+```csv
+trace_id,user_id,session_id,name,start_time,end_time,duration_ms,status,input_tokens,output_tokens,total_tokens,estimated_cost
+trace_xxx,user_001,session_xxx,agent_execution,2026-03-05T09:15:00Z,2026-03-05T09:15:03Z,3000,success,1500,200,1700,0.0046
+```
+
+**错误响应**:
+
+无数据时返回:
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "totalCount": 0,
+    "traces": [],
+    "warning": "指定时间范围内无 Trace 数据"
+  }
+}
+```
+
+数据量超限时返回:
+```json
+{
+  "code": 40001,
+  "message": "导出数据量超过限制",
+  "data": {
+    "requestedCount": 15000,
+    "maxLimit": 10000,
+    "suggestion": "请缩小时间范围或分批导出"
+  }
+}
+```
 
 ---
 
@@ -572,6 +978,41 @@ interface LangfuseStatus {
   version?: string;
   lastCheckAt: string;
   statusText: string;
+}
+```
+
+### TraceExportItem
+
+```typescript
+interface TraceExportItem {
+  traceId: string;
+  userId: string;
+  sessionId: string;
+  name: string;
+  startTime: string;       // ISO 8601
+  endTime: string;         // ISO 8601
+  duration: number;        // 毫秒
+  status: 'success' | 'error';
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  metadata?: Record<string, any>;
+}
+```
+
+### TraceExportResponse
+
+```typescript
+interface TraceExportResponse {
+  exportedAt: string;      // ISO 8601
+  period: {
+    startDate: string;     // YYYY-MM-DD
+    endDate: string;       // YYYY-MM-DD
+  };
+  totalCount: number;
+  traces: TraceExportItem[];
+  warning?: string;
 }
 ```
 

@@ -16,13 +16,13 @@
 - **Agent 评估**：通过 Experiment 机制调用真实 Agent 进行自动化评估
 - **账号同步**：SunnyAgent 与 Langfuse 的用户账号自动同步
 - **系统管理集成**：在 SunnyAgent 管理界面提供 Langfuse 入口
+- **Trace 数据导出**：支持将 Trace 数据导出为 JSON/CSV 格式
 
 ### Out of Scope
 
 - **自定义仪表盘开发**：不开发定制化的监控仪表盘，使用 Langfuse 内置功能
 - **多租户隔离**：本期不实现不同组织/团队的数据隔离
 - **实时告警系统**：不实现基于阈值的自动告警（可后续集成第三方告警系统）
-- **Trace 数据导出**：不实现将 Trace 数据导出到其他系统的功能
 - **历史数据迁移**：不迁移集成前的历史执行数据
 - **Langfuse 服务运维**：不包含 Langfuse 服务本身的监控、备份、升级等运维工作
 - **Prompt Playground 集成**：本期不实现 Langfuse Prompt Playground 的集成，完整 Agent 测试使用 Dataset + Experiment 方式
@@ -38,6 +38,7 @@
 - Q: 系统管理如何访问 Langfuse？ → A: 在系统设置页面增加"可观测性"Tab，显示 Langfuse 状态、跳转链接、Token 用量统计
 - Q: Token 用量统计维度？ → A: 按用户维度统计，不按模型区分。管理员可查所有用户，普通用户只能查自己
 - Q: 用量统计时间范围？ → A: 支持选择时间范围和起始日期，默认查询当天
+- Q: Langfuse 环境如何配置？ → A: 支持通过界面配置 Langfuse 服务 URL，保存前验证连通性，也可手动配置 API Key
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -90,20 +91,58 @@
 
 ---
 
-### User Story 4 - Langfuse 自动初始化与免配置访问 (Priority: P1)
+### User Story 4 - Langfuse 服务管理 (Priority: P1)
 
-作为系统管理员，我希望 SunnyAgent 首次启动时能够自动初始化 Langfuse 环境并生成必要的 API Key，使用户从 SunnyAgent 跳转到 Langfuse 时无需手动配置任何认证信息。
+作为系统管理员，我希望能够灵活选择 Langfuse 服务来源：使用系统内置的 Langfuse 服务，或连接外部已有的 Langfuse 服务，以便根据部署环境选择最合适的方式。
 
-**Why this priority**: 自动初始化是零配置体验的基础，直接影响用户首次使用的门槛和运维复杂度。
+**Why this priority**: Langfuse 服务是所有可观测性功能的基础，必须先有可用的服务才能进行后续操作。
 
-**Independent Test**: 可以通过在全新环境部署 SunnyAgent，验证 Langfuse 是否自动完成初始化，用户是否能直接跳转访问。
+**Independent Test**: 可以通过启动内置服务或配置外部服务地址，验证系统能否成功连接并获取服务状态。
 
 **Acceptance Scenarios**:
 
-1. **Given** SunnyAgent 首次启动且 Langfuse 未初始化, **When** 系统启动完成, **Then** 自动创建 Langfuse 项目并生成 Public/Secret Key
-2. **Given** Langfuse 已自动初始化, **When** 用户从 SunnyAgent 跳转到 Langfuse, **Then** 系统自动携带认证信息，用户无需手动输入 API Key
-3. **Given** 系统已运行一段时间, **When** 重新启动 SunnyAgent, **Then** 系统检测到已初始化状态，不重复创建项目和 Key
-4. **Given** 自动初始化失败, **When** 管理员查看系统日志, **Then** 可以看到详细的错误信息和手动配置指引
+**内置 Langfuse 服务**
+1. **Given** 系统首次部署且无外部 Langfuse, **When** 管理员选择"启用内置服务", **Then** 系统自动启动 Langfuse v3 服务（含 ClickHouse、Redis、MinIO、PostgreSQL）
+2. **Given** 内置 Langfuse 服务已启动, **When** 查看服务状态, **Then** 显示"内置服务运行中"及服务地址
+3. **Given** 内置服务运行中, **When** 管理员选择停止内置服务, **Then** 系统停止 Langfuse 及相关组件
+4. **Given** 系统重启, **When** 内置服务之前已启用, **Then** 自动恢复内置 Langfuse 服务
+
+**外部 Langfuse 服务**
+5. **Given** 管理员选择使用外部服务, **When** 输入 Langfuse 服务地址并点击验证, **Then** 系统检测连通性并显示服务版本和延迟
+6. **Given** 已有外部 Langfuse 服务, **When** 管理员配置该服务地址, **Then** 系统成功连接，无需启动内置服务
+7. **Given** 配置的外部服务不可用, **When** 系统检测状态, **Then** 显示"服务异常"并记录错误日志
+
+**服务切换**
+8. **Given** 当前使用内置服务, **When** 管理员切换到外部服务, **Then** 停止内置服务并连接外部服务
+9. **Given** 当前使用外部服务, **When** 管理员切换到内置服务, **Then** 启动内置服务并断开外部连接
+
+---
+
+### User Story 4.1 - Langfuse 项目自动初始化 (Priority: P1)
+
+作为系统管理员，我希望在选择 Langfuse 服务后，系统能够自动初始化项目并将生成的 API Key 写入 .env 配置文件，无需手动配置，以便快速开始 Trace 数据采集。
+
+**Why this priority**: 项目自动初始化是零配置体验的关键，降低使用门槛。
+
+**Independent Test**: 可以通过启动内置服务或连接外部服务，验证系统是否自动初始化并在 .env 中生成正确的 API Key。
+
+**Acceptance Scenarios**:
+
+**内置服务初始化**
+1. **Given** 管理员启用内置 Langfuse 服务, **When** 服务启动完成, **Then** 系统自动创建项目、生成 API Key 并写入 .env 文件
+2. **Given** 内置服务初始化成功, **When** 查看 .env 文件, **Then** 包含 LANGFUSE_PUBLIC_KEY 和 LANGFUSE_SECRET_KEY
+
+**外部服务初始化**
+3. **Given** 管理员配置外部 Langfuse 服务地址, **When** 连接验证成功, **Then** 系统自动在该服务上创建项目、生成 API Key 并写入 .env 文件
+4. **Given** 外部服务初始化成功, **When** 查看 .env 文件, **Then** 包含正确的 LANGFUSE_HOST、LANGFUSE_PUBLIC_KEY 和 LANGFUSE_SECRET_KEY
+
+**状态检测与恢复**
+5. **Given** 系统已运行一段时间, **When** 重新启动 SunnyAgent, **Then** 系统从 .env 读取配置，不重复创建项目
+6. **Given** .env 中已有有效的 API Key, **When** 系统启动, **Then** 直接使用现有配置，跳过初始化
+7. **Given** 项目已初始化, **When** 用户从 SunnyAgent 跳转到 Langfuse, **Then** 自动携带认证信息，无需手动登录
+
+**初始化失败处理**
+8. **Given** 自动初始化失败, **When** 管理员查看系统日志, **Then** 显示详细错误信息和排查指引
 
 ---
 
@@ -121,11 +160,12 @@
 1. **Given** 用户打开系统设置页面, **When** 切换到可观测性 Tab, **Then** 可以看到 Langfuse 卡片，显示"Agent 执行链路追踪与监控平台"描述
 2. **Given** Langfuse 服务正常运行, **When** 查看状态指示器, **Then** 显示绿色"运行正常"状态
 3. **Given** Langfuse 服务不可用, **When** 查看状态指示器, **Then** 显示红色"服务异常"状态
-4. **Given** 用户点击"打开 Langfuse 控制台"链接, **When** 系统处理跳转, **Then** 在新标签页打开 Langfuse 界面并自动登录
+4. **Given** 管理员点击"打开 Langfuse 控制台"链接, **When** 系统处理跳转, **Then** 在新标签页打开 Langfuse 界面并自动登录
+5. **Given** 普通用户查看可观测性 Tab, **When** 查看 Langfuse 卡片, **Then** 不显示"打开 Langfuse 控制台"链接（仅管理员可见）
 
 **Token 用量统计**
-5. **Given** 用户查看 Token 用量统计区域, **When** 页面加载完成, **Then** 默认显示当天的用量数据
-6. **Given** 用户选择时间范围（如 7 天）和起始日期, **When** 点击刷新, **Then** 显示指定时间段内的用量统计
+5. **Given** 用户查看 Token 用量统计区域, **When** 页面加载完成, **Then** 默认显示当天的用量数据（起始日期和终止日期均为今天）
+6. **Given** 用户选择起始日期和终止日期, **When** 点击查询, **Then** 显示指定时间段内的用量统计
 7. **Given** 用量数据加载完成, **When** 查看统计卡片, **Then** 显示总调用次数、总 Token 数（含输入/输出明细）、预估费用
 8. **Given** 用量数据加载完成, **When** 查看趋势图, **Then** 显示按日维度的 Token 用量柱状图
 
@@ -133,9 +173,10 @@
 9. **Given** 当前用户是管理员, **When** 查看用量统计, **Then** 可以看到所有用户的汇总数据，并可按用户筛选
 10. **Given** 当前用户是普通用户, **When** 查看用量统计, **Then** 只能看到自己的用量数据
 
-**账号同步**
-11. **Given** SunnyAgent 创建新用户, **When** 该用户首次访问 Langfuse, **Then** Langfuse 自动创建对应账号
-12. **Given** SunnyAgent 禁用某用户, **When** 该用户尝试访问 Langfuse, **Then** Langfuse 拒绝访问
+**账号同步（仅管理员）**
+11. **Given** SunnyAgent 创建新管理员, **When** 管理员首次访问 Langfuse, **Then** Langfuse 自动创建对应账号
+12. **Given** SunnyAgent 取消某用户的管理员权限, **When** 该用户尝试访问 Langfuse, **Then** Langfuse 拒绝访问
+13. **Given** 普通用户发起对话, **When** Trace 记录完成, **Then** Trace 中包含该用户的 user_id，管理员可在 Langfuse 中按 user_id 筛选
 
 ---
 
@@ -156,6 +197,25 @@
 
 ---
 
+### User Story 7 - Trace 数据导出 (Priority: P2)
+
+作为管理员或用户，我希望能够将 Trace 数据导出为 JSON 或 CSV 格式文件，以便进行离线分析、归档备份或与其他系统集成。
+
+**Why this priority**: Trace 数据导出是数据分析和合规归档的重要功能，但依赖于基础 Trace 功能已完善。
+
+**Independent Test**: 可以通过选择时间范围和导出格式，点击导出按钮，验证下载的文件是否包含正确的 Trace 数据。
+
+**Acceptance Scenarios**:
+
+1. **Given** 用户在可观测性 Tab 页面, **When** 选择时间范围并点击导出按钮, **Then** 系统生成包含指定范围内 Trace 数据的文件
+2. **Given** 用户选择 JSON 格式导出, **When** 导出完成, **Then** 下载的文件为有效 JSON 格式，包含 Trace 的完整结构化数据
+3. **Given** 用户选择 CSV 格式导出, **When** 导出完成, **Then** 下载的文件为 CSV 格式，包含 Trace 的扁平化关键字段
+4. **Given** 当前用户是管理员, **When** 导出数据, **Then** 可以选择导出所有用户的 Trace 数据或指定用户
+5. **Given** 当前用户是普通用户, **When** 导出数据, **Then** 仅能导出自己的 Trace 数据
+6. **Given** 导出的数据量较大, **When** 开始导出, **Then** 系统显示进度提示，导出完成后自动下载
+
+---
+
 ### Edge Cases
 
 - 当 Langfuse 服务不可用时，Agent 应继续正常工作，Trace 数据异步上报失败后丢弃（不阻塞主流程）
@@ -167,6 +227,8 @@
 - 当自动初始化失败时（如 Langfuse 服务未就绪），系统应记录错误并在下次启动时重试
 - 当请求上下文缺失 user_id 时（如匿名用户），应使用默认标识并记录警告
 - 当同一对话跨越多个 session 时（如会话超时重连），应能通过用户维度关联历史 Trace
+- 当导出的时间范围内无 Trace 数据时，应返回空文件并给出友好提示
+- 当导出数据量超过系统限制（如 10000 条）时，应提示用户缩小时间范围或分批导出
 
 ## Requirements *(mandatory)*
 
@@ -189,43 +251,80 @@
 - **FR-010**: 系统 MUST 支持编写自定义评估脚本，在 Experiment 中调用 SunnyAgent `/api/chat` 进行真实 Agent 测试
 - **FR-011**: 系统 MUST 支持 LLM-as-a-Judge 评估方式，自动对比期望输出和实际输出
 
-**Langfuse 自动初始化（P1）**
-- **FR-012**: 系统 MUST 在首次启动时自动检测 Langfuse 是否已初始化
-- **FR-013**: 系统 MUST 在未初始化时自动创建 Langfuse 项目并生成 Public Key 和 Secret Key
-- **FR-014**: 系统 MUST 将自动生成的 API Key 安全存储，供后续 Trace 上报使用
-- **FR-015**: 系统 MUST 在重复启动时跳过初始化，避免重复创建项目和 Key
-- **FR-016**: 系统 SHOULD 在自动初始化失败时记录详细日志并提供手动配置指引
+**Langfuse 服务管理（P1）**
+
+*内置服务*
+- **FR-012**: 系统 MUST 支持启动内置的 Langfuse v3 服务（含 ClickHouse、Redis、MinIO、PostgreSQL）
+- **FR-013**: 系统 MUST 支持停止内置 Langfuse 服务
+- **FR-014**: 系统 MUST 在系统重启时自动恢复之前启用的内置服务
+- **FR-015**: 系统 MUST 显示内置服务的运行状态和本地访问地址
+
+*外部服务*
+- **FR-016**: 系统 MUST 支持配置外部 Langfuse 服务地址（URL）
+- **FR-017**: 系统 MUST 在配置服务地址时验证连通性并返回服务版本信息
+- **FR-018**: 系统 MUST 在启动时自动连接已配置的外部 Langfuse 服务
+
+*服务切换*
+- **FR-019**: 系统 MUST 支持在内置服务和外部服务之间切换
+- **FR-020**: 系统 MUST 在切换到外部服务时停止内置服务（如已启动）
+- **FR-021**: 系统 MUST 在切换到内置服务时断开外部服务连接
+
+**Langfuse 项目自动初始化（P1）**
+- **FR-022**: 系统 MUST 在 Langfuse 服务可用后自动检测是否需要初始化
+- **FR-023**: 系统 MUST 自动创建 Langfuse 项目并生成 Public Key 和 Secret Key
+- **FR-024**: 系统 MUST 将生成的 API Key 自动写入 .env 文件（LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY）
+- **FR-025**: 系统 MUST 在 .env 中同时写入 LANGFUSE_HOST 配置
+- **FR-026**: 系统 MUST 在启动时从 .env 读取配置，若已存在有效配置则跳过初始化
+- **FR-027**: 系统 SHOULD 在自动初始化失败时记录详细日志并提供排查指引
 
 **Observability 改造（P1）**
-- **FR-017**: 系统 MUST 改造现有 observability 代码以支持 Langfuse Trace 上报
-- **FR-018**: 系统 MUST 在每个 Trace 中记录用户 ID（user_id），关联到发起请求的用户
-- **FR-019**: 系统 MUST 在每个 Trace 中记录对话 ID（session_id），关联同一对话的多轮交互
-- **FR-020**: 系统 MUST 确保 Span 正确嵌套，反映 Agent 执行的层级结构
+- **FR-028**: 系统 MUST 改造现有 observability 代码以支持 Langfuse Trace 上报
+- **FR-029**: 系统 MUST 在每个 Trace 中记录用户 ID（user_id），关联到发起请求的用户
+- **FR-030**: 系统 MUST 在每个 Trace 中记录对话 ID（session_id），关联同一对话的多轮交互
+- **FR-031**: 系统 MUST 确保 Span 正确嵌套，反映 Agent 执行的层级结构
 
 **系统管理可观测性 Tab（P1）**
 
 *Langfuse 状态与跳转*
-- **FR-021**: 系统 MUST 在系统设置页面提供"可观测性"Tab
-- **FR-022**: 系统 MUST 显示 Langfuse 卡片，包含服务描述和运行状态指示器
-- **FR-023**: 系统 MUST 实时检测 Langfuse 服务状态（运行正常/服务异常）
-- **FR-024**: 系统 MUST 提供"打开 Langfuse 控制台"链接，点击后在新标签页打开并自动登录
+- **FR-032**: 系统 MUST 在系统设置页面提供"可观测性"Tab
+- **FR-033**: 系统 MUST 显示 Langfuse 卡片，包含服务来源（内置/外部）、描述和运行状态指示器
+- **FR-034**: 系统 MUST 实时检测 Langfuse 服务状态（运行正常/服务异常/未配置）
+- **FR-035**: 系统 MUST 仅对管理员显示"打开 Langfuse 控制台"链接，点击后在新标签页打开并自动登录
+
+*Langfuse 服务管理（仅管理员）*
+- **FR-036**: 系统 MUST 仅允许管理员访问 Langfuse 服务管理功能
+- **FR-037**: 系统 MUST 支持选择服务来源：内置服务 或 外部服务
+- **FR-038**: 系统 MUST 支持启动/停止内置 Langfuse 服务
+- **FR-039**: 系统 MUST 支持配置外部 Langfuse 服务 URL 并验证连通性
+- **FR-040**: 系统 MUST 在界面显示当前服务来源、地址、初始化状态和 .env 配置状态
+- **FR-041**: 系统 MUST 在服务连接成功后自动触发项目初始化并写入 .env
 
 *Token 用量统计*
-- **FR-025**: 系统 MUST 显示 Token 用量统计区域，包含时间范围选择器（默认当天）
-- **FR-026**: 系统 MUST 支持选择时间范围（当天、7天、30天等）和自定义起始日期
-- **FR-027**: 系统 MUST 显示统计卡片：总调用次数、总 Token 数（含输入/输出明细）、预估费用
-- **FR-028**: 系统 MUST 显示按日维度的 Token 用量趋势图（柱状图）
-- **FR-029**: 系统 MUST 支持刷新按钮，手动更新用量数据
-- **FR-030**: 系统 MUST 按用户维度统计用量，不按模型维度区分
+- **FR-042**: 系统 MUST 显示 Token 用量统计区域，包含起始日期和终止日期选择器
+- **FR-043**: 系统 MUST 支持选择起始日期和终止日期，默认均为当天
+- **FR-044**: 系统 MUST 显示统计卡片：总调用次数、总 Token 数（含输入/输出明细）、预估费用
+- **FR-045**: 系统 MUST 显示按日维度的 Token 用量趋势图（柱状图）
+- **FR-046**: 系统 MUST 支持刷新按钮，手动更新用量数据
+- **FR-047**: 系统 MUST 按用户维度统计用量，不按模型维度区分
 
 *用户权限控制*
-- **FR-031**: 系统 MUST 对管理员显示所有用户的汇总数据，并支持按用户筛选
-- **FR-032**: 系统 MUST 对普通用户仅显示其个人的用量数据
+- **FR-048**: 系统 MUST 对管理员显示所有用户的汇总数据，并支持按用户筛选
+- **FR-049**: 系统 MUST 对普通用户仅显示其个人的用量数据
 
-*账号同步*
-- **FR-033**: 系统 MUST 实现 SunnyAgent 与 Langfuse 的账号同步
-- **FR-034**: 系统 MUST 在 SunnyAgent 创建用户时自动在 Langfuse 创建对应账号
-- **FR-035**: 系统 MUST 在 SunnyAgent 禁用用户时同步禁用 Langfuse 账号访问权限
+*账号同步（仅管理员）*
+- **FR-050**: 系统 MUST 仅同步管理员账号到 Langfuse，普通用户不同步
+- **FR-051**: 系统 MUST 在 SunnyAgent 创建管理员时自动在 Langfuse 创建对应账号
+- **FR-052**: 系统 MUST 在 SunnyAgent 取消管理员权限或禁用管理员时同步移除 Langfuse 访问权限
+- **FR-053**: 系统 MUST 确保普通用户的对话 Trace 仍记录 user_id，供管理员在 Langfuse 中筛选定位
+
+**Trace 数据导出（P2）**
+- **FR-054**: 系统 MUST 支持将 Trace 数据导出为 JSON 格式
+- **FR-055**: 系统 MUST 支持将 Trace 数据导出为 CSV 格式
+- **FR-056**: 系统 MUST 支持按时间范围筛选导出的 Trace 数据
+- **FR-057**: 系统 MUST 对管理员允许导出所有用户或指定用户的 Trace 数据
+- **FR-058**: 系统 MUST 对普通用户仅允许导出其个人的 Trace 数据
+- **FR-059**: 系统 SHOULD 对大数据量导出显示进度提示
+- **FR-060**: 系统 MUST 在导出文件中包含 Trace 基本信息（trace_id, user_id, session_id, 时间戳, 耗时, Token 消耗）
 
 ### Non-Functional Requirements
 
@@ -296,6 +395,9 @@
 - **SC-013**: 可观测性 Tab 页面加载时间不超过 2 秒
 - **SC-014**: Token 用量统计数据查询响应时间不超过 3 秒（30 天范围内）
 - **SC-015**: Langfuse 服务状态检测延迟不超过 5 秒
+- **SC-016**: 用户可在 30 秒内完成 1000 条 Trace 数据的导出（不含下载时间）
+- **SC-017**: 导出的 JSON 文件可被标准 JSON 解析器正确解析
+- **SC-018**: 导出的 CSV 文件可被 Excel 等标准工具正确打开
 
 ## Assumptions
 
@@ -346,7 +448,19 @@
 5. **账号同步方案**: 采用 Admin API 方案 — SunnyAgent 用户 CRUD 操作时调用 Langfuse Instance Management API 同步账号（创建、禁用、删除）
 6. **系统管理集成**: 在 SunnyAgent 管理后台添加 Langfuse 外链，点击后在新窗口（新标签页）打开 Langfuse 完整界面
 7. **Span 处理模式**: 在 async generator 中使用直接 span 引用（`start_span()`/`start_generation()`）而非上下文管理器，避免 OpenTelemetry context 丢失问题（详见 research.md）
-8. **自动初始化策略**: SunnyAgent 启动时检测 Langfuse 配置状态，未初始化则调用 Langfuse Admin API 自动创建项目和 API Key，配置信息加密存储到数据库
+8. **两种部署场景 + 自动初始化**：
+   - **内置服务场景**：启动内置 Langfuse v3 → 自动初始化项目 → API Key 写入 .env
+   - **外部服务场景**：配置外部服务地址 → 验证连接 → 自动初始化项目 → API Key 写入 .env
+
+   API Key 统一通过 .env 文件管理，无需界面手动配置
+
+9. **单项目 + user_id 隔离策略**：
+   - **项目设计**：一个 SunnyAgent 实例对应一个 Langfuse 项目，所有用户的 Trace 存储在同一项目中
+   - **用户标识**：每个 Trace 携带 user_id 和 session_id，用于标识对话归属
+   - **权限控制**：
+     - 管理员：可访问 Langfuse 控制台，查看所有用户的 Trace，通过 user_id 筛选定位问题
+     - 普通用户：不能访问 Langfuse 控制台，只能在 SunnyAgent 界面查看自己的用量统计
+   - **账号同步**：只同步管理员到 Langfuse，普通用户不同步（但其对话 Trace 会记录 user_id）
 9. **Trace 用户关联**: 每个 Trace 必须携带 `user_id` 和 `session_id`，其中 `user_id` 从请求上下文获取，`session_id` 由对话管理模块生成
 10. **存储设计**: Trace 原始数据存储在 Langfuse（ClickHouse），SunnyAgent 仅存储 Langfuse 配置信息和用户-Trace 的索引映射（用于快速定位）
 
