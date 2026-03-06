@@ -19,9 +19,9 @@ class _Question(BaseModel):
     question: str = Field(..., description="问题文本，清晰描述需要用户确认的信息")
     options: list[str] = Field(
         ...,
-        description="可选项列表（固定3个），覆盖最常见的选择；前端会自动追加\"其他\"选项供用户自由输入",
-        min_length=3,
-        max_length=3,
+        description="可选项列表（2-4个），覆盖最常见的选择。禁止包含'其他'选项，前端会自动追加",
+        min_length=2,
+        max_length=4,
     )
 
 
@@ -44,7 +44,7 @@ class AskUserTool(BaseTool):
     def description(self) -> str:
         return (
             "向用户提出澄清性问题，用于请求不清晰时主动确认关键信息。"
-            "支持一次提出 1-4 个问题，每个问题固定提供 3 个选项（前端会自动追加'其他'选项供用户自由输入）。"
+            "支持一次提出 1-4 个问题，每个问题提供 2-4 个选项（前端会自动追加'其他'选项，禁止自行添加'其他'类选项）。"
             "调用后请直接将问题转达给用户并结束当前回答，等待用户回答后继续。"
             "注意：仅在用户请求确实模糊且影响执行方向时使用，简单问题直接处理。"
         )
