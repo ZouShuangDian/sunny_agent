@@ -119,6 +119,7 @@ from app.api.plugins import router as plugins_router
 from app.security.login import router as auth_router
 from app.api.users import router as users_router
 from app.api.roles import router as roles_router
+from app.api.sessions import router as sessions_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
@@ -127,6 +128,7 @@ app.include_router(files_router)
 app.include_router(plugins_router)
 app.include_router(users_router)
 app.include_router(roles_router)
+app.include_router(sessions_router)
 
 
 if __name__ == "__main__":
