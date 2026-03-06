@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trace 观测 - SunnyAgent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#2563EB',
+            'primary-hover': '#1D4ED8',
+            secondary: '#64748B',
+            success: '#10B981',
+            warning: '#F59E0B',
+            danger: '#EF4444',
+            'bg-main': '#F8FAFC',
+            'bg-card': '#FFFFFF',
+            'text-primary': '#0F172A',
+            'text-secondary': '#475569',
+            'text-muted': '#94A3B8',
+            'border-light': '#E2E8F0',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+    .sidebar-item {
+      transition: all 0.2s ease;
+    }
+    .sidebar-item:hover {
+      background-color: #F1F5F9;
+    }
+    .sidebar-item.active {
+      background-color: #EFF6FF;
+      color: #2563EB;
+    }
+    .stat-card {
+      transition: all 0.2s ease;
+    }
+    .stat-card:hover {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    }
+    .refresh-btn:hover svg {
+      transform: rotate(180deg);
+      transition: transform 0.3s ease;
+    }
+    .table-row:hover {
+      background-color: #F8FAFC;
+    }
+  </style>
+</head>
+<body class="bg-bg-main min-h-screen">
+  <div class="flex">
+    <!-- Sidebar -->
+    <aside class="w-56 bg-white border-r border-border-light min-h-screen fixed left-0 top-0">
+      <div class="p-4 border-b border-border-light">
+        <h1 class="text-lg font-semibold text-text-primary">管理面板</h1>
+      </div>
+      <nav class="p-3">
+        <a href="#" class="sidebar-item flex items-center gap-3 px-3 py-2.5 rounded-lg text-text-secondary cursor-pointer">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
+          </svg>
+          <span class="text-sm font-medium">用户管理</span>
+        </a>
+        <a href="#" class="sidebar-item active flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+          <span class="text-sm font-medium">Trace 观测</span>
+        </a>
+      </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="ml-56 flex-1 min-h-screen">
+      <!-- Header -->
+      <header class="bg-white border-b border-border-light px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+        <div class="flex items-center gap-3">
+          <svg class="w-6 h-6 text-text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+          <h2 class="text-lg font-semibold text-text-primary">Trace 观测</h2>
+        </div>
+        <button class="text-text-secondary hover:text-text-primary transition-colors cursor-pointer">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </header>
+
+      <!-- Content -->
+      <div class="p-6 space-y-6">
+        <!-- Section: 可观测性 -->
+        <section>
+          <h3 class="text-base font-medium text-text-secondary mb-4">可观测性</h3>
+
+          <!-- Langfuse Status Card -->
+          <div class="bg-white rounded-xl border border-border-light p-5">
+            <div class="flex items-start justify-between">
+              <div>
+                <h4 class="text-lg font-semibold text-text-primary mb-1">Langfuse</h4>
+                <p class="text-sm text-text-secondary mb-4">Agent 执行链路追踪与监控平台</p>
+
+                <!-- Status -->
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="w-2.5 h-2.5 bg-success rounded-full animate-pulse"></span>
+                  <span class="text-sm font-medium text-success">运行正常</span>
+                </div>
+
+                <!-- Link -->
+                <a href="#" class="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary-hover transition-colors cursor-pointer">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                  </svg>
+                  打开 Langfuse 控制台
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section: TOKEN 用量统计 -->
+        <section>
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-base font-semibold text-text-primary">TOKEN 用量统计</h3>
+            <button class="refresh-btn flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-text-secondary hover:text-text-primary border border-border-light rounded-lg hover:bg-gray-50 transition-colors cursor-pointer">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              刷新
+            </button>
+          </div>
+
+          <!-- Filters -->
+          <div class="flex items-center gap-4 mb-5">
+            <div class="flex items-center gap-2">
+              <label class="text-sm text-text-secondary">时间范围:</label>
+              <select class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
+                <option>当天</option>
+                <option selected>7 天</option>
+                <option>30 天</option>
+                <option>90 天</option>
+              </select>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-sm text-text-secondary">起始日期:</label>
+              <input type="date" value="2026-03-04" class="px-3 py-1.5 text-sm border border-border-light rounded-lg bg-white text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary cursor-pointer">
+            </div>
+          </div>
+
+          <!-- Stats Cards -->
+          <div class="grid grid-cols-3 gap-4 mb-6">
+            <!-- 总调用次数 -->
+            <div class="stat-card bg-white rounded-xl border border-border-light p-5">
+              <div class="flex items-start gap-4">
+                <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
+                  <svg class="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-2xl font-bold text-text-primary">27</p>
+                  <p class="text-sm text-text-secondary">总调用次数</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- 总 Token 数 -->
+            <div class="stat-card bg-white rounded-xl border border-border-light p-5">
+              <div class="flex items-start gap-4">
+                <div class="w-12 h-12 bg-cyan-50 rounded-xl flex items-center justify-center">
+                  <svg class="w-6 h-6 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-2xl font-bold text-text-primary">305.3K</p>
+                  <p class="text-sm text-text-secondary">总 Token 数</p>
+                  <p class="text-xs text-text-muted mt-0.5">输入: 295.8K / 输出: 9.5K</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- 预估费用 -->
+            <div class="stat-card bg-white rounded-xl border border-border-light p-5">
+              <div class="flex items-start gap-4">
+                <div class="w-12 h-12 bg-violet-50 rounded-xl flex items-center justify-center">
+                  <svg class="w-6 h-6 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-2xl font-bold text-text-primary">$0.83</p>
+                  <p class="text-sm text-text-secondary">预估费用</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Trend Chart -->
+          <div class="bg-white rounded-xl border border-border-light p-5 mb-6">
+            <h4 class="text-sm font-medium text-text-primary mb-4">趋势图（按时间）</h4>
+            <div class="h-48">
+              <canvas id="trendChart"></canvas>
+            </div>
+          </div>
+
+          <!-- User Distribution Table -->
+          <div class="bg-white rounded-xl border border-border-light overflow-hidden">
+            <div class="px-5 py-4 border-b border-border-light">
+              <h4 class="text-sm font-medium text-text-primary">按用户分布</h4>
+            </div>
+            <table class="w-full">
+              <thead>
+                <tr class="border-b border-border-light bg-gray-50/50">
+                  <th class="px-5 py-3 text-left text-xs font-medium text-text-secondary uppercase tracking-wider">用户</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium text-text-secondary uppercase tracking-wider">TOKEN 数</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium text-text-secondary uppercase tracking-wider">费用</th>
+                  <th class="px-5 py-3 text-left text-xs font-medium text-text-secondary uppercase tracking-wider">调用数</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-border-light">
+                <tr class="table-row transition-colors cursor-pointer">
+                  <td class="px-5 py-4 text-sm font-medium text-text-primary">admin</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">305.3K</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">$0.83</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">27</td>
+                </tr>
+                <tr class="table-row transition-colors cursor-pointer">
+                  <td class="px-5 py-4 text-sm font-medium text-text-primary">user_001</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">128.5K</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">$0.35</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">12</td>
+                </tr>
+                <tr class="table-row transition-colors cursor-pointer">
+                  <td class="px-5 py-4 text-sm font-medium text-text-primary">user_002</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">76.2K</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">$0.21</td>
+                  <td class="px-5 py-4 text-sm text-text-secondary">8</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // Trend Chart
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: ['03-01', '03-02', '03-03', '03-04', '03-05', '03-06'],
+        datasets: [{
+          label: 'Token 数',
+          data: [45000, 78000, 120000, 202300, 185600, 95000],
+          backgroundColor: '#3B82F6',
+          borderRadius: 6,
+          barThickness: 32,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: false
+          },
+          tooltip: {
+            backgroundColor: '#1E293B',
+            titleColor: '#F8FAFC',
+            bodyColor: '#F8FAFC',
+            padding: 12,
+            cornerRadius: 8,
+            displayColors: false,
+            callbacks: {
+              label: function(context) {
+                return (context.raw / 1000).toFixed(1) + 'K tokens';
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: {
+              display: false
+            },
+            ticks: {
+              color: '#64748B',
+              font: {
+                size: 12
+              }
+            }
+          },
+          y: {
+            grid: {
+              color: '#E2E8F0',
+              drawBorder: false
+            },
+            ticks: {
+              color: '#64748B',
+              font: {
+                size: 12
+              },
+              callback: function(value) {
+                return (value / 1000).toFixed(0) + 'K';
+              }
+            }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>
