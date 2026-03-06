@@ -101,4 +101,5 @@ class User(Base):
     __table_args__ = (
         Index("ix_users_company", "company"),
         Index("ix_users_source", "source"),
+        {"schema": Base.__table_args__["schema"]},
     )
