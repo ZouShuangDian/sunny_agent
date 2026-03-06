@@ -17,7 +17,7 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from uuid6 import uuid7
 
 from app.config import get_settings
@@ -44,6 +44,12 @@ class ChatSession(Base):
         index=True,
         comment="关联用户",
     )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{_schema}.projects.id"),
+        nullable=True,
+        comment="关联项目",
+    )
     title: Mapped[str | None] = mapped_column(
         String(200), comment="会话标题（首条消息截取前50字）"
     )
@@ -57,6 +63,9 @@ class ChatSession(Base):
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="最后活跃时间"
     )
+
+    # 反向关联
+    project: Mapped["Project"] = relationship("Project", back_populates="sessions")
 
 
 class ChatMessage(Base):

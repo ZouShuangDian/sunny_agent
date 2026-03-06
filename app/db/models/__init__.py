@@ -9,6 +9,8 @@ from app.db.models.chat import ChatSession, ChatMessage, L3Step
 from app.db.models.skill import Skill, UserSkillSetting
 from app.db.models.plugin import Plugin, PluginCommand
 from app.db.models.data_scope import DataScopePolicy
+from app.db.models.project import Project
+from app.db.models.file import File
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
@@ -16,4 +18,5 @@ __all__ = [
     "Skill", "UserSkillSetting",
     "Plugin", "PluginCommand",
     "DataScopePolicy",
+    "Project", "File",
 ]

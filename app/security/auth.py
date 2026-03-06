@@ -17,6 +17,7 @@ from app.utils.token_util import hash_password, verify_password
 
 settings = get_settings()
 bearer_scheme = HTTPBearer()
+bearer_scheme_optional = HTTPBearer(auto_error=False)
 
 
 @dataclass
@@ -33,6 +34,11 @@ class AuthenticatedUser:
     permissions: list[str] = field(default_factory=list)
 
 
+def is_super_admin(user: AuthenticatedUser) -> bool:
+    """检查用户是否为超级管理员"""
+    return "admin" in user.permissions or "*" in user.permissions
+
+
 def create_access_token(
     *,
     sub: str,
@@ -42,9 +48,21 @@ def create_access_token(
     data_scope: dict | None = None,
     permissions: list[str] | None = None,
     company: str | None = None,
+    expires_in_seconds: int | None = None,
 ) -> str:
-    """签发 access_token"""
+    """签发 access_token
+    
+    Args:
+        expires_in_seconds: 自定义过期时间（秒），如果不指定则使用默认配置
+    """
     now = datetime.now(timezone.utc)
+    
+    # 计算过期时间
+    if expires_in_seconds:
+        expires_delta = timedelta(seconds=expires_in_seconds)
+    else:
+        expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    
     payload = {
         "sub": sub,
         "jti": str(uuid.uuid4()),
@@ -55,7 +73,7 @@ def create_access_token(
         "permissions": permissions or [],
         "company": company,
         "iat": now,
-        "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        "exp": now + expires_delta,
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
@@ -104,3 +122,87 @@ async def get_current_user(
         data_scope=payload.get("data_scope", {}),
         permissions=payload.get("permissions", []),
     )
+
+
+async def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme_optional),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> AuthenticatedUser | None:
+    """
+    可选的当前用户依赖
+    
+    用于支持可选认证的端点，如带 token 的下载接口
+    如果没有提供凭证，返回 None
+    """
+    if not credentials:
+        return None
+    
+    token = credentials.credentials
+    
+    # 1. 解码 JWT
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token 已过期")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="无效 Token")
+    
+    # 2. 检查黑名单（已注销的 Token）
+    jti = payload.get("jti")
+    if jti and await redis.exists(RedisKeys.token_blacklist(jti)):
+        raise HTTPException(status_code=401, detail="Token 已注销")
+
+    # 3. 构造用户上下文
+    return AuthenticatedUser(
+        id=payload["sub"],
+        usernumb=payload.get("usernumb", ""),
+        username=payload.get("username", ""),
+        role=payload.get("role", "viewer"),
+        department=payload.get("department"),
+        company=payload.get("company"),
+        data_scope=payload.get("data_scope", {}),
+        permissions=payload.get("permissions", []),
+    )
+
+
+async def verify_download_token(token: str) -> AuthenticatedUser:
+    """
+    验证临时下载令牌
+
+    Args:
+        token: JWT 令牌
+
+    Returns:
+        AuthenticatedUser: 令牌中的用户信息
+
+    Raises:
+        HTTPException: 令牌无效或过期
+    """
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+
+        # 检查令牌是否过期
+        exp = payload.get("exp")
+        if exp:
+            if datetime.now(timezone.utc).timestamp() > exp:
+                raise HTTPException(status_code=401, detail="下载链接已过期")
+
+        # 检查令牌权限
+        permissions = payload.get("permissions", [])
+        if "file_download" not in permissions:
+            raise HTTPException(status_code=403, detail="无效的下载令牌")
+
+        # 构建用户对象
+        return AuthenticatedUser(
+            id=payload["sub"],
+            usernumb=payload.get("usernumb", ""),
+            username=payload.get("username", ""),
+            role=payload.get("role", "user"),
+            company=payload.get("company"),
+            permissions=permissions,
+        )
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="下载链接已过期")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=403, detail="无效的下载令牌")
