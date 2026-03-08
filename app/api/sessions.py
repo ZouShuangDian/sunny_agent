@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.response import ok
 from app.cache.redis_client import RedisKeys, get_redis
 from app.db.engine import get_db
-from app.db.models.chat import ChatMessage, ChatSession
+from app.db.models.chat import ChatMessage, ChatSession, L3Step as L3StepModel
 from app.security.auth import AuthenticatedUser, get_current_user
 
 router = APIRouter(prefix="/api/sessions", tags=["会话历史"])
@@ -27,6 +27,9 @@ log = structlog.get_logger()
 
 TOOL_CALL_RESULT_MAX_LEN = 500
 """tool_calls.result 超过此长度时截断"""
+
+L3_STEP_CONTENT_MAX_LEN = 1000
+"""L3 step content 超过此长度时截断"""
 
 
 # ── Pydantic 响应模型 ──────────────────────────────────────────────────────
@@ -55,12 +58,21 @@ class ToolCallItem(BaseModel):
     duration_ms: int | None = None
 
 
+class L3StepItem(BaseModel):
+    step_index: int
+    role: str
+    content: str
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+
+
 class MessageItem(BaseModel):
     message_id: str
     role: str
     content: str
     created_at: datetime
     tool_calls: list[ToolCallItem] | None = None
+    l3_steps: list[L3StepItem] | None = None
 
 
 class MessageListResponse(BaseModel):
@@ -208,6 +220,31 @@ async def get_session_messages(
     # 反转为正序
     rows = list(reversed(rows))
 
+    # 批量查询 assistant 消息关联的 L3 steps
+    assistant_msg_ids = [r.message_id for r in rows if r.role == "assistant"]
+    steps_map: dict[str, list[L3StepItem]] = {}
+    if assistant_msg_ids:
+        steps_query = (
+            select(L3StepModel)
+            .where(
+                L3StepModel.message_id.in_(assistant_msg_ids),
+                L3StepModel.compacted == False,  # noqa: E712
+            )
+            .order_by(L3StepModel.message_id, L3StepModel.step_index)
+        )
+        steps_result = await db.execute(steps_query)
+        for s in steps_result.scalars().all():
+            content = s.content or ""
+            if len(content) > L3_STEP_CONTENT_MAX_LEN:
+                content = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
+            steps_map.setdefault(s.message_id, []).append(L3StepItem(
+                step_index=s.step_index,
+                role=s.role,
+                content=content,
+                tool_name=s.tool_name,
+                tool_call_id=s.tool_call_id,
+            ))
+
     messages = [
         MessageItem(
             message_id=r.message_id,
@@ -215,6 +252,7 @@ async def get_session_messages(
             content=r.content,
             created_at=r.created_at,
             tool_calls=_build_tool_calls(r.tool_calls),
+            l3_steps=steps_map.get(r.message_id) if r.role == "assistant" else None,
         )
         for r in rows
     ]

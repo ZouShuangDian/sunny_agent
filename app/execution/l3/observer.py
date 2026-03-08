@@ -58,7 +58,7 @@ class Observer:
     def on_act(self, step: int, result: ActResult) -> None:
         """记录执行结果"""
         for obs in result.observations:
-            self.trace.add_action(step, obs.tool_name, obs.arguments, obs.result)
+            self.trace.add_action(step, obs.tool_name, obs.arguments, obs.result, obs.tool_call_id)
 
         log.debug(
             "L3 执行完成",
@@ -85,7 +85,7 @@ class Observer:
 
         if self.budget.is_exhausted():
             log.warning(
-                "L3 熔断：预算耗尽",
+                "L3 熔断：工具调用次数耗尽",
                 llm_calls=self.budget.llm_call_count,
             )
             return True, "budget"

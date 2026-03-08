@@ -52,15 +52,8 @@ class Actor:
         assistant_msg = self._build_assistant_message(think_result)
 
         # 并行执行所有工具调用
-        async def _execute_one(tc: ToolCallRequest) -> tuple[str, int]:
-            """执行单个工具调用，返回 (result_str, duration_ms)"""
-            start = time.monotonic()
-            result_str = await self.tool_registry.execute(tc.name, tc.arguments)
-            duration = int((time.monotonic() - start) * 1000)
-            return result_str, duration
-
         results = await asyncio.gather(
-            *[_execute_one(tc) for tc in think_result.tool_calls],
+            *[self._execute_one(tc) for tc in think_result.tool_calls],
             return_exceptions=True,
         )
 
@@ -92,6 +85,8 @@ class Actor:
             log.info(
                 "L3 工具执行完成",
                 tool=tc.name,
+                args=tc.arguments,
+                result=result_str[:500] if isinstance(result_str, str) else result_str,
                 duration_ms=duration,
             )
 
@@ -99,6 +94,13 @@ class Actor:
             observations=observations,
             messages=[assistant_msg, *tool_messages],
         )
+
+    async def _execute_one(self, tc: ToolCallRequest) -> tuple[str, int]:
+        """执行单个工具调用，返回 (result_str, duration_ms)。"""
+        start = time.monotonic()
+        result_str = await self.tool_registry.execute(tc.name, tc.arguments)
+        duration = int((time.monotonic() - start) * 1000)
+        return result_str, duration
 
     @staticmethod
     def _build_assistant_message(think_result: ThinkResult) -> dict:

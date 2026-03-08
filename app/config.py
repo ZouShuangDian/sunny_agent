@@ -71,16 +71,15 @@ class Settings(BaseSettings):
     DEFAULT_TOOL_TIMEOUT_MS: int = 60_000  # 工具默认超时（毫秒），BaseTool 引用此值
 
     # ── L3 执行层 ──
-    L3_MAX_ITERATIONS: int = 20        # ReAct 循环最大步数
-    L3_TIMEOUT_SECONDS: float = 300.0  # L3 整体超时（秒）
+    L3_MAX_ITERATIONS: int = 30        # ReAct 循环最大步数
+    L3_TIMEOUT_SECONDS: float = 600.0  # L3 整体超时（秒）
     L3_MAX_LLM_CALLS: int = 50          # LLM 调用次数上限
 
     # ── Context 压缩（上下文窗口管理） ──
-    MODEL_CONTEXT_LIMIT: int = 98_304        # 模型上下文 token 上限（实测精确值）
+    MODEL_CONTEXT_LIMIT: int = 98_000        # 模型上下文 token 输入上限（实测精确值）
     COMPACTION_BUFFER: int = 20_000          # Level 2 触发阈值（剩余空间低于此值触发摘要）
     PRUNE_PROTECT_TOKENS: int = 20_000       # 保护区 token 数（最近步骤不被剪枝）
     HISTORY_TOKEN_BUDGET: int = 60_000       # 历史消息加载预算（独立于保护区）
-    COMPRESS_MIN_SAVING: int = 10_000        # Level 2 摘要后至少需节省的 token 数
     COMPACTION_MAX_TOKENS: int = 2_000       # 摘要生成 max_tokens
 
     # ── 冷存储（聊天记录持久化） ──
@@ -92,8 +91,8 @@ class Settings(BaseSettings):
     WORKING_MEMORY_MAX_TURNS: int = 20  # 对话历史最大保留轮次
 
     # ── M06 输出校验 ──
-    OUTPUT_VALIDATOR_ENABLED: bool = True        # 是否启用输出校验器（全局开关）
-    OUTPUT_VALIDATOR_HALLUCINATION: bool = True  # 是否启用幻觉检测（额外 LLM 调用）
+    OUTPUT_VALIDATOR_ENABLED: bool = False        # 是否启用输出校验器（全局开关）
+    OUTPUT_VALIDATOR_HALLUCINATION: bool = False  # 是否启用幻觉检测（额外 LLM 调用）
 
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表
