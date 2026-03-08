@@ -117,7 +117,8 @@ class ReasoningTrace:
             ))
 
     def add_action(
-        self, step: int, tool_name: str, args: dict, result: str
+        self, step: int, tool_name: str, args: dict, result: str,
+        tool_call_id: str = "",
     ) -> None:
         """记录一次工具调用及其结果"""
         existing = next((s for s in self.steps if s.step == step), None)
@@ -127,7 +128,7 @@ class ReasoningTrace:
 
         if existing.actions is None:
             existing.actions = []
-        existing.actions.append({"tool": tool_name, "args": args})
+        existing.actions.append({"tool": tool_name, "args": args, "tool_call_id": tool_call_id})
 
         if existing.observations is None:
             existing.observations = []
@@ -163,7 +164,7 @@ class ReasoningTrace:
                 continue
             for action, obs in zip(s.actions, s.observations):
                 records.append(ToolCall(
-                    tool_call_id=f"l3_step{s.step}_{action['tool']}",
+                    tool_call_id=action.get("tool_call_id") or f"l3_step{s.step}_{action['tool']}",
                     tool_name=action["tool"],
                     arguments=action["args"],
                     result=obs["result"],

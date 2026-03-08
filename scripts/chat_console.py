@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.observability.logging_config import setup_logging
 setup_logging()  # 初始化 structlog，避免日志乱码
 
+from app.config import get_settings
+settings = get_settings()
 from app.cache.redis_client import redis_client
 from app.db.engine import async_session                          # [DB存储] PG session 工厂
 from app.db.models.user import User                              # [DB存储] 用于查询真实用户
@@ -40,7 +42,7 @@ from app.guardrails.schemas import IntentDetail, IntentResult
 from app.intent.context_builder import ContextBuilder
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence          # [DB存储] PG 冷存储
-from app.memory.schemas import Message
+from app.memory.schemas import L3Step, Message
 from app.memory.working_memory import WorkingMemory
 from app.plugins.service import plugin_service
 from app.security.auth import AuthenticatedUser
@@ -257,6 +259,13 @@ async def chat_once(
     chat_persistence.save_message_background(                        # [DB存储]
         session_id, assistant_msg, reasoning_trace=trace_data,       # [DB存储]
     )                                                                # [DB存储]
+
+    # [DB存储] L3 中间步骤写 PG
+    if settings.CHAT_PERSIST_ENABLED and exec_result and exec_result.l3_steps:
+        l3_step_objs = [L3Step(**s) for s in exec_result.l3_steps]
+        chat_persistence.save_l3_steps_background(
+            session_id, assistant_msg.message_id, l3_step_objs,
+        )
 
     duration = int((time.time() - start) * 1000)
 

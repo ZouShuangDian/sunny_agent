@@ -7,9 +7,6 @@ SSE 事件协议规范（单一维护点）
 事件流时序（主 Agent，正常路径）：
     status → [delta? → context_usage → tool_call → tool_result]* → delta → context_usage → done
 
-事件流时序（含 SubAgent）：
-    ... → subagent_start → [subagent_thought → subagent_tool_call → subagent_tool_result]* → subagent_finish → ...
-
 注意：
 - finish 是引擎内部事件，不直接透传给前端，其数据合并进 done 事件。
 - error 只在异常时发送，之后必定跟随一条 done（带 error=True）。
@@ -155,84 +152,14 @@ class SSEEvent:
     """
 
     # ─────────────────────────────────────────────
-    #  SubAgent 事件（规划中，待 subagent_sse 方案实现后启用）
+    #  SubAgent 事件（v3 简化：未启用，常量保留供未来 Task 系统复用）
     # ─────────────────────────────────────────────
 
     SUBAGENT_START = "subagent_start"
-    """
-    SubAgent 开始执行（主 Agent 通过 subagent_call 工具触发时推送）。
-    前端可据此展示"子 Agent 启动"的 UI 面板。
-
-    data: {
-        "agent_id": str,    # 本次 SubAgent 实例 ID（格式: sub_xxxxxxxx，8位hex）
-        "agent_name": str,  # SubAgent 配置名称（来自 DB skill 表或参数）
-        "task": str         # 分配给该 SubAgent 的任务描述
-    }
-
-    ⚠️ 与 status 区别：status 是主 Agent 的开始信号；subagent_start 是嵌套子 Agent 的开始信号。
-       两者可在同一次请求中出现，agent_id 用于区分不同的子 Agent 实例。
-    """
-
     SUBAGENT_THOUGHT = "subagent_thought"
-    """
-    SubAgent 的单步推理内容（与主 Agent 的 thought 含义相同，但来源是子 Agent）。
-    通过 agent_id 与主 Agent 的 thought 区分。
-
-    data: {
-        "agent_id": str,  # SubAgent 实例 ID（与 subagent_start 对应）
-        "step": int,      # SubAgent 内部的推理步骤编号（从 0 开始，独立计数）
-        "content": str    # SubAgent 本次推理文本
-    }
-
-    ⚠️ 与 thought 区别：thought 来自主 Agent，subagent_thought 来自子 Agent；
-       前端应在子 Agent 面板内渲染 subagent_thought，不与主 Agent 的 thought 混排。
-    """
-
     SUBAGENT_TOOL_CALL = "subagent_tool_call"
-    """
-    SubAgent 发起工具调用（子 Agent 内部调用前推送）。
-
-    data: {
-        "agent_id": str,  # SubAgent 实例 ID
-        "step": int,      # SubAgent 内部步骤编号
-        "name": str,      # 工具名称
-        "args": dict      # 工具参数
-    }
-
-    ⚠️ 与 tool_call 区别：tool_call 是主 Agent 的工具调用；
-       subagent_tool_call 是子 Agent 的工具调用，归属于特定 agent_id 的子 Agent 面板。
-    """
-
     SUBAGENT_TOOL_RESULT = "subagent_tool_result"
-    """
-    SubAgent 工具调用执行完毕的结果（子 Agent 内部工具执行后推送）。
-
-    data: {
-        "agent_id": str,  # SubAgent 实例 ID
-        "step": int,      # SubAgent 内部步骤编号（与对应 subagent_tool_call 相同）
-        "name": str,      # 工具名称
-        "result": str     # 工具返回内容
-    }
-
-    ⚠️ 与 tool_result 区别：见 subagent_tool_call 说明。
-    """
-
     SUBAGENT_FINISH = "subagent_finish"
-    """
-    SubAgent 执行完成（无论正常完成还是异常/降级，均在 finally 块中保证推送）。
-    前端收到此事件后可关闭该 agent_id 对应的子 Agent 面板。
-
-    data: {
-        "agent_id": str,      # SubAgent 实例 ID（与 subagent_start 对应）
-        "agent_name": str,    # SubAgent 名称
-        "iterations": int,    # 实际执行轮数（异常时为 -1，表示未知）
-        "is_degraded": bool   # 是否降级（超时/异常时为 True）
-    }
-
-    ⚠️ 与 done 区别：done 是整个请求（主 Agent）结束的信号；
-       subagent_finish 是某个子 Agent 结束的信号，主 Agent 之后可能还会继续执行。
-       一次请求中可出现多个 subagent_finish（对应多次 subagent_call 调用）。
-    """
 
 
 # ─────────────────────────────────────────────

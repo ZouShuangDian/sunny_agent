@@ -40,14 +40,14 @@ log = structlog.get_logger()
 settings = get_settings()
 
 # Level 2 摘要生成 prompt（结构化，含制造业业务实体要求）
-COMPACTION_PROMPT = """请为以下对话历史生成结构化摘要，包含：
+COMPACTION_PROMPT = """请为以下对话历史生成结构化摘要（1500字以内），包含：
 1. 任务目标
 2. 已完成的操作步骤
 3. 重要发现和结论
 4. 操作过的文件、路径、数据
 5. 涉及的业务实体（产品型号、工单号、设备编号、指标名称等）
 6. 当前状态与下一步计划
-要求：摘要需足够详细，让继续任务的 AI 能无缝衔接。"""
+要求：摘要需足够详细，让继续任务的 AI 能无缝衔接；同时控制篇幅，避免冗余。"""
 
 
 def _parse_tool_arguments(s: str) -> dict:
@@ -160,13 +160,17 @@ class L3ReActEngine:
                 observer.on_think(step, think_result)
 
                 # ── 上下文用量计算 + context_usage 推送 ──
+                # 有效上限 = 模型上限 - 压缩缓冲区，超过此值即触发 Level 2 压缩
                 prompt_tokens = (think_result.usage or {}).get("prompt_tokens", 0)
+                completion_tokens = (think_result.usage or {}).get("completion_tokens", 0)
                 remaining = settings.MODEL_CONTEXT_LIMIT - prompt_tokens
+                effective_limit = settings.MODEL_CONTEXT_LIMIT - settings.COMPACTION_BUFFER
                 last_context_usage = {
                     "prompt_tokens": prompt_tokens,
-                    "remaining": remaining,
-                    "percent": round(prompt_tokens / settings.MODEL_CONTEXT_LIMIT * 100, 1),
-                    "limit": settings.MODEL_CONTEXT_LIMIT,
+                    "completion_tokens": completion_tokens,
+                    "remaining": max(effective_limit - prompt_tokens, 0),
+                    "percent": round(prompt_tokens / effective_limit * 100, 1),
+                    "limit": effective_limit,
                 }
 
                 # ── Level 2 溢出检测：剩余空间不足时触发摘要截断 ──
@@ -268,13 +272,17 @@ class L3ReActEngine:
                         final_usage = chunk.get("usage", {})
 
                 # ── context_usage：统一在流式完成后推送 ──
+                # 有效上限 = 模型上限 - 压缩缓冲区，超过此值即触发 Level 2 压缩
                 prompt_tokens = final_usage.get("prompt_tokens", 0)
+                completion_tokens = final_usage.get("completion_tokens", 0)
+                effective_limit = context_limit - settings.COMPACTION_BUFFER
                 if prompt_tokens > 0:
                     yield {"event": SSEEvent.CONTEXT_USAGE, "data": {
                         "prompt_tokens": prompt_tokens,
-                        "remaining": context_limit - prompt_tokens,
-                        "percent": round(prompt_tokens / context_limit * 100, 1),
-                        "limit": context_limit,
+                        "completion_tokens": completion_tokens,
+                        "remaining": max(effective_limit - prompt_tokens, 0),
+                        "percent": round(prompt_tokens / effective_limit * 100, 1),
+                        "limit": effective_limit,
                     }}
 
                 # ── Level 2 溢出检测（prompt_tokens 已可用）──
@@ -307,14 +315,13 @@ class L3ReActEngine:
                     )}
                     return
 
-                # ── Act：执行工具（含 skill_call / todo_write / todo_read 等）──
-                # [P2 注] tool_call 事件当前在 act() 完成后从 observations 批量推送
-                # SubAgent SSE v3 的 actor._execute_one() 改造将实现实时发送
+                # ── Act：执行工具 ──
                 act_result = await self.actor.act(think_result)
                 observer.on_act(step, act_result)
 
                 collected_steps.extend(act_result.messages)
 
+                # 主 Agent 的 tool_call/tool_result 事件（从 observations 批量推送）
                 for obs in act_result.observations:
                     yield {"event": SSEEvent.TOOL_CALL, "data": {
                         "step": step,

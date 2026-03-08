@@ -15,6 +15,8 @@ SubAgentCallTool — SubAgent 元工具（M08-5 Week 11）
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from pydantic import BaseModel
 
@@ -118,10 +120,8 @@ class SubAgentCallTool(BaseTool):
         """
         启动子 Agent 执行。
 
-        按 config.type 路由到不同后端：
-        - local_l3：独立 L3 ReAct 循环（默认）
-        - local_code：Python 实现类（任意复杂逻辑）
-        - http：外部 Agent HTTP 接口
+        当前仅支持 local_l3 类型（独立 L3 ReAct 循环）。
+        非 local_l3 类型直接返回错误（v3 简化，local_code / http 已移除）。
         """
         agent_name = args.get("agent_name", "")
         task = args.get("task", "")
@@ -150,19 +150,17 @@ class SubAgentCallTool(BaseTool):
                 "请在当前 Agent 中直接处理此任务"
             )
 
-        log.info("SubAgent 启动", agent=agent_name, type=config.type, task_preview=task[:100])
+        log.info("SubAgent 启动", agent=agent_name, task_preview=task[:100])
 
-        if config.type == "local_l3":
-            return await self._execute_local_l3(config, task, current_depth)
-        elif config.type == "local_code":
-            return await self._execute_local_code(config, task, current_depth)
-        elif config.type == "http":
-            return await self._execute_http(config, task, current_depth)
-        else:
-            return ToolResult.fail(f"未知 SubAgent 类型: {config.type}")
+        if config.type != "local_l3":
+            return ToolResult.fail(
+                f"SubAgent 仅支持 local_l3 类型，当前: {config.type}"
+            )
+
+        return await self._execute_local_l3(config, task, current_depth)
 
     async def _execute_local_l3(self, config, task: str, current_depth: int) -> ToolResult:
-        """local_l3：独立 L3 ReAct 循环"""
+        """local_l3：独立 L3 ReAct 循环（含超时控制）"""
         # 延迟导入，避免循环依赖（SubAgentCallTool ← react_engine ← router ← SubAgentCallTool）
         from app.execution.l3.react_engine import L3ReActEngine
 
@@ -176,26 +174,48 @@ class SubAgentCallTool(BaseTool):
         else:
             sub_tool_registry = self._tool_registry
 
+        timeout_s = config.timeout_ms / 1000
+
         sub_l3_config = L3Config(
             max_iterations=config.max_iterations,
-            timeout_seconds=config.timeout_ms / 1000,
+            timeout_seconds=timeout_s,
             max_llm_calls=config.max_iterations * 2,
         )
 
         sub_engine = L3ReActEngine(self._llm, sub_tool_registry, sub_l3_config)
 
-        # ContextVar 在 await 链路中会被子协程继承，必须显式清空 session_id
+        # ContextVar 管理：depth + session_id
         depth_token = set_agent_depth(current_depth + 1)
         sid_token = set_session_id("")
+        sub_result = None
+        error_type = None  # "timeout" | "error" | None
         try:
-            sub_result = await sub_engine.execute_raw(messages)
+            # 显式超时控制（防止单个慢工具导致 SubAgent 无限挂起）
+            sub_result = await asyncio.wait_for(
+                sub_engine.execute_raw(messages),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            error_type = "timeout"
+            log.warning("SubAgent 执行超时", agent=config.name, timeout_s=timeout_s)
+        except Exception as e:
+            error_type = "error"
+            log.error("SubAgent 执行异常", agent=config.name, error=str(e), exc_info=True)
         finally:
             reset_agent_depth(depth_token)
             reset_session_id(sid_token)
 
+        # 超时/异常时返回降级结果
+        if error_type == "timeout":
+            return ToolResult.fail(
+                f"SubAgent '{config.name}' 执行超时（{timeout_s:.0f}s）"
+            )
+        if error_type == "error":
+            return ToolResult.fail(f"SubAgent '{config.name}' 执行异常")
+
         llm_calls = sub_result.token_usage.get("llm_calls", 0) if sub_result.token_usage else 0
         log.info(
-            "SubAgent(local_l3) 完成",
+            "SubAgent 完成",
             agent=config.name,
             iterations=sub_result.iterations,
             llm_calls=llm_calls,
@@ -207,79 +227,3 @@ class SubAgentCallTool(BaseTool):
             llm_calls=llm_calls,
             is_degraded=sub_result.is_degraded,
         )
-
-    async def _execute_local_code(self, config, task: str, current_depth: int) -> ToolResult:
-        """
-        local_code：动态加载 Python 实现类并执行。
-
-        entry 格式：module.path::ClassName
-        实现类须继承 LocalAgentExecutor 并实现 execute(task: str) -> str。
-        """
-        import importlib
-        from app.subagents.executor import LocalAgentExecutor
-
-        try:
-            module_path, class_name = config.entry.rsplit("::", 1)
-        except ValueError:
-            return ToolResult.fail(
-                f"entry 格式错误（期望 'module.path::ClassName'）：{config.entry}"
-            )
-
-        try:
-            module = importlib.import_module(module_path)
-            executor_class = getattr(module, class_name)
-        except (ImportError, AttributeError) as e:
-            return ToolResult.fail(f"无法加载 entry '{config.entry}'：{e}")
-
-        if not (isinstance(executor_class, type) and issubclass(executor_class, LocalAgentExecutor)):
-            return ToolResult.fail(f"{config.entry} 必须是 LocalAgentExecutor 的子类")
-
-        depth_token = set_agent_depth(current_depth + 1)
-        sid_token = set_session_id("")
-        try:
-            executor = executor_class()
-            report = await executor.execute(task)
-        except Exception as e:
-            log.error("SubAgent(local_code) 执行异常", agent=config.name, error=str(e), exc_info=True)
-            return ToolResult.fail(f"SubAgent '{config.name}' 执行失败：{e}")
-        finally:
-            reset_agent_depth(depth_token)
-            reset_session_id(sid_token)
-
-        log.info("SubAgent(local_code) 完成", agent=config.name)
-        return ToolResult.success(agent=config.name, report=report)
-
-    async def _execute_http(self, config, task: str, current_depth: int) -> ToolResult:
-        """
-        http：调用外部 Agent HTTP 接口。
-
-        约定请求格式：POST {endpoint}  Body: {"task": "..."}
-        约定响应格式：{"reply": "..."}  或 {"result": "..."}（兼容两种 key）
-        """
-        import httpx
-
-        depth_token = set_agent_depth(current_depth + 1)
-        sid_token = set_session_id("")
-        try:
-            async with httpx.AsyncClient(timeout=config.timeout_ms / 1000) as client:
-                resp = await client.post(config.endpoint, json={"task": task})
-                resp.raise_for_status()
-                data = resp.json()
-                report = data.get("reply") or data.get("result") or str(data)
-        except httpx.TimeoutException:
-            return ToolResult.fail(
-                f"外部 Agent '{config.name}' 请求超时（{config.timeout_ms / 1000:.0f}s）"
-            )
-        except httpx.HTTPStatusError as e:
-            return ToolResult.fail(
-                f"外部 Agent '{config.name}' 返回错误状态码 {e.response.status_code}"
-            )
-        except Exception as e:
-            log.error("SubAgent(http) 请求异常", agent=config.name, error=str(e), exc_info=True)
-            return ToolResult.fail(f"外部 Agent '{config.name}' 请求失败：{e}")
-        finally:
-            reset_agent_depth(depth_token)
-            reset_session_id(sid_token)
-
-        log.info("SubAgent(http) 完成", agent=config.name, endpoint=config.endpoint)
-        return ToolResult.success(agent=config.name, report=report)
