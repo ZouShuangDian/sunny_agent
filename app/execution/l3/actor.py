@@ -79,6 +79,7 @@ class Actor:
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
+                "name": tc.name,
                 "content": result_str,
             })
 

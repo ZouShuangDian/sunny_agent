@@ -647,12 +647,23 @@ class L3ReActEngine:
             tool_name: str | None = None
             tool_call_id: str | None = None
 
+            tool_args: dict | None = None
+
             if role == "tool":
                 tool_call_id = msg.get("tool_call_id")
                 tool_name = msg.get("name")
             elif role == "assistant" and msg.get("tool_calls"):
-                if not content:
-                    content = json.dumps(msg["tool_calls"], ensure_ascii=False)
+                # 提取工具入参：{tool_name: args_dict, ...}
+                tool_args = {}
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "unknown")
+                    args_raw = fn.get("arguments", "{}")
+                    try:
+                        args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                    except (json.JSONDecodeError, TypeError):
+                        args = {"_raw": args_raw}
+                    tool_args[name] = args
 
             steps.append({
                 "step_index": idx,
@@ -660,6 +671,7 @@ class L3ReActEngine:
                 "content": content,
                 "tool_name": tool_name,
                 "tool_call_id": tool_call_id,
+                "tool_args": tool_args,
             })
 
         return steps

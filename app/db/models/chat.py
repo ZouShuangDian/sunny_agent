@@ -15,7 +15,7 @@ PG 冷存储，永久保存聊天历史。与 Redis WorkingMemory 互补：
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from uuid6 import uuid7
@@ -152,6 +152,10 @@ class L3Step(Base):
     tool_call_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True,
         comment="工具调用 ID（tool 消息专用，关联 assistant tool_calls）",
+    )
+    tool_args: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+        comment="工具调用入参（assistant 消息专用，{tool_name: args_dict, ...}）",
     )
     compacted: Mapped[bool] = mapped_column(
         default=False, server_default="false",
