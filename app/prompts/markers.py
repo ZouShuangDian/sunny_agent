@@ -14,7 +14,7 @@ System Prompt 注入标记统一管理
 """
 
 # ── Todo 状态注入 ────────────────────────────────────────────────────────────
-# 由 L3ReActEngine._inject_todo_reminder() 使用
+# 由 TodoMiddleware.before_think() 使用（middleware.py）
 # 格式：\n\n---\n<!-- todo-reminder-start -->...<!-- todo-reminder-end -->
 
 TODO_REMINDER_MARKER = "\n\n---\n<!-- todo-reminder-start -->"

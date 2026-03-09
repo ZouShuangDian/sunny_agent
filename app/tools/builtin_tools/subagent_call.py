@@ -162,6 +162,7 @@ class SubAgentCallTool(BaseTool):
     async def _execute_local_l3(self, config, task: str, current_depth: int) -> ToolResult:
         """local_l3：独立 L3 ReAct 循环（含超时控制）"""
         # 延迟导入，避免循环依赖（SubAgentCallTool ← react_engine ← router ← SubAgentCallTool）
+        from app.execution.l3.loop_context import LoopContext
         from app.execution.l3.react_engine import L3ReActEngine
 
         messages = [
@@ -184,6 +185,13 @@ class SubAgentCallTool(BaseTool):
 
         sub_engine = L3ReActEngine(self._llm, sub_tool_registry, sub_l3_config)
 
+        # 构建 LoopContext（零中间件 + BatchThinkStrategy，SubAgent 无需 Todo/压缩等）
+        ctx = LoopContext.from_messages(
+            messages=messages,
+            config=sub_l3_config,
+            tool_schemas=sub_tool_registry.get_all_schemas(),
+        )
+
         # ContextVar 管理：depth + session_id
         depth_token = set_agent_depth(current_depth + 1)
         sid_token = set_session_id("")
@@ -192,7 +200,7 @@ class SubAgentCallTool(BaseTool):
         try:
             # 显式超时控制（防止单个慢工具导致 SubAgent 无限挂起）
             sub_result = await asyncio.wait_for(
-                sub_engine.execute_raw(messages),
+                sub_engine.run(ctx),  # 零中间件 + BatchThinkStrategy（默认值）
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
