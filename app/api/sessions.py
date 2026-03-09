@@ -64,6 +64,7 @@ class L3StepItem(BaseModel):
     content: str
     tool_name: str | None = None
     tool_call_id: str | None = None
+    tool_args: dict | None = None
 
 
 class MessageItem(BaseModel):
@@ -243,6 +244,7 @@ async def get_session_messages(
                 content=content,
                 tool_name=s.tool_name,
                 tool_call_id=s.tool_call_id,
+                tool_args=s.tool_args,
             ))
 
     messages = [
