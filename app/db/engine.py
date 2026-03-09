@@ -14,6 +14,9 @@ engine = create_async_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
+    # 每次从池中取连接前先发 SELECT 1 探活，丢弃已断开的死连接
+    # 远程 PG 容易因空闲超时/网络波动断连，没有此项会抛 InterfaceError: connection is closed
+    pool_pre_ping=True,
     echo=settings.DB_ECHO,
     connect_args={"server_settings": {"search_path": settings.DB_SCHEMA}},
 )
