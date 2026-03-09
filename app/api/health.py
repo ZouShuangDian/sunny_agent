@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.response import ApiResponse, fail, ok
 from app.cache.redis_client import get_redis
 from app.db.engine import get_db
 
@@ -15,7 +16,7 @@ router = APIRouter(tags=["健康检查"])
 log = structlog.get_logger()
 
 
-@router.get("/health")
+@router.get("/health", response_model=ApiResponse)
 async def health_check(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -39,4 +40,6 @@ async def health_check(
         status["status"] = "degraded"
         log.error("Redis 健康检查失败", error=str(e))
 
-    return status
+    if status["status"] == "degraded":
+        return fail(code=50300, message="服务降级", status_code=503, data=status)
+    return ok(data=status)

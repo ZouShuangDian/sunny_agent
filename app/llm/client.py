@@ -152,7 +152,7 @@ class LLMClient:
         yield 的 dict 格式：
         - 文本 chunk: {"type": "delta", "content": "..."}
         - 工具调用:   {"type": "tool_call", "id": "...", "name": "...", "arguments": "..."}
-        - 结束:       {"type": "finish", "reason": "stop"}
+        - 结束:       {"type": "finish", "reason": "stop", "usage": {"prompt_tokens": ..., "completion_tokens": ..., "total_tokens": ...}}
         """
         use_model = model or self.default_model
 
@@ -163,6 +163,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "timeout": settings.LLM_STREAM_TIMEOUT,
             "stream": True,
+            "stream_options": {"include_usage": True},  # 确保 finish chunk 携带 token 用量
         }
         if self.api_key:
             kwargs["api_key"] = self.api_key
@@ -214,6 +215,14 @@ class LLMClient:
                                 buf["arguments"] += tc.function.arguments
 
             if finish_reason:
+                # 读取 chunk.usage（依赖 stream_options={"include_usage": True}）
+                usage_dict: dict = {}
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage_dict = {
+                        "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                    }
                 # 输出完整的工具调用
                 for _idx, buf in sorted(tool_call_buffers.items()):
                     yield {
@@ -223,7 +232,7 @@ class LLMClient:
                         "arguments": buf["arguments"],
                     }
                 tool_call_buffers.clear()
-                yield {"type": "finish", "reason": finish_reason}
+                yield {"type": "finish", "reason": finish_reason, "usage": usage_dict}
 
     async def chat_with_tools(
         self,

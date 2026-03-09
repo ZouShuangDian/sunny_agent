@@ -30,7 +30,7 @@ class SkillCallTool(BaseTool):
     """
     Skill 元工具：单一入口代理所有 Skill 调用。
 
-    tier = ["L3"]：只在 L3 深度推理循环中可用（Skill 是高阶工作流，不适合 L1 快速路径）。
+    tier = ["L3"]：只在 L3 深度推理循环中可用。
     构造时无需传入 SkillRegistry，运行时从 skill_context ContextVar 动态读取。
     """
 

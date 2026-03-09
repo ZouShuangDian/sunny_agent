@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.response import ApiResponse, ok
 from app.config import get_settings
 from app.db.engine import async_session
 from app.plugins.service import _parse_frontmatter, plugin_service
@@ -153,7 +154,7 @@ def _validate_commands(commands_dir: Path) -> list[dict]:
 
 # ── POST /api/plugins/upload ──────────────────────────────────
 
-@router.post("/upload")
+@router.post("/upload", response_model=ApiResponse)
 async def upload_plugin(
     file: UploadFile,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -302,15 +303,19 @@ async def upload_plugin(
             command_count=len(commands),
         )
 
-        return {
-            "plugin": plugin_name,
-            "version": plugin_data["version"],
-            "description": plugin_data["description"],
-            "commands": [
-                {"name": c["name"], "description": c["description"]}
-                for c in commands
-            ],
-        }
+        return ok(
+            data={
+                "plugin": plugin_name,
+                "version": plugin_data["version"],
+                "description": plugin_data["description"],
+                "commands": [
+                    {"name": c["name"], "description": c["description"]}
+                    for c in commands
+                ],
+            },
+            message="Plugin 上传成功",
+            status_code=201,
+        )
 
     finally:
         # 始终清理临时目录
@@ -320,18 +325,18 @@ async def upload_plugin(
 
 # ── GET /api/plugins/list ─────────────────────────────────────
 
-@router.get("/list")
+@router.get("/list", response_model=ApiResponse)
 async def list_plugins(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """列出当前用户所有 Plugin（含命令数）"""
     plugins = await plugin_service.list_user_plugins(user.usernumb)
-    return {"plugins": plugins, "total": len(plugins)}
+    return ok(data={"plugins": plugins, "total": len(plugins)})
 
 
 # ── DELETE /api/plugins/{plugin_name} ────────────────────────
 
-@router.delete("/{plugin_name}")
+@router.delete("/{plugin_name}", response_model=ApiResponse)
 async def delete_plugin(
     plugin_name: str,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -381,4 +386,4 @@ async def delete_plugin(
         log.warning("Plugin 目录路径越界，跳过文件删除", path=plugin_path)
 
     log.info("Plugin 已删除", plugin_name=plugin_name, usernumb=user.usernumb)
-    return {"deleted": plugin_name}
+    return ok(message=f"Plugin '{plugin_name}' 已删除")

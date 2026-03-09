@@ -27,7 +27,7 @@ class AuditLog(Base):
     risk_level: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="read", comment="风险等级: read/suggest/write/critical"
     )
-    route: Mapped[str | None] = mapped_column(String(16), comment="路由: fast_track/deep_engine")
+    route: Mapped[str | None] = mapped_column(String(16), comment="执行路由（统一为 deep_l3）")
     input_text: Mapped[str | None] = mapped_column(Text, comment="用户原始输入（完整保存）")
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="success", comment="状态: success/blocked/error"

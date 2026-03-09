@@ -10,14 +10,16 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.cache.redis_client import redis_client
 from app.config import get_settings
 from app.db.engine import async_session, engine
-from app.intent.codebook_service import CodebookService
 from app.observability.logging_config import setup_logging
 from app.observability.metrics_middleware import MetricsMiddleware
 from app.observability.request_logger import RequestLoggerMiddleware
@@ -42,16 +44,6 @@ async def lifespan(application: FastAPI):
     await redis_client.ping()
     log.info("Redis 连接正常")
 
-    # ── 码表缓存预热：避免启动后缓存击穿 ──
-    try:
-        async with async_session() as db:
-            codebook_svc = CodebookService(redis_client, db)
-            count = await codebook_svc.warm_cache()
-            log.info("码表缓存预热完成", count=count)
-    except Exception as e:
-        # 预热失败不阻止启动，但记录警告
-        log.warning("码表缓存预热失败，将降级为逐条回源", error=str(e), exc_info=True)
-
     yield
 
     # 关闭数据库连接池
@@ -67,9 +59,53 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── 全局异常处理器：统一响应信封 ──
+from app.api.response import fail  # noqa: E402
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(_request: Request, exc: StarletteHTTPException):
+    """HTTPException → 统一信封（code = HTTP 状态码 × 100）"""
+    return fail(
+        code=exc.status_code * 100,
+        message=str(exc.detail),
+        status_code=exc.status_code,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    """Pydantic 请求校验错误 → 统一信封（code=42200）"""
+    errors = [
+        {
+            "field": ".".join(str(loc) for loc in err["loc"]),
+            "message": err["msg"],
+            "type": err["type"],
+        }
+        for err in exc.errors()
+    ]
+    return fail(code=42200, message="请求参数校验失败", status_code=422, data=errors)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    """未捕获异常 → 统一信封（code=50000）"""
+    log.error("未捕获异常", error=str(exc), exc_info=True)
+    message = str(exc) if settings.ENV == "development" else "服务器内部错误，请稍后重试"
+    return fail(code=50000, message=message, status_code=500)
+
+
 # ── 中间件（执行顺序：从下往上注册，从上往下执行） ──
 app.add_middleware(RequestLoggerMiddleware)
 app.add_middleware(MetricsMiddleware)
+# CORS 最后注册 = 最外层，确保 preflight OPTIONS 请求在所有中间件之前被处理
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Prometheus 指标端点 ──
 metrics_app = make_asgi_app()
@@ -81,12 +117,16 @@ from app.api.chat import router as chat_router
 from app.api.files import router as files_router
 from app.api.plugins import router as plugins_router
 from app.security.login import router as auth_router
+from app.api.users import router as users_router
+from app.api.roles import router as roles_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(plugins_router)
+app.include_router(users_router)
+app.include_router(roles_router)
 
 
 if __name__ == "__main__":
@@ -94,4 +134,4 @@ if __name__ == "__main__":
     # 允许直接运行 python app/main.py 启动服务
     # 如果配置中没有设置端口，默认使用 8000
     port = getattr(settings, "APP_PORT", 8000)
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)

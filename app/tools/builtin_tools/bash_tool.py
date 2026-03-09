@@ -4,7 +4,7 @@ BashTool — 在沙箱容器内执行 bash 命令
 调用链：LLM → bash_tool → sandbox_service HTTP /exec → 容器内 bash → stdout/stderr/returncode
 
 设计要点：
-- tier=L3：仅 L3 ReAct 引擎可用，不暴露给 L1 FastTrack
+- tier=L3：仅 L3 ReAct 引擎可用
 - session_id / user_id 从 ContextVar 自动读取，LLM 无需传入
 - timeout 由 LLM 按需指定，上限受 BaseTool.timeout_ms 兜底
 """

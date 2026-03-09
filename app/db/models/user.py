@@ -5,7 +5,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from uuid6 import uuid7
@@ -55,6 +55,38 @@ class User(Base):
         JSONB, default=dict, server_default="{}", comment="数据权限范围"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", comment="是否激活")
+    
+    # SSO 相关字段
+    source: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="local",
+        comment="用户来源：local | sso | ldap | feishu"
+    )
+    
+    company: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="公司/事业部"
+    )
+    
+    phone: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="手机号"
+    )
+    
+    avatar_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="头像 URL"
+    )
+    
+    sso_last_login: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="上次 SSO 登录时间"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
@@ -64,3 +96,9 @@ class User(Base):
 
     # 正向关联
     role: Mapped["Role"] = relationship(back_populates="users", lazy="joined")
+    
+    # 索引
+    __table_args__ = (
+        Index("ix_users_company", "company"),
+        Index("ix_users_source", "source"),
+    )

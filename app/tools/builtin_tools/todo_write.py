@@ -21,7 +21,7 @@ class _Params(BaseModel):
 
 
 class TodoWriteTool(BaseTool):
-    """创建/更新会话 Todo 列表，tier=L3（不暴露给 L1 FastTrack）"""
+    """创建/更新会话 Todo 列表（Layer 2 感知层工具）"""
 
     @property
     def name(self) -> str:
