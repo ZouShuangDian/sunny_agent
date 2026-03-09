@@ -4,9 +4,18 @@ L3 引擎数据结构定义
 所有组件间通过纯数据结构通信，不引入事件总线或发布订阅模式。
 """
 
+import json
 from dataclasses import asdict, dataclass, field
 
 from app.config import get_settings
+
+
+def parse_tool_arguments(s: str) -> dict:
+    """安全解析 LLM tool_call arguments JSON，失败时返回空 dict。"""
+    try:
+        return json.loads(s) if s else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 # ── L3 运行时配置 ──
