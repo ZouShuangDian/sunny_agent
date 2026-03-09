@@ -7,6 +7,7 @@
 """
 
 from app.config import get_settings
+from app.tools.builtin_tools.ask_user import AskUserTool
 from app.tools.builtin_tools.bash_tool import BashTool
 from app.tools.builtin_tools.present_files import PresentFilesTool
 from app.tools.builtin_tools.read_file import ReadFileTool
@@ -26,6 +27,9 @@ def create_builtin_registry() -> ToolRegistry:
 
     registry.register(WebSearchTool(api_key=settings.BOCHA_API_KEY))
     registry.register(WebFetchTool())
+
+    # 用户交互工具
+    registry.register(AskUserTool())
 
     # Todo 工具（tier=L3）
     registry.register(TodoWriteTool())

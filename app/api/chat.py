@@ -119,19 +119,12 @@ def _save_compaction_genesis_block(session_id: str, summary_content: str) -> Non
     log.info("Level 2 genesis block 已写入 PG", session_id=session_id)
 
 
-async def _record_conversation(
+async def _record_user_message(
     session_id: str,
     memory: WorkingMemory,
     user_content: str,
-    reply_text: str,
-    intent_primary: str,
-    route: str,
-    exec_result: ExecutionResult | None = None,
-) -> tuple[Message, Message]:
-    """
-    统一消息记录：user + assistant → Redis + PG。
-    返回 (user_msg, assistant_msg) 供后续使用。
-    """
+) -> Message:
+    """保存 user 消息到 Redis + PG（执行前调用，确保用户输入永不丢失）"""
     user_msg = Message(
         role="user", content=user_content,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
@@ -139,7 +132,18 @@ async def _record_conversation(
     await memory.append_message(session_id, user_msg)
     if settings.CHAT_PERSIST_ENABLED:
         chat_persistence.save_message_background(session_id, user_msg)
+    return user_msg
 
+
+async def _record_assistant_message(
+    session_id: str,
+    memory: WorkingMemory,
+    reply_text: str,
+    intent_primary: str,
+    route: str,
+    exec_result: ExecutionResult | None = None,
+) -> Message:
+    """保存 assistant 消息到 Redis + PG（执行后调用）"""
     assistant_msg = Message(
         role="assistant", content=reply_text,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
@@ -153,7 +157,7 @@ async def _record_conversation(
         trace_data = exec_result.reasoning_trace if exec_result and exec_result.reasoning_trace else None
         chat_persistence.save_message_background(session_id, assistant_msg, reasoning_trace=trace_data)
 
-    return user_msg, assistant_msg
+    return assistant_msg
 
 
 def _post_process_execution(
@@ -364,6 +368,9 @@ async def chat(
     )
 
     try:
+        # user 消息立即持久化（执行前，确保永不丢失）
+        await _record_user_message(session_id, memory, body.message)
+
         # 执行（统一 L3）
         _uid_token = set_user_id(user.usernumb)
         try:
@@ -385,9 +392,9 @@ async def chat(
         else:
             reply_text = exec_result.reply
 
-        # 统一消息记录
-        _, assistant_msg = await _record_conversation(
-            session_id, memory, body.message, reply_text,
+        # assistant 消息记录
+        assistant_msg = await _record_assistant_message(
+            session_id, memory, reply_text,
             final_result.intent.primary, final_result.route, exec_result,
         )
 
@@ -454,11 +461,15 @@ async def chat_stream(
             )
 
             try:
+                # user 消息立即持久化（执行前，确保永不丢失）
+                await _record_user_message(session_id, memory, body.message)
+
                 # 执行（统一 L3）
                 yield _sse_event(SSEEvent.STATUS, {"phase": "executing"})
                 _uid_token = set_user_id(user.usernumb)
                 reply_chunks: list[str] = []
                 finish_meta: dict = {}
+                stream_completed = False
                 try:
                     async for event in execution_router.execute_stream(
                         intent_result=final_result, session_id=session_id,
@@ -468,46 +479,49 @@ async def chat_stream(
                         if evt_type == SSEEvent.DELTA:
                             reply_chunks.append(evt_data.get("content", ""))
                             yield _sse_event(SSEEvent.DELTA, evt_data)
-                        elif evt_type in (SSEEvent.TOOL_CALL, SSEEvent.TOOL_RESULT, SSEEvent.CONTEXT_USAGE):
+                        elif evt_type in (
+                            SSEEvent.TOOL_CALL, SSEEvent.TOOL_RESULT, SSEEvent.CONTEXT_USAGE,
+                        ):
                             yield _sse_event(evt_type, evt_data)
                         elif evt_type == SSEEvent.FINISH:
                             finish_meta = evt_data if isinstance(evt_data, dict) else {}
                         else:
                             log.debug("execute_stream 产生了未处理的事件类型，已丢弃", evt_type=evt_type)
+                    stream_completed = True
                 finally:
                     reset_user_id(_uid_token)
+                    # 中断保护：无论正常完成还是中断，都保存已收集的 assistant 回复
+                    reply_text = "".join(reply_chunks)
+                    if reply_text:
+                        assistant_msg = await _record_assistant_message(
+                            session_id, memory, reply_text,
+                            final_result.intent.primary, final_result.route,
+                        )
 
-                reply_text = "".join(reply_chunks)
+                if stream_completed:
+                    # 正常完成：执行后处理（l3_steps 持久化 + DB 剪枝 + genesis block）
+                    _post_process_execution(
+                        session_id, assistant_msg.message_id,
+                        l3_steps_override=finish_meta.get("l3_steps"),
+                        compaction_summary=finish_meta.get("compaction_summary"),
+                    )
 
-                # 统一消息记录
-                _, assistant_msg = await _record_conversation(
-                    session_id, memory, body.message, reply_text,
-                    final_result.intent.primary, final_result.route,
-                )
-
-                # 统一执行后处理（流式路径通过 finish_meta 传入）
-                _post_process_execution(
-                    session_id, assistant_msg.message_id,
-                    l3_steps_override=finish_meta.get("l3_steps"),
-                    compaction_summary=finish_meta.get("compaction_summary"),
-                )
-
-                # 审计（与非流式路径对称）
-                duration_ms = int((time.time() - start_time) * 1000)
-                audit_logger.log_background(
-                    trace_id=trace_id, user_id=user.id, usernumb=user.usernumb,
-                    action="chat_stream", route=final_result.route,
-                    input_text=body.message, duration_ms=duration_ms,
-                    metadata={
-                        "intent": final_result.intent.primary,
-                        **({"iterations": finish_meta["iterations"], "is_degraded": finish_meta["is_degraded"]}
-                           if "iterations" in finish_meta else {}),
-                        **({"token_usage": finish_meta["token_usage"]}
-                           if "token_usage" in finish_meta else {}),
-                    },
-                )
-                done_meta = {k: finish_meta[k] for k in _DONE_FIELDS if k in finish_meta}
-                yield _sse_event(SSEEvent.DONE, {"session_id": session_id, "duration_ms": duration_ms, **done_meta})
+                    # 审计（与非流式路径对称）
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    audit_logger.log_background(
+                        trace_id=trace_id, user_id=user.id, usernumb=user.usernumb,
+                        action="chat_stream", route=final_result.route,
+                        input_text=body.message, duration_ms=duration_ms,
+                        metadata={
+                            "intent": final_result.intent.primary,
+                            **({"iterations": finish_meta["iterations"], "is_degraded": finish_meta["is_degraded"]}
+                               if "iterations" in finish_meta else {}),
+                            **({"token_usage": finish_meta["token_usage"]}
+                               if "token_usage" in finish_meta else {}),
+                        },
+                    )
+                    done_meta = {k: finish_meta[k] for k in _DONE_FIELDS if k in finish_meta}
+                    yield _sse_event(SSEEvent.DONE, {"session_id": session_id, "duration_ms": duration_ms, **done_meta})
             finally:
                 # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
                 if plugin_token is not None:

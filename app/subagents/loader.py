@@ -1,9 +1,8 @@
 """
 SubAgent 加载器：从 agent.md 解析 SubAgentConfig
 
-agent.md 支持三种类型（type 字段）：
+agent.md 格式（v3 简化：仅支持 local_l3 类型）：
 
-1. local_l3（默认）：系统提示词 + 工具白名单，走标准 L3 ReAct 循环
     ---
     name: quality_expert
     type: local_l3           # 可省略，默认值
@@ -17,28 +16,6 @@ agent.md 支持三种类型（type 字段）：
     ---
     # 系统提示词正文
     你是一位专注于...
-
-2. local_code：指向 Python 实现类，适用于无法用 system prompt + tools 满足的复杂场景
-    ---
-    name: supply_chain_agent
-    type: local_code
-    description: 供应链深度分析，内含多阶段数据处理流程
-    entry: app.subagents.builtin_agents.supply_chain.executor::SupplyChainExecutor
-    timeout_ms: 120000
-    max_depth: 2
-    ---
-    （body 可留空，实际逻辑在 executor 类中）
-
-3. http：调用外部 Agent HTTP 接口，对方内部实现无关紧要
-    ---
-    name: external_quality_agent
-    type: http
-    description: 外部质量分析服务（由质量团队维护）
-    endpoint: https://internal.company.com/agents/quality
-    timeout_ms: 60000
-    max_depth: 2
-    ---
-    （body 可留空）
 """
 
 from __future__ import annotations
@@ -57,23 +34,15 @@ class SubAgentConfig:
     """
     从 agent.md 解析出的 SubAgent 完整配置。
 
-    type 决定执行后端：
-      - "local_l3"（默认）：L3 ReAct 循环，system_prompt + tool_filter 生效
-      - "local_code"：Python 实现类，entry 字段指定，system_prompt / tool_filter 无效
-      - "http"：外部 HTTP 接口，endpoint 字段指定，system_prompt / tool_filter 无效
-
-    tool_filter：仅 local_l3 有效；None=继承全部，有值=物理白名单（RestrictedToolRegistry）
-    entry：仅 local_code 有效；格式 "module.path::ClassName"
-    endpoint：仅 http 有效；外部 Agent HTTP POST 地址
+    v3 简化：仅支持 local_l3 类型（L3 ReAct 循环）。
+    tool_filter：None=继承全部，有值=物理白名单（RestrictedToolRegistry）。
     """
     name: str
     description: str
     agent_dir: Path
-    type: str = "local_l3"               # "local_l3" | "local_code" | "http"
-    system_prompt: str = ""              # local_l3 专用，agent.md body
-    tool_filter: list[str] | None = None # local_l3 专用，None=继承全部
-    entry: str = ""                      # local_code 专用，"module.path::ClassName"
-    endpoint: str = ""                   # http 专用，外部接口地址
+    type: str = "local_l3"
+    system_prompt: str = ""              # agent.md body
+    tool_filter: list[str] | None = None # None=继承全部
     max_iterations: int = 15
     timeout_ms: int = 180_000
     max_depth: int = 10
@@ -131,9 +100,10 @@ def load_agent_from_dir(agent_dir: Path) -> SubAgentConfig | None:
         log.warning("agent.md body（系统提示词）为空", path=str(agent_md_path))
 
     agent_type = str(fm.get("type", "local_l3"))
-    if agent_type not in ("local_l3", "local_code", "http"):
+    # v3 简化：仅支持 local_l3，local_code / http 已从 subagent_call 移除
+    if agent_type != "local_l3":
         log.error(
-            "agent.md type 字段无效，支持：local_l3 / local_code / http",
+            "agent.md type 字段无效，当前仅支持 local_l3",
             path=str(agent_md_path),
             type=agent_type,
         )
@@ -147,18 +117,6 @@ def load_agent_from_dir(agent_dir: Path) -> SubAgentConfig | None:
         else None
     )
 
-    # local_code 专用字段
-    entry = str(fm.get("entry", ""))
-    if agent_type == "local_code" and not entry:
-        log.error("local_code 类型必须指定 entry 字段", path=str(agent_md_path))
-        return None
-
-    # http 专用字段
-    endpoint = str(fm.get("endpoint", ""))
-    if agent_type == "http" and not endpoint:
-        log.error("http 类型必须指定 endpoint 字段", path=str(agent_md_path))
-        return None
-
     config = SubAgentConfig(
         name=str(name),
         description=str(description),
@@ -166,8 +124,6 @@ def load_agent_from_dir(agent_dir: Path) -> SubAgentConfig | None:
         type=agent_type,
         system_prompt=body,
         tool_filter=tool_filter,
-        entry=entry,
-        endpoint=endpoint,
         max_iterations=int(fm.get("max_iterations", 15)),
         timeout_ms=int(fm.get("timeout_ms", 180_000)),
         max_depth=int(fm.get("max_depth", 2)),

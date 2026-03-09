@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.observability.logging_config import setup_logging
 setup_logging()  # 初始化 structlog，避免日志乱码
 
+from app.config import get_settings
+settings = get_settings()
 from app.cache.redis_client import redis_client
 from app.db.engine import async_session                          # [DB存储] PG session 工厂
 from app.db.models.user import User                              # [DB存储] 用于查询真实用户
@@ -40,7 +42,7 @@ from app.guardrails.schemas import IntentDetail, IntentResult
 from app.intent.context_builder import ContextBuilder
 from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence          # [DB存储] PG 冷存储
-from app.memory.schemas import Message
+from app.memory.schemas import L3Step, Message
 from app.memory.working_memory import WorkingMemory
 from app.plugins.service import plugin_service
 from app.security.auth import AuthenticatedUser
@@ -174,17 +176,34 @@ async def _handle_plugin_command(
     return reply
 
 
+def _extract_ask_user_questions(exec_result) -> list[dict] | None:
+    """从 exec_result.tool_calls 中提取 ask_user 工具的问题列表。"""
+    if not exec_result or not exec_result.tool_calls:
+        return None
+    for tc in exec_result.tool_calls:
+        name = tc.tool_name if hasattr(tc, "tool_name") else tc.get("tool_name")
+        args = tc.arguments if hasattr(tc, "arguments") else tc.get("arguments")
+        if name == "ask_user" and args:
+            return args.get("questions")
+    return None
+
+
 async def chat_once(
     message: str,
     session_id: str,
     memory: WorkingMemory,
     mock_user: AuthenticatedUser,
     show_debug: bool = True,
-) -> str:
-    """执行一轮完整对话，返回回复文本"""
+) -> tuple[str, list[dict] | None]:
+    """
+    执行一轮完整对话。
+
+    返回: (回复文本, ask_user 问题列表 或 None)
+    """
     # Plugin 命令快速路径（绕过意图分析）
     if _is_plugin_command(message):
-        return await _handle_plugin_command(message, session_id, memory, mock_user, show_debug)
+        reply = await _handle_plugin_command(message, session_id, memory, mock_user, show_debug)
+        return reply, None
 
     start = time.time()
     trace_id = str(uuid.uuid4())[:8]
@@ -241,6 +260,13 @@ async def chat_once(
         session_id, assistant_msg, reasoning_trace=trace_data,       # [DB存储]
     )                                                                # [DB存储]
 
+    # [DB存储] L3 中间步骤写 PG
+    if settings.CHAT_PERSIST_ENABLED and exec_result and exec_result.l3_steps:
+        l3_step_objs = [L3Step(**s) for s in exec_result.l3_steps]
+        chat_persistence.save_l3_steps_background(
+            session_id, assistant_msg.message_id, l3_step_objs,
+        )
+
     duration = int((time.time() - start) * 1000)
 
     # 调试信息
@@ -250,7 +276,9 @@ async def chat_once(
         if exec_result and exec_result.iterations > 0:
             print(f"\033[90m  ── L3: {exec_result.iterations} 步 | tokens={exec_result.token_usage} ──\033[0m")
 
-    return reply_text
+    # 提取 ask_user 问题（若有）
+    ask_questions = _extract_ask_user_questions(exec_result)
+    return reply_text, ask_questions
 
 
 async def main():
@@ -306,8 +334,48 @@ async def main():
 
         # 执行对话
         try:
-            reply = await chat_once(user_input, session_id, memory, mock_user, show_debug)
+            reply, ask_questions = await chat_once(user_input, session_id, memory, mock_user, show_debug)
             print(f"\n\033[36mSunny: \033[0m{reply}\n")
+
+            # ask_user 交互式选择（3 个选项 + "其他"）
+            if ask_questions:
+                answers: list[dict] = []
+                for qi, q in enumerate(ask_questions, 1):
+                    print(f"\033[33m  问题 {qi}: {q['question']}\033[0m")
+                    for oi, opt in enumerate(q["options"], 1):
+                        print(f"    {oi}. {opt}")
+                    print(f"    {len(q['options']) + 1}. 其他（自定义输入）")
+
+                    while True:
+                        try:
+                            total = len(q["options"]) + 1  # 含"其他"
+                            raw = (await pt_session.prompt_async(f"  选择(1-{total}): ")).strip()
+                            idx = int(raw) - 1
+                            if 0 <= idx < len(q["options"]):
+                                selected = q["options"][idx]
+                                break
+                            if idx == len(q["options"]):
+                                # 用户选择"其他"，提示输入
+                                custom = (await pt_session.prompt_async("  请输入: ")).strip()
+                                selected = custom if custom else q["options"][0]
+                                break
+                            print(f"\033[91m    请输入 1-{total} 之间的数字\033[0m")
+                        except ValueError:
+                            # 非数字输入直接视为自定义回答
+                            selected = raw
+                            break
+
+                    answers.append({"question": q["question"], "answer": selected})
+                    print(f"\033[90m    -> {selected}\033[0m")
+
+                # 打包为结构化消息，自动发送下一轮对话
+                answer_text = "\n".join(f"Q: {a['question']} A: {a['answer']}" for a in answers)
+                print(f"\n\033[90m  ── 提交选择，继续对话 ──\033[0m")
+                reply2, ask2 = await chat_once(answer_text, session_id, memory, mock_user, show_debug)
+                print(f"\n\033[36mSunny: \033[0m{reply2}\n")
+                # 如果连续反问（极少见），提示用户手动继续
+                if ask2:
+                    print("\033[93m  [提示] Agent 继续追问，请根据上方回复手动输入回答\033[0m\n")
         except Exception as e:
             print(f"\n\033[31m错误: {e}\033[0m\n")
             import traceback

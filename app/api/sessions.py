@@ -1,424 +1,336 @@
 """
-Session Move API - Session Management
+会话与消息历史 API
 
-端点：
-- POST /api/sessions/{id}/move - 移动会话到项目或从项目中移除
-- GET /api/projects/{id}/sessions - 获取项目内的会话列表
-
-权限控制：
-- RBAC：基于角色权限检查
-- ABAC：公司数据隔离
-- 超级管理员绕过所有权限检查
-
-逻辑：
-- 移动会话时会同步更新关联的 File 记录的 project_id
-- 关联的 File 记录的 file_context 也会相应更新
+提供历史会话列表、消息内容查看、会话归档、标题修改等能力。
+所有查询从 PG 读取（source of truth），不涉及 Redis WorkingMemory。
 """
 
-import uuid
 from datetime import datetime
-from uuid import UUID
 
+import redis.asyncio as aioredis
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.response import fail, ok
+from app.api.response import ok
+from app.cache.redis_client import RedisKeys, get_redis
 from app.db.engine import get_db
-from app.db.models.chat import ChatSession
-from app.db.models.file import File
-from app.db.models.project import Project
-from app.security.auth import AuthenticatedUser, get_current_user, is_super_admin
+from app.db.models.chat import ChatMessage, ChatSession, L3Step as L3StepModel
+from app.security.auth import AuthenticatedUser, get_current_user
 
-router = APIRouter(tags=["会话管理"])
+router = APIRouter(prefix="/api/sessions", tags=["会话历史"])
 log = structlog.get_logger()
 
+# ── 常量 ────────────────────────────────────────────────────────────────────
 
-# ============ Pydantic 请求/响应模型 ============
+TOOL_CALL_RESULT_MAX_LEN = 500
+"""tool_calls.result 超过此长度时截断"""
 
-class MoveSessionRequest(BaseModel):
-    """移动会话请求模型"""
-    project_id: UUID | None = Field(
-        None,
-        description="目标项目 ID，为 null 表示从当前项目中移除"
-    )
+L3_STEP_CONTENT_MAX_LEN = 1000
+"""L3 step content 超过此长度时截断"""
 
 
-class SessionResponse(BaseModel):
-    """会话响应模型"""
-    id: UUID
+# ── Pydantic 响应模型 ──────────────────────────────────────────────────────
+
+class SessionItem(BaseModel):
     session_id: str
-    user_id: UUID
-    project_id: UUID | None
     title: str | None
     turn_count: int
     status: str
-    created_at: str
-    last_active_at: str
-    
-    class Config:
-        from_attributes = True
+    created_at: datetime
+    last_active_at: datetime
 
 
 class SessionListResponse(BaseModel):
-    """会话列表响应模型"""
-    items: list[SessionResponse]
+    items: list[SessionItem]
     total: int
     page: int
     page_size: int
 
 
-class MoveSessionResponse(BaseModel):
-    """移动会话响应模型"""
-    id: UUID
+class ToolCallItem(BaseModel):
+    tool_name: str
+    arguments: dict
+    result: str | None = None
+    status: str
+    duration_ms: int | None = None
+
+
+class L3StepItem(BaseModel):
+    step_index: int
+    role: str
+    content: str
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+
+
+class MessageItem(BaseModel):
+    message_id: str
+    role: str
+    content: str
+    created_at: datetime
+    tool_calls: list[ToolCallItem] | None = None
+    l3_steps: list[L3StepItem] | None = None
+
+
+class MessageListResponse(BaseModel):
     session_id: str
-    project_id: UUID | None
-    previous_project_id: UUID | None
-    updated_files_count: int
-    message: str
+    title: str | None
+    messages: list[MessageItem]
+    has_more: bool
 
 
-# ============ 权限检查工具函数 ============
+class SessionUpdateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200, description="会话标题")
 
-async def get_session_or_404(
-    session: AsyncSession,
+
+class SessionUpdateResponse(BaseModel):
+    session_id: str
+    title: str
+
+
+# ── 内部工具函数 ──────────────────────────────────────────────────────────
+
+def _truncate_tool_result(result: str | None) -> str | None:
+    """截断超长的 tool_call result"""
+    if result is None:
+        return None
+    if len(result) > TOOL_CALL_RESULT_MAX_LEN:
+        return result[:TOOL_CALL_RESULT_MAX_LEN] + "...（已截断）"
+    return result
+
+
+def _build_tool_calls(raw: list | None) -> list[ToolCallItem] | None:
+    """将 JSONB 中的 tool_calls 列表转换为响应模型，result 超长时截断"""
+    if not raw:
+        return None
+    items = []
+    for tc in raw:
+        items.append(ToolCallItem(
+            tool_name=tc.get("tool_name", ""),
+            arguments=tc.get("arguments", {}),
+            result=_truncate_tool_result(tc.get("result")),
+            status=tc.get("status", "success"),
+            duration_ms=tc.get("duration_ms"),
+        ))
+    return items or None
+
+
+# ── 端点 ────────────────────────────────────────────────────────────────────
+
+@router.get("")
+async def list_sessions(
+    status: str = Query("active", description="过滤状态：active / archived / all"),
+    page: int = Query(1, ge=1, description="页码（从 1 开始）"),
+    page_size: int = Query(20, ge=1, le=50, description="每页数量（上限 50）"),
+    db: AsyncSession = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """获取当前用户的历史会话列表"""
+    # 基础条件：只看自己的会话
+    base_where = [ChatSession.user_id == user.id]
+    if status != "all":
+        base_where.append(ChatSession.status == status)
+
+    # 查询列表
+    query = (
+        select(ChatSession)
+        .where(*base_where)
+        .order_by(ChatSession.last_active_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    # 查询总数
+    count_query = select(func.count()).select_from(
+        select(ChatSession.id).where(*base_where).subquery()
+    )
+    total = (await db.execute(count_query)).scalar()
+
+    items = [
+        SessionItem(
+            session_id=s.session_id,
+            title=s.title,
+            turn_count=s.turn_count,
+            status=s.status,
+            created_at=s.created_at,
+            last_active_at=s.last_active_at,
+        )
+        for s in rows
+    ]
+
+    return ok(data=SessionListResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    ))
+
+
+@router.get("/{session_id}/messages")
+async def get_session_messages(
     session_id: str,
-) -> ChatSession:
-    """
-    根据 ID 获取会话，不存在则抛出 404
-    
-    Args:
-        session: 数据库会话
-        session_id: 会话 ID
-        
-    Returns:
-        ChatSession: 会话对象
-        
-    Raises:
-        HTTPException: 404 会话不存在
-    """
-    stmt = select(ChatSession).where(ChatSession.session_id == session_id)
-    result = await session.execute(stmt)
-    chat_session = result.scalar_one_or_none()
-    
-    if not chat_session:
+    before: str | None = Query(None, description="游标：返回此 message_id 之前的消息"),
+    limit: int = Query(50, ge=1, le=100, description="返回数量（上限 100）"),
+    db: AsyncSession = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """获取指定会话的消息内容（cursor 分页，跳过 compaction 节点）"""
+    # 校验会话存在且属于当前用户（越权返回 404，不暴露存在性）
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.session_id == session_id,
+            ChatSession.user_id == user.id,
+        )
+    )
+    session_row = session_result.scalar_one_or_none()
+    if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")
-    
-    return chat_session
+
+    # 构建消息查询
+    conditions = [
+        ChatMessage.session_id == session_id,
+        ChatMessage.is_compaction == False,  # noqa: E712
+    ]
+
+    # cursor 分页：查 before message_id 对应的 created_at
+    if before:
+        cursor_query = select(ChatMessage.created_at).where(
+            ChatMessage.message_id == before,
+        )
+        cursor_result = await db.execute(cursor_query)
+        cursor_time = cursor_result.scalar_one_or_none()
+        if cursor_time is None:
+            raise HTTPException(status_code=400, detail="无效的 before 游标")
+        conditions.append(ChatMessage.created_at < cursor_time)
+
+    query = (
+        select(ChatMessage)
+        .where(*conditions)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    # 反转为正序
+    rows = list(reversed(rows))
+
+    # 批量查询 assistant 消息关联的 L3 steps
+    assistant_msg_ids = [r.message_id for r in rows if r.role == "assistant"]
+    steps_map: dict[str, list[L3StepItem]] = {}
+    if assistant_msg_ids:
+        steps_query = (
+            select(L3StepModel)
+            .where(
+                L3StepModel.message_id.in_(assistant_msg_ids),
+                L3StepModel.compacted == False,  # noqa: E712
+            )
+            .order_by(L3StepModel.message_id, L3StepModel.step_index)
+        )
+        steps_result = await db.execute(steps_query)
+        for s in steps_result.scalars().all():
+            content = s.content or ""
+            if len(content) > L3_STEP_CONTENT_MAX_LEN:
+                content = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
+            steps_map.setdefault(s.message_id, []).append(L3StepItem(
+                step_index=s.step_index,
+                role=s.role,
+                content=content,
+                tool_name=s.tool_name,
+                tool_call_id=s.tool_call_id,
+            ))
+
+    messages = [
+        MessageItem(
+            message_id=r.message_id,
+            role=r.role,
+            content=r.content,
+            created_at=r.created_at,
+            tool_calls=_build_tool_calls(r.tool_calls),
+            l3_steps=steps_map.get(r.message_id) if r.role == "assistant" else None,
+        )
+        for r in rows
+    ]
+
+    return ok(data=MessageListResponse(
+        session_id=session_id,
+        title=session_row.title,
+        messages=messages,
+        has_more=len(rows) == limit,
+    ))
 
 
-async def get_project_or_404(
-    session: AsyncSession,
-    project_id: UUID,
-) -> Project:
-    """
-    根据 ID 获取项目，不存在则抛出 404
-    
-    Args:
-        session: 数据库会话
-        project_id: 项目 ID
-        
-    Returns:
-        Project: 项目对象
-        
-    Raises:
-        HTTPException: 404 项目不存在
-    """
-    stmt = select(Project).where(Project.id == project_id)
-    result = await session.execute(stmt)
-    project = result.scalar_one_or_none()
-    
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    
-    return project
-
-
-def check_session_ownership(chat_session: ChatSession, user: AuthenticatedUser) -> None:
-    """
-    检查用户是否拥有该会话
-    
-    权限规则：
-    - 超级管理员：拥有所有权限
-    - 会话所有者：完全权限
-    - 其他用户：无权限
-    
-    Raises:
-        HTTPException: 403 无权限
-    """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 会话所有者拥有完全权限
-    if str(chat_session.user_id) == user.id:
-        return
-    
-    raise HTTPException(status_code=403, detail="无权访问此会话")
-
-
-def check_project_access(project: Project, user: AuthenticatedUser) -> None:
-    """
-    检查用户是否有权访问项目
-    
-    权限规则：
-    - 超级管理员：拥有所有权限
-    - 项目所有者：完全权限
-    - 同公司用户：只读权限
-    - 其他用户：无权限
-    
-    Raises:
-        HTTPException: 403 无权限
-    """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 项目所有者拥有完全权限
-    if str(project.owner_id) == user.id:
-        return
-    
-    # 检查公司隔离（ABAC）
-    if project.company and project.company != user.company:
-        raise HTTPException(status_code=403, detail="无权访问其他公司的项目")
-    
-    # 同公司用户可以查看但不能修改
-    return
-
-
-def check_project_modify_permission(project: Project, user: AuthenticatedUser) -> None:
-    """
-    检查用户是否有权修改项目（将会话移入/移出）
-    
-    权限规则：
-    - 超级管理员：拥有所有权限
-    - 项目所有者：完全权限
-    - 其他用户：无权限
-    
-    Raises:
-        HTTPException: 403 无权限
-    """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 只有项目所有者可以修改
-    if str(project.owner_id) != user.id:
-        raise HTTPException(status_code=403, detail="无权修改此项目")
-
-
-def session_to_response(chat_session: ChatSession) -> dict:
-    """将 ChatSession 模型转换为响应字典"""
-    return {
-        "id": str(chat_session.id),
-        "session_id": chat_session.session_id,
-        "user_id": str(chat_session.user_id),
-        "project_id": str(chat_session.project_id) if chat_session.project_id else None,
-        "title": chat_session.title,
-        "turn_count": chat_session.turn_count,
-        "status": chat_session.status,
-        "created_at": chat_session.created_at.isoformat() if chat_session.created_at else None,
-        "last_active_at": chat_session.last_active_at.isoformat() if chat_session.last_active_at else None,
-    }
-
-
-# ============ API 端点 ============
-
-@router.post("/api/sessions/{session_id}/move", response_model=MoveSessionResponse)
-async def move_session(
+@router.delete("/{session_id}")
+async def archive_session(
     session_id: str,
-    data: MoveSessionRequest,
-    session: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """
-    移动会话到项目或从项目中移除
-    
-    功能：
-    - project_id 为 null：将会话从当前项目中移除
-    - project_id 为有效 UUID：将会话移动到指定项目
-    - 自动更新关联的 File 记录的 project_id 和 file_context
-    
-    权限规则：
-    - 超级管理员：可以移动任何会话
-    - 会话所有者：可以移动自己的会话
-    - 必须对目标项目有写入权限（项目所有者）
-    - 必须从源项目有移除权限（项目所有者，如果当前在项目中）
-    """
-    try:
-        # 获取会话
-        chat_session = await get_session_or_404(session, session_id)
-        
-        # 检查会话所有权
-        check_session_ownership(chat_session, user)
-        
-        # 保存之前的项目 ID
-        previous_project_id = chat_session.project_id
-        
-        # 如果目标项目和当前项目相同，直接返回
-        if previous_project_id == data.project_id:
-            return MoveSessionResponse(
-                id=chat_session.id,
-                session_id=chat_session.session_id,
-                project_id=chat_session.project_id,
-                previous_project_id=previous_project_id,
-                updated_files_count=0,
-                message="会话已在目标项目中",
-            )
-        
-        # 如果目标项目不为空，检查目标项目是否存在且有权限
-        if data.project_id is not None:
-            target_project = await get_project_or_404(session, data.project_id)
-            check_project_modify_permission(target_project, user)
-            target_company = target_project.company
-        else:
-            target_project = None
-            target_company = None
-        
-        # 如果当前在项目中，检查是否有权限从该项目移除
-        if previous_project_id is not None:
-            source_project = await get_project_or_404(session, previous_project_id)
-            check_project_modify_permission(source_project, user)
-        
-        # 更新会话的 project_id
-        chat_session.project_id = data.project_id
-        await session.flush()
-        
-        # 更新关联的 File 记录
-        # 1. 更新 project_id
-        # 2. 更新 file_context：session_in_project -> session 或 session -> session_in_project
-        new_context = "session_in_project" if data.project_id else "session"
-        
-        # 获取需要更新的文件数量
-        count_stmt = select(func.count()).where(
-            File.session_id == session_id
+    """归档会话（软删除，status 改为 archived）"""
+    # 校验会话存在且属于当前用户
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.session_id == session_id,
+            ChatSession.user_id == user.id,
         )
-        count_result = await session.execute(count_stmt)
-        files_count = count_result.scalar()
-        
-        # 更新所有关联的 File 记录
-        if files_count > 0:
-            await session.execute(
-                update(File)
-                .where(File.session_id == session_id)
-                .values(
-                    project_id=data.project_id,
-                    file_context=new_context,
-                )
-            )
-        
-        # 更新项目计数器（如果有变化）
-        if previous_project_id is not None:
-            # 减少源项目计数
-            await session.execute(
-                update(Project)
-                .where(Project.id == previous_project_id)
-                .values(session_count=Project.session_count - 1)
-            )
-        
-        if data.project_id is not None:
-            # 增加目标项目计数
-            await session.execute(
-                update(Project)
-                .where(Project.id == data.project_id)
-                .values(session_count=Project.session_count + 1)
-            )
-        
-        await session.commit()
-        await session.refresh(chat_session)
-        
-        log.info(
-            "移动会话",
-            session_id=session_id,
-            user_id=user.id,
-            previous_project_id=str(previous_project_id) if previous_project_id else None,
-            new_project_id=str(data.project_id) if data.project_id else None,
-            updated_files_count=files_count,
-        )
-        
-        return MoveSessionResponse(
-            id=chat_session.id,
-            session_id=chat_session.session_id,
-            project_id=chat_session.project_id,
-            previous_project_id=previous_project_id,
-            updated_files_count=files_count,
-            message="会话移动成功" if data.project_id else "会话已从项目中移除",
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        await session.rollback()
-        log.error("移动会话失败", error=str(e), session_id=session_id, user_id=user.id)
-        raise HTTPException(status_code=500, detail=f"移动会话失败: {e}")
+    )
+    session_row = session_result.scalar_one_or_none()
+    if not session_row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 更新状态
+    await db.execute(
+        update(ChatSession)
+        .where(ChatSession.session_id == session_id)
+        .values(status="archived")
+    )
+    await db.commit()
+
+    # 清理 Redis 中该会话的缓存（WorkingMemory + Todo）
+    await redis.delete(
+        RedisKeys.working_memory(session_id),
+        RedisKeys.todo(session_id),
+    )
+
+    log.info("归档会话", session_id=session_id, usernumb=user.usernumb)
+
+    return ok(message="ok")
 
 
-@router.get("/api/projects/{project_id}/sessions", response_model=SessionListResponse)
-async def list_project_sessions(
-    project_id: UUID,
-    page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
-    session: AsyncSession = Depends(get_db),
+@router.patch("/{session_id}")
+async def update_session_title(
+    session_id: str,
+    body: SessionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """
-    获取项目内的会话列表
-    
-    返回项目中的所有会话，按最后活跃时间降序排列。
-    
-    权限规则：
-    - 超级管理员：查看任何项目的会话
-    - 项目所有者：查看自己项目的会话
-    - 同公司用户：查看同公司项目的会话
-    - 其他用户：无权限
-    """
-    try:
-        # 获取项目
-        project = await get_project_or_404(session, project_id)
-        
-        # 检查项目访问权限
-        check_project_access(project, user)
-        
-        # 基础查询
-        query = select(ChatSession).where(ChatSession.project_id == project_id)
-        
-        # 统计总数
-        count_query = select(func.count()).select_from(
-            select(ChatSession).where(ChatSession.project_id == project_id).subquery()
+    """修改会话标题"""
+    # 校验会话存在且属于当前用户
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.session_id == session_id,
+            ChatSession.user_id == user.id,
         )
-        count_result = await session.execute(count_query)
-        total = count_result.scalar()
-        
-        # 分页和排序（按 last_active_at DESC）
-        offset = (page - 1) * page_size
-        query = (
-            query.order_by(ChatSession.last_active_at.desc())
-            .offset(offset)
-            .limit(page_size)
-        )
-        
-        result = await session.execute(query)
-        sessions = result.scalars().all()
-        
-        log.info(
-            "获取项目会话列表",
-            project_id=str(project_id),
-            user_id=user.id,
-            count=len(sessions),
-            total=total,
-        )
-        
-        return SessionListResponse(
-            items=[session_to_response(s) for s in sessions],
-            total=total,
-            page=page,
-            page_size=page_size,
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("获取项目会话列表失败", error=str(e), project_id=str(project_id), user_id=user.id)
-        raise HTTPException(status_code=500, detail=f"获取项目会话列表失败: {e}")
+    )
+    session_row = session_result.scalar_one_or_none()
+    if not session_row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 更新标题
+    await db.execute(
+        update(ChatSession)
+        .where(ChatSession.session_id == session_id)
+        .values(title=body.title)
+    )
+    await db.commit()
+
+    return ok(data=SessionUpdateResponse(
+        session_id=session_id,
+        title=body.title,
+    ))
