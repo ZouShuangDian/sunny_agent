@@ -29,7 +29,17 @@ class SSEEvent:
     执行阶段状态通知。
     由 chat.py 在调用执行引擎前主动推送，用于告知前端"已进入执行阶段"。
 
-    data: {"phase": "executing"}
+    data: {
+        "phase": "executing",
+        "session_id": str,               # 始终携带（首次对话为后端生成的新 ID）
+        "is_new_session": bool | absent,  # 仅首次对话时为 true（前端据此在侧栏新增会话）
+        "title": str | absent             # 仅首次对话时携带（用户消息前 50 字）
+    }
+
+    前端收到 status 事件后：
+    1. 缓存 session_id 用于后续请求
+    2. 若 is_new_session=true，直接用 session_id + title 在侧栏列表顶部插入新会话
+       （无需额外查询 session 列表接口）
 
     ⚠️ 与 done/finish 区别：status 是开始信号，done 是结束信号。
     """

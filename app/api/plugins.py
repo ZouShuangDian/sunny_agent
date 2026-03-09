@@ -230,55 +230,40 @@ async def upload_plugin(
             path=plugin_rel_path,
         )
 
-        # 7. DB 写入（事务）
+        # 7. DB 写入（事务，使用 ON CONFLICT 保证多实例并发安全）
         async with async_session() as session:
             async with session.begin():
-                # 查询是否已存在同名 Plugin
-                existing = await session.execute(text("""
-                    SELECT id FROM sunny_agent.plugins
-                    WHERE owner_usernumb = :usernumb AND name = :name
-                """), {"usernumb": user.usernumb, "name": plugin_name})
-                row = existing.fetchone()
+                plugin_id = uuid.uuid4()
+                # UPSERT：同名同用户 → 更新；否则 → 插入
+                result = await session.execute(text("""
+                    INSERT INTO sunny_agent.plugins
+                        (id, name, version, description, owner_usernumb, path, is_active)
+                    VALUES
+                        (:id, :name, :version, :description, :owner_usernumb, :path, TRUE)
+                    ON CONFLICT (owner_usernumb, name) DO UPDATE SET
+                        version = EXCLUDED.version,
+                        description = EXCLUDED.description,
+                        path = EXCLUDED.path,
+                        is_active = TRUE,
+                        updated_at = now()
+                    RETURNING id
+                """), {
+                    "id": plugin_id,
+                    "name": plugin_name,
+                    "version": plugin_data["version"],
+                    "description": plugin_data["description"],
+                    "owner_usernumb": user.usernumb,
+                    "path": plugin_rel_path,
+                })
+                # 取回实际 ID（新插入时为传入的 uuid，已存在时为旧记录 ID）
+                plugin_id = result.scalar_one()
 
-                if row:
-                    plugin_id = row.id
-                    # 更新 Plugin 记录
-                    await session.execute(text("""
-                        UPDATE sunny_agent.plugins
-                        SET version = :version,
-                            description = :description,
-                            path = :path,
-                            is_active = TRUE,
-                            updated_at = now()
-                        WHERE id = :plugin_id
-                    """), {
-                        "version": plugin_data["version"],
-                        "description": plugin_data["description"],
-                        "path": plugin_rel_path,
-                        "plugin_id": plugin_id,
-                    })
-                    # 删除旧命令（重新插入）
-                    await session.execute(text("""
-                        DELETE FROM sunny_agent.plugin_commands WHERE plugin_id = :plugin_id
-                    """), {"plugin_id": plugin_id})
-                    log.info("Plugin 已更新", plugin_name=plugin_name, usernumb=user.usernumb)
-                else:
-                    plugin_id = uuid.uuid4()
-                    # 插入新 Plugin 记录
-                    await session.execute(text("""
-                        INSERT INTO sunny_agent.plugins
-                            (id, name, version, description, owner_usernumb, path, is_active)
-                        VALUES
-                            (:id, :name, :version, :description, :owner_usernumb, :path, TRUE)
-                    """), {
-                        "id": plugin_id,
-                        "name": plugin_name,
-                        "version": plugin_data["version"],
-                        "description": plugin_data["description"],
-                        "owner_usernumb": user.usernumb,
-                        "path": plugin_rel_path,
-                    })
-                    log.info("Plugin 已注册", plugin_name=plugin_name, usernumb=user.usernumb)
+                # 删除旧命令后重新插入
+                await session.execute(text("""
+                    DELETE FROM sunny_agent.plugin_commands WHERE plugin_id = :plugin_id
+                """), {"plugin_id": plugin_id})
+
+                log.info("Plugin UPSERT 完成", plugin_name=plugin_name, usernumb=user.usernumb)
 
                 # 插入命令记录
                 for cmd in commands:
