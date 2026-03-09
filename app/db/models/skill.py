@@ -53,6 +53,10 @@ class Skill(Base):
         Boolean, default=False, server_default="false",
         comment="system skill 的默认状态：true=开箱即用，false=需用户主动订阅"
     )
+    has_scripts: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false",
+        comment="是否包含 scripts/ 目录（上传时写入，避免 list 查文件系统）"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
