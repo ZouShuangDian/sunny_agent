@@ -97,9 +97,10 @@ class L3Step(BaseModel):
 
     step_index: int  # 步骤序号（0-based）
     role: str  # 'assistant' | 'tool'
-    content: str  # 消息内容（assistant 可能为空，tool 为工具返回值）
+    content: str  # 消息内容（assistant 为 thought，tool 为工具返回值）
     tool_name: str | None = None  # 工具名称（tool 消息专用）
     tool_call_id: str | None = None  # 工具调用 ID（tool 消息专用）
+    tool_args: dict | None = None  # 工具调用入参（assistant 消息专用）
     compacted: bool = False  # Level 1 剪枝标记
 
 

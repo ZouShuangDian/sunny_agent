@@ -177,6 +177,7 @@ class ChatPersistence:
                     content=step.content,
                     tool_name=step.tool_name,
                     tool_call_id=step.tool_call_id,
+                    tool_args=step.tool_args,
                     compacted=step.compacted,
                 ))
             await db.commit()
