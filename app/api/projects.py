@@ -18,9 +18,11 @@ import logging
 from uuid import UUID
 
 import structlog
+from asyncpg.exceptions import UniqueViolationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.response import fail, ok
@@ -211,6 +213,16 @@ async def create_project(
             status_code=201,
         )
         
+    except IntegrityError as e:
+        await session.rollback()
+        # 检查是否是唯一约束冲突（同名项目）
+        error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
+        if "uq_projects_owner_name" in error_msg or "UniqueViolationError" in error_msg:
+            log.warning("创建项目失败：同名项目已存在", project_name=data.name, user_id=user.id)
+            raise HTTPException(status_code=409, detail=f"项目 '{data.name}' 已存在，请使用其他名称")
+        else:
+            log.error("创建项目失败：数据库约束错误", error=str(e), user_id=user.id)
+            raise HTTPException(status_code=500, detail=f"创建项目失败: {e}")
     except Exception as e:
         await session.rollback()
         log.error("创建项目失败", error=str(e), user_id=user.id)
@@ -220,7 +232,7 @@ async def create_project(
 @router.get("")
 async def list_projects(
     page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    page_size: int = Query(20, ge=1, description="每页数量"),
     session: AsyncSession = Depends(get_db),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
@@ -342,6 +354,16 @@ async def update_project(
         
         return ok(data=project_to_response(project), message="项目更新成功")
         
+    except IntegrityError as e:
+        await session.rollback()
+        # 检查是否是唯一约束冲突（同名项目）
+        error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
+        if "uq_projects_owner_name" in error_msg or "UniqueViolationError" in error_msg:
+            log.warning("更新项目失败：同名项目已存在", project_name=data.name, user_id=user.id)
+            raise HTTPException(status_code=409, detail=f"项目 '{data.name}' 已存在，请使用其他名称")
+        else:
+            log.error("更新项目失败：数据库约束错误", error=str(e), project_id=str(project_id), user_id=user.id)
+            raise HTTPException(status_code=500, detail=f"更新项目失败: {e}")
     except HTTPException:
         raise
     except Exception as e:
@@ -354,7 +376,7 @@ async def update_project(
 async def get_project_sessions(
     project_id: UUID,
     page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    page_size: int = Query(20, ge=1, description="每页数量"),
     status: str = Query("all", description="过滤状态：active / archived / all"),
     session: AsyncSession = Depends(get_db),
     user: AuthenticatedUser = Depends(get_current_user),

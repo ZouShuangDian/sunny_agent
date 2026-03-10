@@ -413,7 +413,7 @@ async def upload_file(
 async def list_project_files(
     project_id: UUID,
     page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    page_size: int = Query(20, ge=1, description="每页数量"),
     file_context: str | None = Query(None, description="文件上下文过滤（project/session/session_in_project）"),
     session: AsyncSession = Depends(get_db),
     user: AuthenticatedUser = Depends(get_current_user),
