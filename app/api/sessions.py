@@ -288,11 +288,11 @@ async def archive_session(
     if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # 更新状态
+    # 更新状态并解除项目关联（如果存在）
     await db.execute(
         update(ChatSession)
         .where(ChatSession.session_id == session_id)
-        .values(status="archived")
+        .values(status="archived", project_id=None)
     )
     await db.commit()
 
