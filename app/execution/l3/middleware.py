@@ -19,6 +19,7 @@ import json
 from typing import TYPE_CHECKING, Protocol
 
 from app.config import get_settings
+from app.execution.l3.live_steps_writer import LiveStepsWriter
 from app.execution.l3.schemas import ActResult, ThinkResult
 from app.execution.session_context import get_session_id
 from app.prompts.markers import TODO_REMINDER_MARKER
@@ -159,7 +160,11 @@ class CompactionMiddleware:
 
 
 class StepCollectorMiddleware:
-    """Act 后收集 L3 中间步骤消息（用于持久化到 l3_steps 表）"""
+    """Act 后收集 L3 中间步骤消息（用于持久化到 l3_steps 表）+ 增量写 Redis"""
+
+    def __init__(self, live_steps_writer: LiveStepsWriter | None = None):
+        self._writer = live_steps_writer
+        self._step_offset = 0  # 已推送的 step 数量，用于计算增量 step_index
 
     async def before_think(self, ctx: LoopContext) -> None:
         pass
@@ -168,7 +173,45 @@ class StepCollectorMiddleware:
         pass
 
     async def after_act(self, ctx: LoopContext, act_result: ActResult) -> None:
+        # 现有：收集到内存
         ctx.collected_steps.extend(act_result.messages)
+
+        # 新增：增量写 Redis
+        if self._writer and act_result.messages:
+            new_steps = []
+            for i, msg in enumerate(act_result.messages):
+                role = msg.get("role", "")
+                content = msg.get("content") or ""
+                tool_name = None
+                tool_call_id = None
+                tool_args = None
+
+                if role == "tool":
+                    tool_call_id = msg.get("tool_call_id")
+                    tool_name = msg.get("name")
+                elif role == "assistant" and msg.get("tool_calls"):
+                    tool_args = {}
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "unknown")
+                        args_raw = fn.get("arguments", "{}")
+                        try:
+                            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                        except (json.JSONDecodeError, TypeError):
+                            args = {"_raw": args_raw}
+                        tool_args[name] = args
+
+                new_steps.append({
+                    "step_index": self._step_offset + i,
+                    "role": role,
+                    "content": content,
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "tool_args": tool_args,
+                })
+
+            self._step_offset += len(act_result.messages)
+            await self._writer.push(new_steps)
 
 
 # ─────────────────────────────────────────────

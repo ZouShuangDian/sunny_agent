@@ -186,10 +186,14 @@ class ChatPersistence:
                 is_compaction=msg.is_compaction,
                 created_at=datetime.fromtimestamp(msg.timestamp, tz=timezone.utc),
             ))
+            # 更新会话活跃时间；assistant 消息时轮次 +1
+            update_values = {"last_active_at": func.now()}
+            if msg.role == "assistant":
+                update_values["turn_count"] = ChatSession.turn_count + 1
             await db.execute(
                 update(ChatSession)
                 .where(ChatSession.session_id == session_id)
-                .values(last_active_at=func.now())
+                .values(**update_values)
             )
             await db.commit()
 
