@@ -2,6 +2,8 @@
 登录接口：用户名密码登录 + Token 签发 / 刷新 / 注销 + SSO 单点登录
 """
 
+import asyncio
+import json
 import httpx
 import uuid
 import xml.etree.ElementTree as ET
@@ -34,7 +36,7 @@ from app.security.auth import (
 )
 from app.services.user_sync import validate_sso_user
 
-router = APIRouter(prefix="/auth", tags=["认证"])
+router = APIRouter(prefix="/api/auth", tags=["认证"])
 log = structlog.get_logger()
 settings = get_settings()
 
@@ -174,12 +176,31 @@ async def sso_callback(
     ticket: str,
     service: str,
     model: str | None = None,
+    redis_conn: aioredis.Redis = Depends(get_redis),
 ):
     """OA SSO 回调接口"""
     log = structlog.get_logger()
     log.info("SSO 回调", ticket=ticket[:20] + "..." if len(ticket) > 20 else ticket)
     
     settings = get_settings()
+    result_key = RedisKeys.sso_ticket_result(ticket)
+    lock_key = RedisKeys.sso_ticket_lock(ticket)
+
+    cached_payload = await redis_conn.get(result_key)
+    if cached_payload:
+        log.info("SSO ticket cache hit")
+        return ok(data=json.loads(cached_payload), message="sso 单点登录成功")
+
+    lock_acquired = await redis_conn.set(lock_key, "1", ex=15, nx=True)
+    if not lock_acquired:
+        for _ in range(10):
+            await asyncio.sleep(0.2)
+            cached_payload = await redis_conn.get(result_key)
+            if cached_payload:
+                log.info("SSO ticket cache hit after wait")
+                return ok(data=json.loads(cached_payload), message="sso 单点登录成功")
+        raise HTTPException(409, "SSO ticket 正在处理中，请稍后重试")
+
     
     # 1. 验证 ticket
     SSO_VALIDATE_URL = settings.SSO_VALIDATE_URL
@@ -222,7 +243,7 @@ async def sso_callback(
             
             log.info("SSO 登录成功", user=user.usernumb, role=user.role.name)
             
-            return ok(data={
+            response_data = {
                 "access_token": access_token,
                 "refresh_token": create_refresh_token(sub=str(user.id)),
                 "token_type": "bearer",
@@ -235,12 +256,17 @@ async def sso_callback(
                     "department": user.department,
                     "role": user.role.name,
                 }
-            }, message="sso 单点登录成功")
-            
+            }
+            await redis_conn.setex(result_key, 120, json.dumps(response_data, ensure_ascii=False))
+            return ok(data=response_data, message="sso 单点登录成功")
+
         except Exception as e:
             await session.rollback()
             log.error("SSO 登录失败", error=str(e), exc_info=True)
             raise HTTPException(500, f"登录失败：{str(e)}")
+        finally:
+            if lock_acquired:
+                await redis_conn.delete(lock_key)
 
 
 def _parse_cas_xml(xml_data: str) -> dict | None:

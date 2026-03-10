@@ -43,14 +43,60 @@ class ChatPersistence:
         session_id: str,
         user_id: str,
         first_message: str | None = None,
+        project_id: uuid.UUID | None = None,
     ) -> None:
-        """确保 PG 中存在会话记录（幂等）"""
+        """确保 PG 中存在会话记录（幂等）
+        
+        Args:
+            session_id: 会话 ID
+            user_id: 用户 ID
+            first_message: 第一条消息（用于生成标题）
+            project_id: 项目 ID（可选，用于关联项目）
+        """
         async with self._session_factory() as db:
             existing = await db.execute(
                 select(ChatSession).where(ChatSession.session_id == session_id)
             )
-            if existing.scalar_one_or_none():
+            existing_session = existing.scalar_one_or_none()
+            if existing_session:
+                # 如果会话已存在且提供了 project_id，更新项目关联
+                if project_id and existing_session.project_id != project_id:
+                    old_project_id = existing_session.project_id
+                    existing_session.project_id = project_id
+                    await db.commit()
+                    
+                    # 同步更新旧项目和新项目的 session_count
+                    from app.db.models.project import Project
+                    
+                    # 旧项目计数 -1
+                    if old_project_id:
+                        await db.execute(
+                            update(Project)
+                            .where(Project.id == old_project_id)
+                            .values(session_count=Project.session_count - 1)
+                        )
+                        log.info(
+                            "减少旧项目会话计数",
+                            session_id=session_id,
+                            old_project_id=str(old_project_id),
+                        )
+                    
+                    # 新项目计数 +1
+                    await db.execute(
+                        update(Project)
+                        .where(Project.id == project_id)
+                        .values(session_count=Project.session_count + 1)
+                    )
+                    await db.commit()
+                    
+                    log.info(
+                        "更新会话项目关联",
+                        session_id=session_id,
+                        old_project_id=str(old_project_id) if old_project_id else None,
+                        new_project_id=str(project_id),
+                    )
                 return
+            
             title = (
                 first_message[:50] + "..."
                 if first_message and len(first_message) > 50
@@ -59,19 +105,38 @@ class ChatPersistence:
             db.add(ChatSession(
                 session_id=session_id,
                 user_id=user_id,
+                project_id=project_id,
                 title=title,
             ))
             await db.commit()
+            
+            # 如果关联了项目，更新项目计数器
+            if project_id:
+                from app.db.models.project import Project
+                await db.execute(
+                    update(Project)
+                    .where(Project.id == project_id)
+                    .values(session_count=Project.session_count + 1)
+                )
+                await db.commit()
 
     def ensure_session_background(
         self,
         session_id: str,
         user_id: str,
         first_message: str | None = None,
+        project_id: uuid.UUID | None = None,
     ) -> None:
-        """异步创建 PG 会话（发后即忘）"""
+        """异步创建 PG 会话（发后即忘）
+        
+        Args:
+            session_id: 会话 ID
+            user_id: 用户 ID
+            first_message: 第一条消息（用于生成标题）
+            project_id: 项目 ID（可选，用于关联项目）
+        """
         asyncio.create_task(
-            self._safe_ensure_session(session_id, user_id, first_message)
+            self._safe_ensure_session(session_id, user_id, first_message, project_id)
         )
 
     async def _safe_ensure_session(
@@ -79,9 +144,10 @@ class ChatPersistence:
         session_id: str,
         user_id: str,
         first_message: str | None = None,
+        project_id: uuid.UUID | None = None,
     ) -> None:
         try:
-            await self.ensure_session(session_id, user_id, first_message)
+            await self.ensure_session(session_id, user_id, first_message, project_id)
         except Exception as e:
             log.warning("会话创建持久化失败", session_id=session_id, error=str(e))
 

@@ -43,6 +43,17 @@ class RedisKeys:
         """会话级 Todo 任务列表 (TTL 7天)"""
         return f"todo:{session_id}"
 
+
+    @staticmethod
+    def sso_ticket_result(ticket: str) -> str:
+        """SSO ticket login result cache key."""
+        return f"sso:ticket:result:{ticket}"
+
+    @staticmethod
+    def sso_ticket_lock(ticket: str) -> str:
+        """SSO ticket processing lock key."""
+        return f"sso:ticket:lock:{ticket}"
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(

@@ -131,6 +131,9 @@ from app.api.health import router as health_router
 from app.api.chat import router as chat_router
 from app.api.files import router as files_router
 from app.api.plugins import router as plugins_router
+from app.api.projects import router as projects_router
+from app.api.project_files import router as project_files_router
+from app.api.sessions import router as sessions_router
 from app.security.login import router as auth_router
 from app.api.users import router as users_router
 from app.api.roles import router as roles_router
@@ -143,6 +146,9 @@ app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(plugins_router)
 app.include_router(skills_router)
+app.include_router(projects_router)
+app.include_router(project_files_router)
+app.include_router(sessions_router)
 app.include_router(users_router)
 app.include_router(roles_router)
 app.include_router(sessions_router)

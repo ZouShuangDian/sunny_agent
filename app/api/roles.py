@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.api.response import ok
 from app.db.engine import get_db
 from app.db.models.user import Role
-from app.security.auth import AuthenticatedUser, get_current_user
+from app.security.auth import AuthenticatedUser, get_current_user, is_super_admin
 
 router = APIRouter(prefix="/api/roles", tags=["角色管理"])
 log = structlog.get_logger()
@@ -57,7 +57,7 @@ class RoleListResponse(BaseModel):
 
 def require_admin(user: AuthenticatedUser) -> None:
     """检查用户是否为管理员"""
-    if "admin" not in user.permissions:
+    if not is_super_admin(user):
         raise HTTPException(status_code=403, detail="权限不足：需要管理员权限")
 
 

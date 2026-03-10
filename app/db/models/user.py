@@ -96,6 +96,8 @@ class User(Base):
 
     # 正向关联
     role: Mapped["Role"] = relationship(back_populates="users", lazy="joined")
+    projects: Mapped[list["Project"]] = relationship("Project", back_populates="owner")
+    files: Mapped[list["File"]] = relationship("File", back_populates="uploader")
     
     # 索引
     __table_args__ = (
