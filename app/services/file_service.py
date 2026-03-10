@@ -305,7 +305,7 @@ class FileService:
             tags=clean_tags,
             uploaded_by=UUID(user.id),
             session_id=session_id,
-            project_id=UUID(project_id) if project_id else None,
+            project_id=UUID(project_id) if isinstance(project_id, str) and project_id else project_id,
             file_context=file_context,
         )
 
@@ -541,7 +541,8 @@ class FileService:
                 stmt = stmt.where(File.session_id == session_id)
 
             if project_id:
-                stmt = stmt.where(File.project_id == UUID(project_id))
+                _pid = UUID(project_id) if isinstance(project_id, str) else project_id
+                stmt = stmt.where(File.project_id == _pid)
 
             stmt = stmt.order_by(File.uploaded_at.desc()).limit(limit).offset(offset)
 

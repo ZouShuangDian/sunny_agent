@@ -36,7 +36,7 @@ from app.security.auth import (
 )
 from app.services.user_sync import validate_sso_user
 
-router = APIRouter(prefix="/auth", tags=["认证"])
+router = APIRouter(prefix="/api/auth", tags=["认证"])
 log = structlog.get_logger()
 settings = get_settings()
 

@@ -20,7 +20,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.response import fail, ok
@@ -348,6 +348,211 @@ async def update_project(
         await session.rollback()
         log.error("更新项目失败", error=str(e), project_id=str(project_id), user_id=user.id)
         raise HTTPException(status_code=500, detail=f"更新项目失败: {e}")
+
+
+@router.get("/{project_id}/sessions")
+async def get_project_sessions(
+    project_id: UUID,
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    status: str = Query("all", description="过滤状态：active / archived / all"),
+    session: AsyncSession = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    获取项目下的会话列表
+
+    权限规则：
+    - 超级管理员：查看任何项目的会话
+    - 项目所有者：查看自己项目的会话
+    - 同公司用户：查看同公司项目的会话
+    - 其他用户：无权限
+    """
+    try:
+        # 获取项目
+        project = await get_project_or_404(session, project_id, user)
+
+        # 检查访问权限
+        check_project_access(project, user)
+
+        # 构建查询条件
+        conditions = [ChatSession.project_id == project_id]
+        if status != "all":
+            conditions.append(ChatSession.status == status)
+
+        # 查询总数
+        count_query = select(func.count()).select_from(
+            select(ChatSession.id).where(*conditions).subquery()
+        )
+        total = (await session.execute(count_query)).scalar() or 0
+
+        # 查询列表（按最后活跃时间倒序）
+        query = (
+            select(ChatSession)
+            .where(*conditions)
+            .order_by(ChatSession.last_active_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        result = await session.execute(query)
+        sessions = result.scalars().all()
+
+        # 构建响应
+        items = [
+            {
+                "id": str(s.id),
+                "session_id": s.session_id,
+                "title": s.title,
+                "user_id": str(s.user_id),
+                "project_id": str(s.project_id) if s.project_id else None,
+                "turn_count": s.turn_count,
+                "status": s.status,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "last_active_at": s.last_active_at.isoformat() if s.last_active_at else None,
+            }
+            for s in sessions
+        ]
+
+        return ok(data={
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("获取项目会话列表失败", error=str(e), project_id=str(project_id), user_id=user.id)
+        raise HTTPException(status_code=500, detail=f"获取项目会话列表失败: {e}")
+
+
+@router.post("/{project_id}/sessions/{session_id}")
+async def add_session_to_project(
+    project_id: UUID,
+    session_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    将对话添加到项目
+    
+    权限规则：
+    - 超级管理员：可操作任何项目
+    - 项目所有者：可向自己的项目添加对话
+    - 其他用户：无权限
+    """
+    try:
+        # 获取项目
+        project = await get_project_or_404(session, project_id, user)
+        
+        # 检查项目修改权限
+        check_project_modify_permission(project, user)
+        
+        # 校验会话存在且属于当前用户
+        session_result = await session.execute(
+            select(ChatSession).where(
+                ChatSession.session_id == session_id,
+                ChatSession.user_id == user.id,
+            )
+        )
+        session_row = session_result.scalar_one_or_none()
+        if not session_row:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        
+        # 更新会话的 project_id
+        await session.execute(
+            update(ChatSession)
+            .where(ChatSession.session_id == session_id)
+            .values(project_id=project_id)
+        )
+        await session.commit()
+        
+        log.info(
+            "添加会话到项目",
+            session_id=session_id,
+            project_id=str(project_id),
+            user_id=user.id,
+        )
+        
+        return ok(message="会话已添加到项目", data={
+            "session_id": session_id,
+            "project_id": str(project_id),
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        log.error("添加会话到项目失败", error=str(e), project_id=str(project_id), session_id=session_id, user_id=user.id)
+        raise HTTPException(status_code=500, detail=f"添加会话到项目失败: {e}")
+
+
+@router.delete("/{project_id}/sessions/{session_id}")
+async def remove_session_from_project(
+    project_id: UUID,
+    session_id: str,
+    session: AsyncSession = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    从项目中移除对话
+    
+    将对话的 project_id 设置为 NULL，使其回到历史对话列表
+    
+    权限规则：
+    - 超级管理员：可操作任何项目
+    - 项目所有者：可从自己的项目移除对话
+    - 其他用户：无权限
+    """
+    try:
+        # 获取项目
+        project = await get_project_or_404(session, project_id, user)
+        
+        # 检查项目修改权限
+        check_project_modify_permission(project, user)
+        
+        # 校验会话存在且属于当前用户
+        session_result = await session.execute(
+            select(ChatSession).where(
+                ChatSession.session_id == session_id,
+                ChatSession.user_id == user.id,
+            )
+        )
+        session_row = session_result.scalar_one_or_none()
+        if not session_row:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        
+        # 如果会话不属于该项目，返回错误
+        if session_row.project_id != project_id:
+            raise HTTPException(status_code=400, detail="该会话不属于此项目")
+        
+        # 移除 project_id 关联
+        await session.execute(
+            update(ChatSession)
+            .where(ChatSession.session_id == session_id)
+            .values(project_id=None)
+        )
+        await session.commit()
+        
+        log.info(
+            "从项目移除会话",
+            session_id=session_id,
+            project_id=str(project_id),
+            user_id=user.id,
+        )
+        
+        return ok(message="会话已从项目移除", data={
+            "session_id": session_id,
+            "project_id": None,
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        log.error("从项目移除会话失败", error=str(e), project_id=str(project_id), session_id=session_id, user_id=user.id)
+        raise HTTPException(status_code=500, detail=f"从项目移除会话失败: {e}")
 
 
 @router.delete("/{project_id}")

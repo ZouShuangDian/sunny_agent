@@ -41,6 +41,7 @@ class SessionItem(BaseModel):
     status: str
     created_at: datetime
     last_active_at: datetime
+    project_id: str | None = None
 
 
 class SessionListResponse(BaseModel):
@@ -149,7 +150,7 @@ async def list_sessions(
     count_query = select(func.count()).select_from(
         select(ChatSession.id).where(*base_where).subquery()
     )
-    total = (await db.execute(count_query)).scalar()
+    total = (await db.execute(count_query)).scalar() or 0
 
     items = [
         SessionItem(
@@ -159,6 +160,7 @@ async def list_sessions(
             status=s.status,
             created_at=s.created_at,
             last_active_at=s.last_active_at,
+            project_id=str(s.project_id) if s.project_id else None,
         )
         for s in rows
     ]
@@ -334,3 +336,5 @@ async def update_session_title(
         session_id=session_id,
         title=body.title,
     ))
+
+
