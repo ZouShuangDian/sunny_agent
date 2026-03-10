@@ -18,12 +18,15 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID
 
+from datetime import datetime
+
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models.file import File
+from app.db.models.project import Project
 from app.security.auth import AuthenticatedUser
 
 logger = logging.getLogger(__name__)
@@ -145,28 +148,130 @@ class FileService:
 
     async def check_duplicate(
         self,
-        file_hash: str,
-        user_id: str | UUID,
+        filename: str,
+        project_id: str | UUID | None,
+        user_id: str,
     ) -> File | None:
         """
-        检查用户是否已上传相同哈希的文件（用户级去重）
+        检查是否存在同名文件（项目级或用户级去重）
+
+        逻辑：
+        - 有 project_id：在该 project 范围内查找同名文件
+        - 无 project_id：在该用户的 session 级别文件（project_id IS NULL）中查找
 
         Args:
-            file_hash: 文件 SHA256 哈希
+            filename: 文件名
+            project_id: 项目 ID（可为 None）
             user_id: 用户 ID
 
         Returns:
             File | None: 已存在的文件记录或 None
         """
-        if isinstance(user_id, str):
-            user_id = UUID(user_id)
-
-        stmt = select(File).where(
-            File.file_hash == file_hash,
-            File.uploaded_by == user_id,
-        )
+        if project_id:
+            # 有 project_id：在该 project 范围内查找
+            if isinstance(project_id, str):
+                project_id = UUID(project_id)
+            stmt = select(File).where(
+                File.file_name == filename,
+                File.project_id == project_id,
+            )
+        else:
+            # 无 project_id：在该用户的 session 级别文件中查找
+            uid = UUID(user_id) if isinstance(user_id, str) else user_id
+            stmt = select(File).where(
+                File.file_name == filename,
+                File.uploaded_by == uid,
+                File.project_id.is_(None),
+            )
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def replace_file(
+        self,
+        existing_file: File,
+        new_file: UploadFile,
+        file_hash: str,
+        mime_type: str,
+    ) -> File:
+        """
+        替换已有文件
+
+        逻辑：
+        1. 删除旧物理文件
+        2. 保存新物理文件（使用新 hash 生成路径）
+        3. 更新数据库记录（保留 file_id）
+
+        Args:
+            existing_file: 已存在的文件记录
+            new_file: 新上传的文件
+            file_hash: 新文件的 SHA256 哈希
+            mime_type: 新文件 MIME 类型
+
+        Returns:
+            File: 更新后的文件记录
+        """
+        try:
+            # 1. 删除旧物理文件
+            old_storage_path = self.base_storage_path / existing_file.file_path
+            if old_storage_path.exists():
+                old_storage_path.unlink()
+                logger.info(f"删除旧文件: {old_storage_path}")
+
+            # 2. 生成新存储路径（基于新 hash）
+            new_storage_path = self._get_storage_path(
+                existing_file.uploaded_by,
+                file_hash,
+                new_file.filename or existing_file.file_name,
+            )
+
+            # 3. 保存新文件并获取大小
+            file_size = await self.save_file(new_file, new_storage_path)
+            logger.info(f"保存新文件: {new_storage_path}, size={file_size}")
+
+            # 4. 更新数据库记录
+            existing_file.file_hash = file_hash
+            existing_file.file_size = file_size
+            existing_file.mime_type = mime_type
+            existing_file.file_path = str(new_storage_path.relative_to(self.base_storage_path))
+            existing_file.storage_filename = new_storage_path.name
+            existing_file.uploaded_at = datetime.now()
+
+            await self.db.flush()
+
+            logger.info(
+                f"替换文件: id={existing_file.id}, "
+                f"new_hash={file_hash[:16]}..., size={file_size}"
+            )
+
+            return existing_file
+
+        except Exception as e:
+            logger.error(f"替换文件失败: {e}")
+            raise FileValidationError(f"替换文件失败: {e}")
+
+    async def _check_project_owner(
+        self,
+        project_id: UUID,
+        user: AuthenticatedUser,
+    ) -> bool:
+        """
+        检查用户是否是项目所有者
+
+        Args:
+            project_id: 项目 ID
+            user: 认证用户
+
+        Returns:
+            bool: 是否是项目所有者
+        """
+        stmt = select(Project).where(Project.id == project_id)
+        result = await self.db.execute(stmt)
+        project = result.scalar_one_or_none()
+
+        if not project:
+            return False
+
+        return str(project.owner_id) == user.id
 
     def _get_storage_path(
         self,
@@ -359,15 +464,27 @@ class FileService:
             file_hash = await self.calculate_hash(file)
             logger.debug(f"文件哈希计算完成: {file_hash[:16]}...")
 
-            # 3. 检查重复（用户级去重）
-            if skip_duplicate:
-                existing_file = await self.check_duplicate(file_hash, user.id)
+            # 3. 检查重复（按文件名在特定范围内查找）
+            if skip_duplicate and file.filename:
+                existing_file = await self.check_duplicate(file.filename, project_id, user.id)
                 if existing_file:
-                    logger.info(
-                        f"发现重复文件，直接返回已有记录: "
-                        f"file_id={existing_file.id}"
+                    # 有 project_id：验证 project owner 权限
+                    if project_id:
+                        pid = UUID(project_id) if isinstance(project_id, str) else project_id
+                        is_owner = await self._check_project_owner(pid, user)
+                        if not is_owner:
+                            raise HTTPException(status_code=403, detail="无权替换此项目下的文件")
+
+                    # 执行替换
+                    logger.info(f"发现同名文件，执行替换: file_id={existing_file.id}")
+                    replaced_file = await self.replace_file(
+                        existing_file=existing_file,
+                        new_file=file,
+                        file_hash=file_hash,
+                        mime_type=mime_type,
                     )
-                    return existing_file, True  # 返回重复标志
+                    await self.db.commit()
+                    return replaced_file, True  # 返回替换标志
 
             # 4. 生成存储路径
             storage_path = self._get_storage_path(user.id, file_hash, file.filename or "unknown")
