@@ -185,6 +185,9 @@ class LLMClient:
 
         # 追踪工具调用片段
         tool_call_buffers: dict[int, dict] = {}
+        # 缓存 finish 信息，等 usage chunk 到达后再 yield
+        cached_finish_reason: str | None = None
+        usage_dict: dict = {}
 
         async for chunk in response:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -214,25 +217,27 @@ class LLMClient:
                             if tc.function.arguments:
                                 buf["arguments"] += tc.function.arguments
 
+            # 记录 finish_reason（usage 可能在后续独立 chunk 中到达）
             if finish_reason:
-                # 读取 chunk.usage（依赖 stream_options={"include_usage": True}）
-                usage_dict: dict = {}
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage_dict = {
-                        "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
-                        "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
-                        "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
-                    }
-                # 输出完整的工具调用
-                for _idx, buf in sorted(tool_call_buffers.items()):
-                    yield {
-                        "type": "tool_call",
-                        "id": buf["id"],
-                        "name": buf["name"],
-                        "arguments": buf["arguments"],
-                    }
-                tool_call_buffers.clear()
-                yield {"type": "finish", "reason": finish_reason, "usage": usage_dict}
+                cached_finish_reason = finish_reason
+
+            # 提取 usage（部分供应商在 finish 之后的独立 chunk 中返回 usage）
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage_dict = {
+                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                }
+
+        # 流结束，输出工具调用 + finish 事件
+        for _idx, buf in sorted(tool_call_buffers.items()):
+            yield {
+                "type": "tool_call",
+                "id": buf["id"],
+                "name": buf["name"],
+                "arguments": buf["arguments"],
+            }
+        yield {"type": "finish", "reason": cached_finish_reason or "stop", "usage": usage_dict}
 
     async def chat_with_tools(
         self,

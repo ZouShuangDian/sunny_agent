@@ -8,7 +8,7 @@ Plugin 命令上下文 ContextVar
 - 读取：L3ReActEngine._build_initial_messages()，注入 COMMAND.md + Skills 列表到 system prompt
 - 重置：chat.py finally 块精确还原（不影响并发请求）
 
-SubAgent 隔离：execute_raw() 不设置此 ContextVar，SubAgent 读取到 None，不注入 Plugin 上下文。
+SubAgent 隔离：SubAgent 调用 run(LoopContext.from_messages(...)) 不设置此 ContextVar，读取到 None，不注入 Plugin 上下文。
 """
 
 from __future__ import annotations

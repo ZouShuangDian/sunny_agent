@@ -13,7 +13,6 @@
 """
 
 import json
-import re
 import shutil
 import tempfile
 import uuid
@@ -22,58 +21,21 @@ from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api.response import ApiResponse, ok
+from app.api.upload_utils import NAME_RE, check_zip_safety, find_zip_root, parse_frontmatter
 from app.config import get_settings
 from app.db.engine import async_session
-from app.plugins.service import _parse_frontmatter, plugin_service
+from app.plugins.service import plugin_service
 from app.security.auth import AuthenticatedUser, get_current_user
 
 router = APIRouter(prefix="/api/plugins", tags=["Plugin 管理"])
 log = structlog.get_logger()
 settings = get_settings()
 
-# plugin name 合法格式：小写字母开头，只含小写字母/数字/连字符，最长 63 字符
-_PLUGIN_NAME_RE = re.compile(r'^[a-z][a-z0-9-]{0,62}$')
-
 
 # ── 工具函数 ──────────────────────────────────────────────────
-
-def _check_zip_safety(zf: zipfile.ZipFile) -> None:
-    """
-    校验 ZIP 成员路径安全性。
-    拒绝：含 ".."、以 "/" 开头、含 ":" 或 "\\」（Windows 路径）的成员。
-    """
-    for info in zf.infolist():
-        name = info.filename
-        # 过滤目录条目（以 / 结尾）
-        if name.endswith("/"):
-            continue
-        if ".." in name.split("/"):
-            raise HTTPException(status_code=400, detail=f"ZIP 含路径穿越成员：{name}")
-        if name.startswith("/") or name.startswith("\\"):
-            raise HTTPException(status_code=400, detail=f"ZIP 含绝对路径成员：{name}")
-        if ":" in name:
-            raise HTTPException(status_code=400, detail=f"ZIP 成员路径含非法字符：{name}")
-
-
-def _find_zip_root(zf: zipfile.ZipFile) -> str | None:
-    """
-    检测 ZIP 是否有统一根目录（所有文件都在同一个顶级目录下）。
-    返回根目录名（含末尾 "/"），或 None（无根目录，文件在 ZIP 根部）。
-    """
-    names = [info.filename for info in zf.infolist() if not info.filename.endswith("/")]
-    if not names:
-        return None
-    first_parts = {n.split("/")[0] for n in names}
-    if len(first_parts) == 1:
-        # 所有文件共享同一个顶级目录
-        root = first_parts.pop()
-        return root + "/"
-    return None
-
 
 def _validate_plugin_json(plugin_json_path: Path, usernumb: str) -> dict:
     """
@@ -108,7 +70,7 @@ def _validate_plugin_json(plugin_json_path: Path, usernumb: str) -> dict:
 
     # name 格式校验
     name = data["name"]
-    if not _PLUGIN_NAME_RE.match(name):
+    if not NAME_RE.match(name):
         raise HTTPException(
             status_code=400,
             detail=f"plugin name 格式不合法（期望 ^[a-z][a-z0-9-]{{0,62}}$）：{name}",
@@ -133,7 +95,7 @@ def _validate_commands(commands_dir: Path) -> list[dict]:
     commands = []
     for md_file in md_files:
         content = md_file.read_text(encoding="utf-8")
-        fm, _ = _parse_frontmatter(content)
+        fm, _ = parse_frontmatter(content)
 
         if not fm.get("description"):
             raise HTTPException(
@@ -186,12 +148,12 @@ async def upload_plugin(
         extract_dir.mkdir()
 
         with zipfile.ZipFile(zip_tmp, "r") as zf:
-            _check_zip_safety(zf)
+            check_zip_safety(zf)
             zf.extractall(extract_dir)
 
         # 3. 找到实际插件根目录（自动处理有/无顶级目录两种打包方式）
         with zipfile.ZipFile(zip_tmp, "r") as zf:
-            zip_root = _find_zip_root(zf)
+            zip_root = find_zip_root(zf)
 
         if zip_root:
             plugin_src = extract_dir / zip_root.rstrip("/")
@@ -230,55 +192,40 @@ async def upload_plugin(
             path=plugin_rel_path,
         )
 
-        # 7. DB 写入（事务）
+        # 7. DB 写入（事务，使用 ON CONFLICT 保证多实例并发安全）
         async with async_session() as session:
             async with session.begin():
-                # 查询是否已存在同名 Plugin
-                existing = await session.execute(text("""
-                    SELECT id FROM sunny_agent.plugins
-                    WHERE owner_usernumb = :usernumb AND name = :name
-                """), {"usernumb": user.usernumb, "name": plugin_name})
-                row = existing.fetchone()
+                plugin_id = uuid.uuid4()
+                # UPSERT：同名同用户 → 更新；否则 → 插入
+                result = await session.execute(text("""
+                    INSERT INTO sunny_agent.plugins
+                        (id, name, version, description, owner_usernumb, path, is_active)
+                    VALUES
+                        (:id, :name, :version, :description, :owner_usernumb, :path, TRUE)
+                    ON CONFLICT (owner_usernumb, name) DO UPDATE SET
+                        version = EXCLUDED.version,
+                        description = EXCLUDED.description,
+                        path = EXCLUDED.path,
+                        is_active = TRUE,
+                        updated_at = now()
+                    RETURNING id
+                """), {
+                    "id": plugin_id,
+                    "name": plugin_name,
+                    "version": plugin_data["version"],
+                    "description": plugin_data["description"],
+                    "owner_usernumb": user.usernumb,
+                    "path": plugin_rel_path,
+                })
+                # 取回实际 ID（新插入时为传入的 uuid，已存在时为旧记录 ID）
+                plugin_id = result.scalar_one()
 
-                if row:
-                    plugin_id = row.id
-                    # 更新 Plugin 记录
-                    await session.execute(text("""
-                        UPDATE sunny_agent.plugins
-                        SET version = :version,
-                            description = :description,
-                            path = :path,
-                            is_active = TRUE,
-                            updated_at = now()
-                        WHERE id = :plugin_id
-                    """), {
-                        "version": plugin_data["version"],
-                        "description": plugin_data["description"],
-                        "path": plugin_rel_path,
-                        "plugin_id": plugin_id,
-                    })
-                    # 删除旧命令（重新插入）
-                    await session.execute(text("""
-                        DELETE FROM sunny_agent.plugin_commands WHERE plugin_id = :plugin_id
-                    """), {"plugin_id": plugin_id})
-                    log.info("Plugin 已更新", plugin_name=plugin_name, usernumb=user.usernumb)
-                else:
-                    plugin_id = uuid.uuid4()
-                    # 插入新 Plugin 记录
-                    await session.execute(text("""
-                        INSERT INTO sunny_agent.plugins
-                            (id, name, version, description, owner_usernumb, path, is_active)
-                        VALUES
-                            (:id, :name, :version, :description, :owner_usernumb, :path, TRUE)
-                    """), {
-                        "id": plugin_id,
-                        "name": plugin_name,
-                        "version": plugin_data["version"],
-                        "description": plugin_data["description"],
-                        "owner_usernumb": user.usernumb,
-                        "path": plugin_rel_path,
-                    })
-                    log.info("Plugin 已注册", plugin_name=plugin_name, usernumb=user.usernumb)
+                # 删除旧命令后重新插入
+                await session.execute(text("""
+                    DELETE FROM sunny_agent.plugin_commands WHERE plugin_id = :plugin_id
+                """), {"plugin_id": plugin_id})
+
+                log.info("Plugin UPSERT 完成", plugin_name=plugin_name, usernumb=user.usernumb)
 
                 # 插入命令记录
                 for cmd in commands:

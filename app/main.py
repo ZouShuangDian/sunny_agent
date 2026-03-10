@@ -2,6 +2,7 @@
 FastAPI 应用主入口
 """
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +46,20 @@ async def lifespan(application: FastAPI):
     log.info("Redis 连接正常")
 
     yield
+
+    # ── Graceful Shutdown：等待后台 create_task 完成，防止消息/审计日志丢失 ──
+    pending = [
+        t for t in asyncio.all_tasks()
+        if t is not asyncio.current_task() and not t.done()
+    ]
+    if pending:
+        log.info("等待后台任务完成", count=len(pending))
+        # 最多等 10 秒，超时则取消（避免 Pod 被 SIGKILL 强杀）
+        done, not_done = await asyncio.wait(pending, timeout=10)
+        if not_done:
+            log.warning("后台任务超时未完成，强制取消", count=len(not_done))
+            for task in not_done:
+                task.cancel()
 
     # 关闭数据库连接池
     await engine.dispose()
@@ -123,12 +138,14 @@ from app.security.login import router as auth_router
 from app.api.users import router as users_router
 from app.api.roles import router as roles_router
 from app.api.sessions import router as sessions_router
+from app.api.skills import router as skills_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(plugins_router)
+app.include_router(skills_router)
 app.include_router(projects_router)
 app.include_router(project_files_router)
 app.include_router(sessions_router)

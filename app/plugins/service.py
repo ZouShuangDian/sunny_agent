@@ -5,7 +5,7 @@ Plugin 服务层：DB 查询 + 文件读取 + Skills 目录扫描
 - PluginCommandInfo dataclass：运行时命令元信息（参考 SkillInfo 模式）
 - PluginService：DB 查询（get_user_command）+ 文件操作（read_command_content / scan_plugin_skills）
 - 路径安全：所有宿主机路径操作均通过 resolve() + relative_to() 防止路径穿越
-- frontmatter 解析：内联实现，不引入新依赖
+- frontmatter 解析：统一使用 upload_utils.parse_frontmatter
 """
 
 from __future__ import annotations
@@ -16,38 +16,12 @@ from pathlib import Path
 import structlog
 from sqlalchemy import text
 
+from app.api.upload_utils import parse_frontmatter
 from app.config import get_settings
 from app.db.engine import async_session
 
 log = structlog.get_logger()
 settings = get_settings()
-
-
-def _parse_frontmatter(content: str) -> tuple[dict, str]:
-    """
-    解析 Markdown frontmatter（YAML 块 between ---）。
-
-    返回 (fm_dict, body_text)。
-    若无合法 frontmatter，返回 ({}, content)。
-    """
-    if not content.startswith("---"):
-        return {}, content
-
-    # 寻找结束标记（第一个 "\n---" 之后）
-    end = content.find("\n---", 3)
-    if end == -1:
-        return {}, content
-
-    fm_text = content[3:end].strip()
-    body = content[end + 4:].strip()
-
-    fm: dict = {}
-    for line in fm_text.splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            fm[k.strip()] = v.strip().strip('"').strip("'")
-
-    return fm, body
 
 
 @dataclass

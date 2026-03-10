@@ -14,7 +14,7 @@ Agent 深度上下文：通过 contextvars 在 async 调用链中透传当前 Ag
     # 写入（SubAgentCallTool，启动子 Agent 前）
     token = set_agent_depth(current_depth + 1)
     try:
-        sub_result = await sub_engine.execute_raw(messages)
+        sub_result = await sub_engine.run(ctx)
     finally:
         reset_agent_depth(token)               # 精确还原，不受嵌套影响
 """

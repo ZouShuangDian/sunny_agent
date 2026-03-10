@@ -131,7 +131,9 @@ async def _record_user_message(
     )
     await memory.append_message(session_id, user_msg)
     if settings.CHAT_PERSIST_ENABLED:
-        chat_persistence.save_message_background(session_id, user_msg)
+        # 同步等待 PG 写入：确保 user 消息在 ReAct 循环前落库，
+        # 避免查询消息历史时因 background task 未完成而丢失首条 user 消息
+        await chat_persistence.save_message(session_id, user_msg)
     return user_msg
 
 
@@ -343,7 +345,8 @@ async def _init_session(
     # 全新会话
     await memory.init_session(session_id, user.id, user.usernumb)
     if settings.CHAT_PERSIST_ENABLED:
-        chat_persistence.ensure_session_background(session_id, user.id, first_message)
+        # 同步等待 PG session 记录写入，确保前端拿到 session_id 后能立即查到会话列表
+        await chat_persistence.ensure_session(session_id, user.id, first_message)
 
 
 # ── POST /chat — 非流式 JSON 响应 ──
@@ -465,7 +468,15 @@ async def chat_stream(
                 await _record_user_message(session_id, memory, body.message)
 
                 # 执行（统一 L3）
-                yield _sse_event(SSEEvent.STATUS, {"phase": "executing"})
+                # session_id + title 在流最开头推送，前端可直接插入会话列表（无需额外查询）
+                # is_new_session 标记：前端据此判断是否需要在侧栏新增一条会话
+                is_new = not body.session_id
+                status_data: dict = {"phase": "executing", "session_id": session_id}
+                if is_new:
+                    title = body.message[:50] + "..." if len(body.message) > 50 else body.message
+                    status_data["is_new_session"] = True
+                    status_data["title"] = title
+                yield _sse_event(SSEEvent.STATUS, status_data)
                 _uid_token = set_user_id(user.usernumb)
                 reply_chunks: list[str] = []
                 finish_meta: dict = {}

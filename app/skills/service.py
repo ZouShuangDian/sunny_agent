@@ -35,6 +35,7 @@ class SkillInfo:
     # 例：skills/github  或  skills/users/1131618/my_skill
     path: str
     scope: str  # system / user
+    has_scripts: bool = False
 
     def get_container_skill_path(self) -> str:
         """返回容器内 SKILL.md 的绝对路径"""
@@ -72,7 +73,7 @@ class SkillService:
         用户 Skill：创建者始终可见，COALESCE(uss.is_enabled, TRUE) = TRUE
         """
         query = text("""
-            SELECT s.id, s.name, s.description, s.path, s.scope
+            SELECT s.id, s.name, s.description, s.path, s.scope, s.has_scripts
             FROM sunny_agent.skills s
             LEFT JOIN sunny_agent.user_skill_settings uss
                 ON uss.skill_id = s.id AND uss.usernumb = :usernumb
@@ -101,6 +102,7 @@ class SkillService:
                     description=row.description,
                     path=row.path,
                     scope=row.scope,
+                    has_scripts=row.has_scripts,
                 )
                 for row in rows
             ]
