@@ -2,7 +2,7 @@
 文件 API - File Preview and Download
 
 端点：
-- GET /api/files/download?path=... - 从 outputs 目录下载文件（原有端点）
+- GET /api/files/download?path=...&expires=...&sig=... - HMAC 签名下载（present_files 工具生成）
 - GET /api/files/{id}/preview - 获取文件预览信息（带临时下载 URL）
 - GET /api/files/{id}/download - 下载文件（永久下载链接）
 
@@ -11,6 +11,7 @@
 - ABAC：公司数据隔离
 - 文件上传者、项目所有者、超级管理员可以访问
 - 超级管理员绕过所有权限检查
+- /download 端点通过 HMAC 签名验证，无需 JWT
 """
 
 import os
@@ -34,6 +35,7 @@ from app.db.models.file import File
 from app.db.models.project import Project
 from app.db.models.user import User
 from app.security.auth import AuthenticatedUser, get_current_user, get_current_user_optional, verify_download_token, is_super_admin
+from app.security.download_sign import verify_download_sig
 from app.services.file_service import FileService
 
 router = APIRouter(prefix="/api/files", tags=["文件操作"])
@@ -280,32 +282,32 @@ async def download_file_by_id(
 @router.get("/download")
 async def download_file(
     path: str = Query(description="相对路径，格式：users/{user_id}/outputs/{session_id}/filename"),
-    user: AuthenticatedUser = Depends(get_current_user),
+    expires: int = Query(description="过期时间戳（Unix epoch 秒）"),
+    sig: str = Query(description="HMAC-SHA256 签名"),
 ):
     """
-    下载 outputs 目录中的文件（保留原有端点供 present_files 工具使用）。
+    下载 outputs 目录中的文件（HMAC 签名校验，无需 JWT）。
 
-    path 参数为相对于 SANDBOX_HOST_VOLUME 的路径，
-    调用方（present_files 工具）生成的 URL 格式为：
-      /api/files/download?path=users/{user_id}/outputs/{session_id}/filename
+    URL 由 present_files 工具在已鉴权的聊天请求中生成，
+    包含 HMAC 签名 + 过期时间，浏览器直接点击即可下载。
     """
-    # 只允许下载当前登录用户自己的 outputs 文件
-    allowed_prefix = f"users/{user.usernumb}/outputs/"
-    if not path.startswith(allowed_prefix):
-        raise HTTPException(
-            status_code=403,
-            detail=f"只允许下载自己的 outputs 目录文件（期望前缀：{allowed_prefix}）",
-        )
+    # 1. 验证签名
+    error = verify_download_sig(path, expires, sig)
+    if error:
+        raise HTTPException(status_code=403, detail=error)
 
-    # 拼接宿主机绝对路径并防止路径穿越
+    # 2. 路径格式校验（只允许 outputs 目录）
+    if not path.startswith("users/") or "/outputs/" not in path:
+        raise HTTPException(status_code=403, detail="只允许下载 outputs 目录中的文件")
+
+    # 3. 拼接宿主机绝对路径并防止路径穿越
     host_root = Path(settings.SANDBOX_HOST_VOLUME)
     full_path = (host_root / path).resolve()
 
-    # resolve() 后必须仍在 host_root 内
     try:
         full_path.relative_to(host_root.resolve())
     except ValueError:
-        raise HTTPException(status_code=403, detail="路径穿越攻击，拒绝访问")
+        raise HTTPException(status_code=403, detail="路径越界，拒绝访问")
 
     if not full_path.exists():
         raise HTTPException(status_code=404, detail=f"文件不存在：{path}")
@@ -313,12 +315,7 @@ async def download_file(
     if not full_path.is_file():
         raise HTTPException(status_code=400, detail="路径不是文件")
 
-    log.info(
-        "文件下载",
-        path=path,
-        usernumb=user.usernumb,
-        size=full_path.stat().st_size,
-    )
+    log.info("文件下载", path=path, size=full_path.stat().st_size)
 
     return FileResponse(
         path=str(full_path),
