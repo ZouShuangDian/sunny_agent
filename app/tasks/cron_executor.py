@@ -14,6 +14,7 @@ from sqlalchemy import update
 from app.db.engine import async_session
 from app.db.models.cron_job import CronJob
 from app.execution.pipeline import run_agent_pipeline
+from app.notify import NotificationType, notify_user
 
 log = structlog.get_logger()
 
@@ -25,6 +26,7 @@ async def execute_cron_job(
     user_id: str,
     input_text: str,
     session_id: str | None,
+    name: str,
 ) -> None:
     """Worker 消费的任务函数：通过共享管线执行一次完整的 Agent 对话"""
     # 生成 trace_id 用于日志追踪
@@ -38,7 +40,8 @@ async def execute_cron_job(
     )
 
     try:
-        reply = await run_agent_pipeline(
+        # P0-3：解包 tuple 返回值
+        reply, actual_sid = await run_agent_pipeline(
             usernumb=usernumb,
             user_id=user_id,
             input_text=input_text,
@@ -47,18 +50,47 @@ async def execute_cron_job(
             source="cron",
         )
 
-        await _update_cron_status(cron_job_id, status="completed", error=None)
+        # P0-2：shield 保护，防止 CancelledError 中断
+        await asyncio.shield(
+            _update_cron_status(cron_job_id, status="completed", error=None)
+        )
+        await asyncio.shield(notify_user(
+            usernumb,
+            notify_type=NotificationType.CRON_COMPLETED,
+            title=f"定时任务「{name}」执行完成",
+            session_id=actual_sid,
+            cron_job_id=cron_job_id,
+        ))
         log.info("定时任务执行成功", reply_len=len(reply))
 
     except asyncio.CancelledError:
         # arq 超时抛 CancelledError（不被 except Exception 捕获）
         log.warning("定时任务执行超时（arq job_timeout）")
-        await _update_cron_status(cron_job_id, status="timeout", error="arq job_timeout exceeded")
+        # P0-2：shield 保护，即使协程被取消也要保证状态回写和通知
+        await asyncio.shield(
+            _update_cron_status(cron_job_id, status="timeout", error="arq job_timeout exceeded")
+        )
+        await asyncio.shield(notify_user(
+            usernumb,
+            notify_type=NotificationType.CRON_FAILED,
+            title=f"定时任务「{name}」执行超时",
+            content="任务执行时间超过限制，已被终止",
+            cron_job_id=cron_job_id,
+        ))
         raise  # 必须 re-raise，让 arq 知道任务被取消
 
     except Exception as e:
         log.exception("定时任务执行失败")
-        await _update_cron_status(cron_job_id, status="failed", error=str(e)[:500])
+        await asyncio.shield(
+            _update_cron_status(cron_job_id, status="failed", error=str(e)[:500])
+        )
+        await asyncio.shield(notify_user(
+            usernumb,
+            notify_type=NotificationType.CRON_FAILED,
+            title=f"定时任务「{name}」执行失败",
+            content=str(e)[:200],
+            cron_job_id=cron_job_id,
+        ))
 
     finally:
         structlog.contextvars.unbind_contextvars("trace_id", "cron_job_id", "usernumb")

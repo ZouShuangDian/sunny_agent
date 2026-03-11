@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     CRON_SCAN_INTERVAL: int = 1          # Scanner 扫描间隔（分钟），默认每分钟
     CRON_MIN_INTERVAL_MINUTES: int = 30  # 定时任务最小触发间隔（分钟），防止资源滥用
 
+    # ── 通知 ──
+    NOTIFICATION_RETENTION_DAYS: int = 30  # 已读通知保留天数（清理策略）
+    SSE_HEARTBEAT_SECONDS: int = 30        # SSE 心跳间隔（秒）
+
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表
 

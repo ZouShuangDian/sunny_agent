@@ -47,7 +47,7 @@ async def run_agent_pipeline(
     session_id: str | None = None,
     trace_id: str | None = None,
     source: str = "chat",
-) -> str:
+) -> tuple[str, str]:
     """完整的 Agent 执行管线（非流式）
 
     严格对照 chat.py 实际代码复刻链路：
@@ -68,7 +68,7 @@ async def run_agent_pipeline(
         source: 会话来源（'chat' | 'cron'）
 
     Returns:
-        Agent 回复文本
+        (reply_text, session_id) 二元组
     """
     sid = session_id or str(_uuid.uuid4())
     tid = trace_id or str(_uuid.uuid4())
@@ -149,7 +149,7 @@ async def run_agent_pipeline(
                 l3_steps=exec_result.l3_steps,
             )
 
-        return exec_result.reply
+        return exec_result.reply, sid
 
     finally:
         reset_session_id(session_token)

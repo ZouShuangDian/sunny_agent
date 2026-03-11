@@ -60,6 +60,12 @@ class RedisKeys:
         """Agent 执行中的实时步骤（Redis List，TTL 24h 兜底）"""
         return f"live_steps:{session_id}"
 
+    # ── 通知 Pub/Sub ──
+    @staticmethod
+    def notify_channel(usernumb: str) -> str:
+        """用户级通知 Pub/Sub channel（SSE 订阅用）"""
+        return f"notify:{usernumb}"
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(
