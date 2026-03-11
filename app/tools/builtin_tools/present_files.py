@@ -26,6 +26,7 @@ from app.db.engine import async_session
 from app.db.models.chat import ChatSession
 from app.db.models.file import File
 from app.db.models.user import User
+from app.security.download_sign import sign_download_url
 from app.execution.session_context import get_session_id
 from app.execution.user_context import get_user_id
 from app.tools.base import BaseTool, ToolResult
@@ -99,9 +100,9 @@ class PresentFilesTool(BaseTool):
 
             filename = os.path.basename(normalized)
             # 将容器内路径转换为宿主机相对路径（去掉 /mnt/ 前缀）
-            # 实际下载由 /api/files/download?path=users/{uid}/outputs/{sid}/filename 处理
             relative = normalized.removeprefix("/mnt/")
-            download_url = f"/api/files/download?path={relative}"
+            # 生成带 HMAC 签名的下载 URL（5 分钟有效，浏览器直接点击即可下载）
+            download_url = sign_download_url(relative)
 
             files.append({
                 "name": filename,

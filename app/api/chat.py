@@ -41,6 +41,7 @@ from app.execution.plugin_context import (
     reset_plugin_context,
     set_plugin_context,
 )
+from app.chat_ops import agent_scope, set_session_running, finalize_execution, cleanup_session
 from app.plugins.service import plugin_service
 from app.security.audit import audit_logger
 from app.security.auth import AuthenticatedUser, get_current_user
@@ -144,8 +145,14 @@ async def _record_assistant_message(
     intent_primary: str,
     route: str,
     exec_result: ExecutionResult | None = None,
+    *,
+    persist: bool = True,
 ) -> Message:
-    """保存 assistant 消息到 Redis + PG（执行后调用）"""
+    """
+    保存 assistant 消息到 Redis WorkingMemory（+ 可选 PG 持久化）。
+
+    persist=False 时仅写 Redis，PG 由 agent_scope / finalize_execution 顺序写入。
+    """
     assistant_msg = Message(
         role="assistant", content=reply_text,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
@@ -155,46 +162,11 @@ async def _record_assistant_message(
     await memory.append_message(session_id, assistant_msg)
     await memory.increment_turn(session_id)
 
-    if settings.CHAT_PERSIST_ENABLED:
+    if persist and settings.CHAT_PERSIST_ENABLED:
         trace_data = exec_result.reasoning_trace if exec_result and exec_result.reasoning_trace else None
         chat_persistence.save_message_background(session_id, assistant_msg, reasoning_trace=trace_data)
 
     return assistant_msg
-
-
-def _post_process_execution(
-    session_id: str,
-    message_id: str,
-    exec_result: ExecutionResult | None = None,
-    compaction_summary: str | None = None,
-    l3_steps_override: list[dict] | None = None,
-) -> None:
-    """
-    统一执行后处理：l3_steps 持久化 + DB 剪枝 + genesis block。
-
-    参数说明：
-    - exec_result: 非流式路径传入完整 ExecutionResult（含 l3_steps）
-    - l3_steps_override: 流式路径传入（l3_steps 通过 finish 事件传递）
-    - compaction_summary: 显式传入摘要内容（通过返回值/事件传递，避免并发竞态）
-    """
-    if not settings.CHAT_PERSIST_ENABLED:
-        return
-
-    # l3_steps 持久化 + Level 1 DB 剪枝
-    l3_steps = None
-    if exec_result and exec_result.l3_steps:
-        l3_steps = exec_result.l3_steps
-    elif l3_steps_override:
-        l3_steps = l3_steps_override
-
-    if l3_steps:
-        l3_step_objs = [L3Step(**s) for s in l3_steps]
-        chat_persistence.save_l3_steps_background(session_id, message_id, l3_step_objs)
-        asyncio.create_task(_prune_l3_steps(session_id))
-
-    # Level 2 genesis block 持久化
-    if compaction_summary:
-        _save_compaction_genesis_block(session_id, compaction_summary)
 
 
 # ── Plugin 命令处理（集成到意图管线）──
@@ -374,39 +346,48 @@ async def chat(
         # user 消息立即持久化（执行前，确保永不丢失）
         await _record_user_message(session_id, memory, body.message)
 
-        # 执行（统一 L3）
-        _uid_token = set_user_id(user.usernumb)
-        try:
-            exec_result = await execution_router.execute(
-                intent_result=final_result, session_id=session_id,
+        # agent_scope 管理生命周期：running → 执行 → save_message → save_l3_steps → DEL Redis → active
+        async with agent_scope(session_id, chat_persistence) as scope:
+            _uid_token = set_user_id(user.usernumb)
+            try:
+                exec_result = await execution_router.execute(
+                    intent_result=final_result, session_id=session_id,
+                )
+            finally:
+                reset_user_id(_uid_token)
+
+            # 输出校验
+            if settings.OUTPUT_VALIDATOR_ENABLED and exec_result.tool_calls:
+                validator_out = await output_validator.validate(ValidatorInput(
+                    execution_output=exec_result.reply,
+                    tool_calls=exec_result.tool_calls,
+                    reasoning_trace=exec_result.reasoning_trace,
+                    enable_hallucination=settings.OUTPUT_VALIDATOR_HALLUCINATION,
+                ))
+                reply_text = validator_out.validated_output
+            else:
+                reply_text = exec_result.reply
+
+            # assistant 消息 → Redis WorkingMemory（PG 由 scope finalize 顺序写入）
+            assistant_msg = await _record_assistant_message(
+                session_id, memory, reply_text,
+                final_result.intent.primary, final_result.route, exec_result,
+                persist=False,
             )
-        finally:
-            reset_user_id(_uid_token)
 
-        # 输出校验
-        if settings.OUTPUT_VALIDATOR_ENABLED and exec_result.tool_calls:
-            validator_out = await output_validator.validate(ValidatorInput(
-                execution_output=exec_result.reply,
-                tool_calls=exec_result.tool_calls,
-                reasoning_trace=exec_result.reasoning_trace,
-                enable_hallucination=settings.OUTPUT_VALIDATOR_HALLUCINATION,
-            ))
-            reply_text = validator_out.validated_output
-        else:
-            reply_text = exec_result.reply
+            # 设置 scope 结果，退出时自动顺序持久化
+            scope.set_result(
+                message_id=assistant_msg.message_id,
+                msg=assistant_msg,
+                reasoning_trace=exec_result.reasoning_trace if exec_result else None,
+                l3_steps=exec_result.l3_steps if exec_result else None,
+            )
 
-        # assistant 消息记录
-        assistant_msg = await _record_assistant_message(
-            session_id, memory, reply_text,
-            final_result.intent.primary, final_result.route, exec_result,
-        )
-
-        # 统一执行后处理（compaction_summary 通过返回值传递，避免并发竞态）
-        _post_process_execution(
-            session_id, assistant_msg.message_id,
-            exec_result=exec_result,
-            compaction_summary=exec_result.compaction_summary if exec_result else None,
-        )
+        # scope 退出后：PG 写入已完成，执行后台任务（Level 1 剪枝 + Level 2 genesis block）
+        if exec_result and exec_result.l3_steps:
+            asyncio.create_task(_prune_l3_steps(session_id))
+        if exec_result and exec_result.compaction_summary:
+            _save_compaction_genesis_block(session_id, exec_result.compaction_summary)
 
         # 审计
         duration_ms = int((time.time() - start_time) * 1000)
@@ -463,9 +444,14 @@ async def chat_stream(
                 memory=memory, redis=redis, trace_id=trace_id,
             )
 
+            session_is_running = False  # 追踪 running 状态，确保异常时清理
             try:
                 # user 消息立即持久化（执行前，确保永不丢失）
                 await _record_user_message(session_id, memory, body.message)
+
+                # 设 running（流式场景在请求层设，不通过 agent_scope）
+                await set_session_running(session_id)
+                session_is_running = True
 
                 # 执行（统一 L3）
                 # session_id + title 在流最开头推送，前端可直接插入会话列表（无需额外查询）
@@ -477,10 +463,15 @@ async def chat_stream(
                     status_data["is_new_session"] = True
                     status_data["title"] = title
                 yield _sse_event(SSEEvent.STATUS, status_data)
+                log.info(
+                    "SSE STATUS 已推送",
+                    session_id=session_id, is_new=is_new,
+                )
                 _uid_token = set_user_id(user.usernumb)
                 reply_chunks: list[str] = []
                 finish_meta: dict = {}
                 stream_completed = False
+                delta_count = 0
                 try:
                     async for event in execution_router.execute_stream(
                         intent_result=final_result, session_id=session_id,
@@ -488,6 +479,9 @@ async def chat_stream(
                         evt_type = event["event"]
                         evt_data = event["data"]
                         if evt_type == SSEEvent.DELTA:
+                            delta_count += 1
+                            if delta_count == 1:
+                                log.info("SSE 首个 DELTA 推送", session_id=session_id, is_new=is_new)
                             reply_chunks.append(evt_data.get("content", ""))
                             yield _sse_event(SSEEvent.DELTA, evt_data)
                         elif evt_type in (
@@ -499,23 +493,46 @@ async def chat_stream(
                         else:
                             log.debug("execute_stream 产生了未处理的事件类型，已丢弃", evt_type=evt_type)
                     stream_completed = True
+                    log.info("SSE 流正常完成", session_id=session_id, is_new=is_new, delta_count=delta_count)
                 finally:
+                    if not stream_completed:
+                        log.warning(
+                            "SSE 流中断（客户端断开或异常）",
+                            session_id=session_id, is_new=is_new, delta_count=delta_count,
+                        )
                     reset_user_id(_uid_token)
-                    # 中断保护：无论正常完成还是中断，都保存已收集的 assistant 回复
                     reply_text = "".join(reply_chunks)
                     if reply_text:
+                        # 中断保护：中断时 persist=True 走 fire-and-forget 保底
+                        # 正常完成：persist=False，PG 由 finalize_execution 顺序写入
+                        # 已知限制：流式路径未传 exec_result，assistant_msg.tool_calls 为 None
+                        # （tool_calls 通过 SSE tool_call 事件实时推送，PG 侧由 l3_steps 覆盖）
                         assistant_msg = await _record_assistant_message(
                             session_id, memory, reply_text,
                             final_result.intent.primary, final_result.route,
+                            persist=not stream_completed,
                         )
+                    if not stream_completed:
+                        # SSE 中断：清理 running 状态 + Redis live_steps
+                        asyncio.create_task(cleanup_session(session_id))
+                        session_is_running = False
 
-                if stream_completed:
-                    # 正常完成：执行后处理（l3_steps 持久化 + DB 剪枝 + genesis block）
-                    _post_process_execution(
-                        session_id, assistant_msg.message_id,
-                        l3_steps_override=finish_meta.get("l3_steps"),
-                        compaction_summary=finish_meta.get("compaction_summary"),
-                    )
+                if stream_completed and reply_text:
+                    # 正常完成 → create_task 做顺序收尾（独立 task 不受生成器 cancel 影响）
+                    asyncio.create_task(finalize_execution(
+                        session_id, chat_persistence,
+                        message_id=assistant_msg.message_id,
+                        msg=assistant_msg,
+                        reasoning_trace=None,  # 流式路径不持久化 reasoning_trace
+                        l3_steps=finish_meta.get("l3_steps"),
+                    ))
+                    session_is_running = False  # finalize_execution 会设 active
+
+                    # Level 1 DB 剪枝 + Level 2 genesis block（后台任务）
+                    if finish_meta.get("l3_steps"):
+                        asyncio.create_task(_prune_l3_steps(session_id))
+                    if finish_meta.get("compaction_summary"):
+                        _save_compaction_genesis_block(session_id, finish_meta["compaction_summary"])
 
                     # 审计（与非流式路径对称）
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -534,6 +551,9 @@ async def chat_stream(
                     done_meta = {k: finish_meta[k] for k in _DONE_FIELDS if k in finish_meta}
                     yield _sse_event(SSEEvent.DONE, {"session_id": session_id, "duration_ms": duration_ms, **done_meta})
             finally:
+                # 兜底清理：如果 set_session_running 后、内层 try 前发生异常，确保不卡在 running
+                if session_is_running:
+                    asyncio.create_task(cleanup_session(session_id))
                 # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
                 if plugin_token is not None:
                     reset_plugin_context(plugin_token)

@@ -54,6 +54,12 @@ class RedisKeys:
         """SSO ticket processing lock key."""
         return f"sso:ticket:lock:{ticket}"
 
+    # ── Agent 执行中实时步骤 ──
+    @staticmethod
+    def live_steps(session_id: str) -> str:
+        """Agent 执行中的实时步骤（Redis List，TTL 24h 兜底）"""
+        return f"live_steps:{session_id}"
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(

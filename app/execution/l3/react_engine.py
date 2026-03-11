@@ -46,6 +46,8 @@ from app.execution.schemas import ExecutionResult
 from app.execution.session_context import reset_session_id, set_session_id
 from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
+from app.cache.redis_client import redis_client
+from app.execution.l3.live_steps_writer import LiveStepsWriter
 from app.execution.plugin_context import PluginCommandContext, get_plugin_context
 from app.streaming.events import SSEEvent
 from app.tools.registry import ToolRegistry
@@ -198,11 +200,12 @@ class L3ReActEngine:
         sid_token = set_session_id(session_id)
         try:
             ctx = self._build_context(intent_result)
+            writer = LiveStepsWriter(redis=redis_client, session_id=session_id)
             return await self.run(ctx, middlewares=[
                 TodoMiddleware(),
                 ContextUsageMiddleware(),
                 CompactionMiddleware(self),
-                StepCollectorMiddleware(),
+                StepCollectorMiddleware(live_steps_writer=writer),
             ])
         finally:
             reset_session_id(sid_token)
@@ -231,11 +234,12 @@ class L3ReActEngine:
         loop_task: asyncio.Task | None = None
         try:
             ctx = self._build_context(intent_result, event_emitter=emitter)
+            writer = LiveStepsWriter(redis=redis_client, session_id=session_id)
             middlewares: list[ReActMiddleware] = [
                 TodoMiddleware(),
                 ContextUsageMiddleware(),
                 CompactionMiddleware(self),
-                StepCollectorMiddleware(),
+                StepCollectorMiddleware(live_steps_writer=writer),
                 SSEToolEventMiddleware(),
             ]
 

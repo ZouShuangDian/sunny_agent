@@ -55,7 +55,11 @@ class ChatSession(Base):
     )
     turn_count: Mapped[int] = mapped_column(default=0, comment="对话轮次")
     status: Mapped[str] = mapped_column(
-        String(20), default="active", comment="状态: active / archived"
+        String(20), default="active", comment="状态: active / running / archived"
+    )
+    source: Mapped[str] = mapped_column(
+        String(20), default="chat", server_default="chat",
+        comment="来源: chat / async_task / cron",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"

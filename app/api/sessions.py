@@ -5,7 +5,8 @@
 所有查询从 PG 读取（source of truth），不涉及 Redis WorkingMemory。
 """
 
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 import structlog
@@ -39,6 +40,7 @@ class SessionItem(BaseModel):
     title: str | None
     turn_count: int
     status: str
+    source: str = "chat"
     created_at: datetime
     last_active_at: datetime
     project_id: str | None = None
@@ -80,6 +82,8 @@ class MessageItem(BaseModel):
 class MessageListResponse(BaseModel):
     session_id: str
     title: str | None
+    session_status: str                    # active / running / archived
+    source: str = "chat"                   # chat / async_task / cron
     messages: list[MessageItem]
     has_more: bool
 
@@ -133,7 +137,10 @@ async def list_sessions(
     """获取当前用户的历史会话列表"""
     # 基础条件：只看自己的会话
     base_where = [ChatSession.user_id == user.id]
-    if status != "all":
+    if status == "active":
+        # active 筛选同时包含 running（执行中的会话也应在列表中展示）
+        base_where.append(ChatSession.status.in_(["active", "running"]))
+    elif status != "all":
         base_where.append(ChatSession.status == status)
 
     # 查询列表
@@ -159,6 +166,7 @@ async def list_sessions(
             title=s.title,
             turn_count=s.turn_count,
             status=s.status,
+            source=s.source,
             created_at=s.created_at,
             last_active_at=s.last_active_at,
             project_id=str(s.project_id) if s.project_id else None,
@@ -180,6 +188,7 @@ async def get_session_messages(
     before: str | None = Query(None, description="游标：返回此 message_id 之前的消息"),
     limit: int = Query(50, ge=1, le=100, description="返回数量（上限 100）"),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """获取指定会话的消息内容（cursor 分页，跳过 compaction 节点）"""
@@ -261,9 +270,37 @@ async def get_session_messages(
         for r in rows
     ]
 
+    # running 状态且首页请求时，从 Redis 读取实时步骤，
+    # 构造临时 assistant MessageItem 挂载 l3_steps，保持与 active 状态格式一致
+    if session_row.status == "running" and before is None:
+        try:
+            raw = await redis.lrange(RedisKeys.live_steps(session_id), 0, -1)
+            if raw:
+                live_step_items = []
+                for s in raw:
+                    item = json.loads(s)
+                    # 与 PG 路径对齐：截断超长 content
+                    content = item.get("content") or ""
+                    if len(content) > L3_STEP_CONTENT_MAX_LEN:
+                        item["content"] = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
+                    live_step_items.append(L3StepItem(**item))
+                # 构造临时 assistant 消息，格式与完成后的 assistant 消息一致
+                messages.append(MessageItem(
+                    message_id=f"live-{session_id}",
+                    role="assistant",
+                    content="",
+                    created_at=datetime.now(timezone.utc),
+                    tool_calls=None,
+                    l3_steps=live_step_items,
+                ))
+        except Exception as e:
+            log.warning("读取 live_steps 失败", session_id=session_id, error=str(e))
+
     return ok(data=MessageListResponse(
         session_id=session_id,
         title=session_row.title,
+        session_status=session_row.status,
+        source=session_row.source,
         messages=messages,
         has_more=len(rows) == limit,
     ))
@@ -296,10 +333,11 @@ async def archive_session(
     )
     await db.commit()
 
-    # 清理 Redis 中该会话的缓存（WorkingMemory + Todo）
+    # 清理 Redis 中该会话的缓存（WorkingMemory + Todo + live_steps）
     await redis.delete(
         RedisKeys.working_memory(session_id),
         RedisKeys.todo(session_id),
+        RedisKeys.live_steps(session_id),
     )
 
     log.info("归档会话", session_id=session_id, usernumb=user.usernumb)
