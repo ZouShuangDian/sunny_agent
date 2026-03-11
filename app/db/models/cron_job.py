@@ -63,7 +63,7 @@ class CronJob(Base):
     )
     last_status: Mapped[str | None] = mapped_column(
         String(16), nullable=True,
-        comment="上次执行结果：completed / failed / timeout",
+        comment="上次执行状态：running / completed / failed / timeout",
     )
     last_error: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="上次失败原因"

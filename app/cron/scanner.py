@@ -59,6 +59,8 @@ async def scan_and_enqueue(ctx: dict) -> None:
                         next_run_at=real_next,
                         last_run_at=now,
                         run_count=CronJob.run_count + 1,
+                        last_status="running",
+                        last_error=None,
                     )
                 )
 
