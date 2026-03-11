@@ -3,7 +3,7 @@ set -e
 
 echo "Starting application..."
 echo "Step 1: Running database migrations..."
-alembic upgrade head
+alembic upgrade heads
 
 echo "Step 2: Starting main application..."
 python app/main.py
