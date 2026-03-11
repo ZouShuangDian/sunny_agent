@@ -1,0 +1,1949 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SunnyAgent - Plugin Management</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================
+   Design System: Flat Blue-White
+   Primary:    #2563EB
+   Secondary:  #3B82F6
+   Accent:     #1D4ED8
+   Background: #F8FAFC
+   Surface:    #FFFFFF
+   Text:       #1E293B
+   Muted:      #64748B
+   Border:     #E2E8F0
+   ============================================ */
+
+*, *::before, *::after {
+  margin: 0; padding: 0; box-sizing: border-box;
+}
+
+:root {
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --primary-light: #EFF6FF;
+  --primary-subtle: #DBEAFE;
+  --secondary: #3B82F6;
+  --bg: #F8FAFC;
+  --surface: #FFFFFF;
+  --text: #1E293B;
+  --text-secondary: #475569;
+  --text-muted: #64748B;
+  --border: #E2E8F0;
+  --border-hover: #CBD5E1;
+  --danger: #DC2626;
+  --danger-bg: #FEF2F2;
+  --danger-border: #FECACA;
+  --success: #16A34A;
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --transition: 150ms ease;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  font-size: 14px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---- Layout ---- */
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+/* ---- Sidebar ---- */
+.sidebar {
+  width: 260px;
+  min-width: 260px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+
+/* Global nav */
+.sidebar-nav {
+  padding: 12px 12px 0;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+  font-size: 14px;
+}
+
+.nav-item:hover {
+  background: var(--primary-light);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--primary-light);
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+/* Plugin section */
+.plugin-section {
+  padding: 16px 12px 12px;
+}
+
+.plugin-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 8px;
+}
+
+.plugin-section-header span {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  position: relative;
+}
+
+.add-btn:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+/* Plugin list items */
+.plugin-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+  position: relative;
+}
+
+.plugin-item:hover {
+  background: var(--primary-light);
+}
+
+.plugin-item.active {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.plugin-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-subtle);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.plugin-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.plugin-name {
+  font-size: 14px;
+  font-weight: 500;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.badge-uploaded {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.badge-disabled {
+  background: #F1F5F9;
+  color: var(--text-muted);
+}
+
+.command-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.plugin-icon-disabled {
+  background: #F1F5F9;
+  color: var(--text-muted);
+}
+
+/* Sub nav (Commands / Skills) */
+.plugin-subnav {
+  padding-left: 50px;
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 200ms ease;
+}
+
+.plugin-item.active + .plugin-subnav {
+  max-height: 200px;
+}
+
+.subnav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+
+.subnav-item:hover {
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.subnav-item.active {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.subnav-item svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- Main Content ---- */
+.main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+/* Detail header */
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.detail-title {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn:hover {
+  border-color: var(--border-hover);
+  background: var(--bg);
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+/* Toggle switch */
+.toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 12px;
+  transition: background var(--transition);
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 20px;
+  height: 20px;
+  background: white;
+  border-radius: 50%;
+  transition: transform var(--transition);
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--primary);
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+/* More menu btn */
+.more-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: all var(--transition);
+  position: relative;
+}
+
+.more-btn:hover {
+  background: var(--primary-light);
+  color: var(--text);
+}
+
+/* More menu dropdown */
+.more-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  min-width: 160px;
+  z-index: 100;
+  padding: 4px;
+}
+
+.more-dropdown.show {
+  display: block;
+}
+
+.more-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+
+.more-dropdown-item:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.more-dropdown-item.danger {
+  color: var(--danger);
+}
+
+.more-dropdown-item.danger:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.more-dropdown-item svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Detail body */
+.detail-body {
+  padding: 24px 32px;
+}
+
+/* Meta info */
+.meta-row {
+  display: flex;
+  gap: 40px;
+  margin-bottom: 20px;
+}
+
+.meta-item label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.meta-item span {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.description-section {
+  margin-bottom: 24px;
+}
+
+.description-section label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.description-section p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+.tab-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+/* Command cards grid */
+.command-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.command-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  transition: all var(--transition);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.command-card:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.command-card .card-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  flex: 1;
+}
+
+.command-card .card-cmd {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-family: 'Fira Code', monospace;
+}
+
+/* Try asking section */
+.try-asking {
+  margin-top: 8px;
+}
+
+.try-asking h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.try-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.try-item:first-of-type {
+  border-top: 1px solid var(--border);
+}
+
+.try-item:hover {
+  background: var(--primary-light);
+}
+
+.try-item span {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.try-item svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+}
+
+/* Skills tab content */
+.skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--primary-light);
+  color: var(--primary);
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.skill-tag svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- Dropdown Menu ---- */
+.dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  min-width: 200px;
+  z-index: 100;
+  padding: 4px;
+}
+
+.dropdown.show {
+  display: block;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+
+.dropdown-item:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.dropdown-item svg {
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.dropdown-item:hover svg {
+  color: var(--primary);
+}
+
+/* ---- Modal (Browse / Upload) ---- */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.4);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-overlay.show {
+  display: flex;
+}
+
+.modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 720px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 24px 24px 0;
+}
+
+.modal-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.modal-header p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.modal-close {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+
+.modal-close:hover {
+  background: var(--primary-light);
+  color: var(--text);
+}
+
+/* Browse modal tabs + search */
+.modal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px 0;
+}
+
+.modal-tabs {
+  display: flex;
+  gap: 0;
+}
+
+.modal-tab {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+}
+
+.modal-tab:hover {
+  color: var(--text);
+}
+
+.modal-tab.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  width: 200px;
+  transition: border-color var(--transition);
+}
+
+.search-box:focus-within {
+  border-color: var(--primary);
+}
+
+.search-box svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.search-box input {
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  width: 100%;
+  color: var(--text);
+}
+
+.search-box input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Browse modal body */
+.modal-body {
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.plugin-browse-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.browse-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.browse-card:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.browse-card .browse-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  background: var(--primary-subtle);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.browse-card .browse-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.browse-card .browse-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-card .browse-name {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browse-card .browse-version {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.browse-card .browse-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.browse-card .manage-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+
+.browse-card .manage-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ---- Upload Modal ---- */
+.modal-upload {
+  max-width: 480px;
+}
+
+.upload-warning {
+  margin: 16px 24px 0;
+  padding: 12px 16px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--danger);
+  line-height: 1.5;
+}
+
+.upload-zone {
+  margin: 20px 24px;
+  padding: 40px 20px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.upload-zone:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.upload-zone svg {
+  width: 32px;
+  height: 32px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.upload-zone p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.upload-zone .btn {
+  font-size: 13px;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 24px 24px;
+}
+
+/* ---- Tab content visibility ---- */
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* ---- Skills Management View (3-column) ---- */
+.skills-view {
+  display: none;
+  flex: 1;
+}
+
+.skills-view.active {
+  display: flex;
+}
+
+/* Skills list panel (middle column) */
+.skills-list-panel {
+  width: 300px;
+  min-width: 300px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.skills-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.skills-list-header h2 {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.skills-list-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.skills-list-header-actions button {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: all var(--transition);
+}
+
+.skills-list-header-actions button:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+/* Skill group */
+.skill-group {
+  padding: 8px 12px 0;
+}
+
+.skill-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.skill-group-header svg {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--transition);
+}
+
+.skill-group-header.collapsed svg {
+  transform: rotate(-90deg);
+}
+
+/* Skill list item */
+.skill-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 1px 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.skill-list-item:hover {
+  background: var(--primary-light);
+  color: var(--text);
+}
+
+.skill-list-item.active {
+  background: var(--primary-light);
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.skill-list-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.skill-list-item.active svg {
+  color: var(--primary);
+}
+
+/* Expandable skill with chevron */
+.skill-list-item .chevron {
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+}
+
+.skill-list-item.expanded .chevron {
+  transform: rotate(90deg);
+}
+
+/* Skill sub-files */
+.skill-files {
+  padding-left: 52px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 200ms ease;
+}
+
+.skill-files.expanded {
+  max-height: 100px;
+}
+
+.skill-file-item {
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+/* Skill detail panel (right column) */
+.skill-detail-panel {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.skill-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.skill-detail-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.skill-detail-body {
+  padding: 24px 32px;
+}
+
+.skill-meta-item {
+  margin-bottom: 20px;
+}
+
+.skill-meta-item label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.skill-meta-item .label-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.skill-meta-item .label-with-icon svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+}
+
+.skill-meta-item span,
+.skill-meta-item p {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.skill-meta-item p {
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* SKILL.md content preview */
+.skill-content-preview {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.skill-content-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.skill-content-toolbar button {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: all var(--transition);
+}
+
+.skill-content-toolbar button:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.skill-content-toolbar button.active {
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.skill-content-body {
+  padding: 24px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.skill-content-body h2 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 12px;
+}
+
+.skill-content-body h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+}
+
+.skill-content-body ul {
+  padding-left: 20px;
+  margin: 8px 0;
+}
+
+.skill-content-body li {
+  margin: 6px 0;
+  color: var(--text-secondary);
+}
+
+.skill-content-body .color-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-right: 4px;
+  border: 1px solid var(--border);
+}
+
+.skill-content-body code {
+  padding: 2px 6px;
+  background: var(--primary-light);
+  border-radius: 3px;
+  font-size: 13px;
+  color: var(--primary);
+  font-family: 'Fira Code', monospace;
+}
+
+/* Divider line in skill detail */
+.skill-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 20px 0;
+}
+
+/* Plugin view wrapper */
+.plugin-view {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.plugin-view.hidden {
+  display: none;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 1024px) {
+  .command-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 200px;
+    min-width: 200px;
+  }
+  .command-grid {
+    grid-template-columns: 1fr;
+  }
+  .plugin-browse-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ========== Sidebar ========== -->
+  <aside class="sidebar">
+
+    <!-- Global nav -->
+    <nav class="sidebar-nav">
+      <div class="nav-item" id="navSkills" onclick="showSkillsView()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+        Skills
+      </div>
+    </nav>
+
+    <!-- Plugin section -->
+    <div class="plugin-section">
+      <div class="plugin-section-header">
+        <span>Personal plugins</span>
+        <button class="add-btn" id="addBtn" title="Add plugin">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+          <!-- Dropdown -->
+          <div class="dropdown" id="addDropdown">
+            <div class="dropdown-item" onclick="openBrowseModal()">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+              Browse plugins
+            </div>
+            <div class="dropdown-item" onclick="openUploadModal()">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/></svg>
+              Upload plugin
+            </div>
+          </div>
+        </button>
+      </div>
+
+      <!-- Plugin: Data (active) -->
+      <div class="plugin-item active" onclick="selectPlugin(this)">
+        <div class="plugin-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75"/></svg>
+        </div>
+        <span class="plugin-name">Data</span>
+        <span class="command-count">6 commands</span>
+      </div>
+      <div class="plugin-subnav" style="max-height: 200px;">
+        <div class="subnav-item active">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>
+          Commands
+        </div>
+        <div class="subnav-item">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+          Skills
+        </div>
+      </div>
+
+      <!-- Plugin: Customer support -->
+      <div class="plugin-item" onclick="selectPlugin(this)">
+        <div class="plugin-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155"/></svg>
+        </div>
+        <span class="plugin-name">Customer support</span>
+        <span class="command-count">3 commands</span>
+      </div>
+
+      <!-- Plugin: Human resources (disabled example) -->
+      <div class="plugin-item" onclick="selectPlugin(this)">
+        <div class="plugin-icon plugin-icon-disabled">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"/></svg>
+        </div>
+        <span class="plugin-name" style="color: var(--text-muted);">Human resources</span>
+        <span class="badge badge-disabled">Disabled</span>
+        <span class="command-count">4 commands</span>
+      </div>
+
+      <!-- Plugin: Manufacturing QC (Uploaded) -->
+      <div class="plugin-item" onclick="selectPlugin(this)">
+        <div class="plugin-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085"/></svg>
+        </div>
+        <span class="plugin-name">Manufacturing QC</span>
+        <span class="badge badge-uploaded">Uploaded</span>
+        <span class="command-count">2 commands</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ========== Skills Management View (3-column) ========== -->
+  <div class="skills-view" id="skillsView">
+    <!-- Middle: Skills list -->
+    <div class="skills-list-panel">
+      <div class="skills-list-header">
+        <h2>Skills</h2>
+        <div class="skills-list-header-actions">
+          <button title="Search">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+          </button>
+          <button title="Add skill" onclick="openUploadSkillModal()">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- My skills group -->
+      <div class="skill-group">
+        <div class="skill-group-header" onclick="toggleSkillGroup(this)">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
+          My skills
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'qms-analysis')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          qms-analysis
+        </div>
+      </div>
+
+      <!-- Examples group -->
+      <div class="skill-group">
+        <div class="skill-group-header" onclick="toggleSkillGroup(this)">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5"/></svg>
+          Examples
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'skill-creator')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          skill-creator
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'algorithmic-art')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          algorithmic-art
+        </div>
+
+        <!-- brand-guidelines (expanded with files) -->
+        <div class="skill-list-item active expanded" onclick="selectSkill(this, 'brand-guidelines')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          brand-guidelines
+          <svg class="chevron" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5"/></svg>
+        </div>
+        <div class="skill-files expanded">
+          <div class="skill-file-item">SKILL.md</div>
+          <div class="skill-file-item">LICENSE.txt</div>
+        </div>
+
+        <div class="skill-list-item" onclick="selectSkill(this, 'canvas-design')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          canvas-design
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'doc-coauthoring')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          doc-coauthoring
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'internal-comms')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          internal-comms
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'mcp-builder')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          mcp-builder
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'slack-gif-creator')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          slack-gif-creator
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'theme-factory')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          theme-factory
+        </div>
+        <div class="skill-list-item" onclick="selectSkill(this, 'web-artifacts-builder')">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"/></svg>
+          web-artifacts-builder
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Skill detail -->
+    <div class="skill-detail-panel">
+      <div class="skill-detail-header">
+        <h2>brand-guidelines</h2>
+        <div class="detail-actions">
+          <label class="toggle">
+            <input type="checkbox">
+            <span class="toggle-slider"></span>
+          </label>
+          <button class="more-btn" onclick="toggleMoreMenu(this, event)">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
+            <div class="more-dropdown">
+              <div class="more-dropdown-item danger">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>
+                删除技能
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <div class="skill-detail-body">
+        <div class="skill-meta-item">
+          <label>Added by</label>
+          <span>SunnyAgent</span>
+        </div>
+
+        <div class="skill-meta-item">
+          <div class="label-with-icon">
+            <label>Description</label>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z"/></svg>
+          </div>
+          <p>Applies brand colors and typography to artifacts. Use it when brand colors or style guidelines, visual formatting, or company design standards apply.</p>
+        </div>
+
+        <hr class="skill-divider">
+
+        <!-- SKILL.md content preview -->
+        <div class="skill-content-preview">
+          <div class="skill-content-toolbar">
+            <button class="active" title="Preview">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>
+            </button>
+            <button title="Source">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5"/></svg>
+            </button>
+          </div>
+          <div class="skill-content-body">
+            <h2>Brand Guidelines</h2>
+
+            <h3>Colors</h3>
+            <p><strong>Main Colors:</strong></p>
+            <ul>
+              <li><span class="color-swatch" style="background:#141413"></span> Dark: <code>#141413</code> - Primary text and dark backgrounds</li>
+              <li><span class="color-swatch" style="background:#faf9f5"></span> Light: <code>#faf9f5</code> - Light backgrounds and text on dark</li>
+              <li><span class="color-swatch" style="background:#b0aea5"></span> Mid Gray: <code>#b0aea5</code> - Secondary elements</li>
+              <li><span class="color-swatch" style="background:#e8e6dc"></span> Light Gray: <code>#e8e6dc</code> - Subtle backgrounds</li>
+            </ul>
+
+            <p><strong>Accent Colors:</strong></p>
+            <ul>
+              <li><span class="color-swatch" style="background:#d97757"></span> Orange: <code>#d97757</code> - Primary accent</li>
+              <li><span class="color-swatch" style="background:#6a9bcc"></span> Blue: <code>#6a9bcc</code> - Secondary accent</li>
+              <li><span class="color-swatch" style="background:#788c5d"></span> Green: <code>#788c5d</code> - Tertiary accent</li>
+            </ul>
+
+            <h3>Typography</h3>
+            <ul>
+              <li>Headings: Inter, 600-700 weight</li>
+              <li>Body: Inter, 400 weight, 1.6 line-height</li>
+              <li>Code: Fira Code, 400 weight</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Plugin Detail View ========== -->
+  <main class="main plugin-view" id="pluginView">
+    <div class="detail-header">
+      <h2 class="detail-title">Data</h2>
+      <div class="detail-actions">
+        <label class="toggle">
+          <input type="checkbox" checked>
+          <span class="toggle-slider"></span>
+        </label>
+        <button class="more-btn" onclick="toggleMoreMenu(this, event)">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
+          <div class="more-dropdown">
+            <div class="more-dropdown-item danger">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>
+              删除插件
+            </div>
+          </div>
+        </button>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <!-- Meta -->
+      <div class="meta-row">
+        <div class="meta-item">
+          <label>Version</label>
+          <span>1.0.0</span>
+        </div>
+        <div class="meta-item">
+          <label>Author</label>
+          <span>SunnyAgent</span>
+        </div>
+      </div>
+
+      <!-- Description -->
+      <div class="description-section">
+        <label>Description</label>
+        <p>Write SQL, explore datasets, and generate insights faster. Build visualizations and dashboards, and turn raw data into clear stories for stakeholders.</p>
+      </div>
+
+      <!-- Tabs: Commands / Skills -->
+      <div class="tabs">
+        <button class="tab active" onclick="switchTab('commands', this)">Commands</button>
+        <button class="tab" onclick="switchTab('skills', this)">Skills</button>
+      </div>
+
+      <!-- Commands Tab -->
+      <div class="tab-content active" id="tab-commands">
+        <p class="tab-hint">Use these shortcuts to trigger an entire workflow by name. Search your list of commands at any time by typing / in the chat window.</p>
+
+        <div class="command-grid">
+          <div class="command-card">
+            <span class="card-desc">Answer data questions -- from quick lookups to full analyses</span>
+            <span class="card-cmd">/data:analyze</span>
+          </div>
+          <div class="command-card">
+            <span class="card-desc">Build an interactive HTML dashboard with charts, filters, and tables</span>
+            <span class="card-cmd">/data:build-dashboard</span>
+          </div>
+          <div class="command-card">
+            <span class="card-desc">Create publication-quality visualizations with Python</span>
+            <span class="card-cmd">/data:create-viz</span>
+          </div>
+          <div class="command-card">
+            <span class="card-desc">Profile and explore a dataset to understand its shape, quality, and patterns</span>
+            <span class="card-cmd">/data:explore-data</span>
+          </div>
+          <div class="command-card">
+            <span class="card-desc">QA an analysis before sharing -- methodology, accuracy, and bias checks</span>
+            <span class="card-cmd">/data:validate</span>
+          </div>
+          <div class="command-card">
+            <span class="card-desc">Write optimized SQL for your dialect with best practices</span>
+            <span class="card-cmd">/data:write-query</span>
+          </div>
+        </div>
+
+        <!-- Try asking -->
+        <div class="try-asking">
+          <h3>Try asking...</h3>
+          <div class="try-item">
+            <span>Explore and profile a dataset</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+          </div>
+          <div class="try-item">
+            <span>Build an interactive dashboard from my data</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+          </div>
+          <div class="try-item">
+            <span>Write an optimized SQL query</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+          </div>
+          <div class="try-item">
+            <span>Map out my data warehouse schema and tables</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+          </div>
+          <div class="try-item">
+            <span>Run a statistical analysis on my dataset</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skills Tab -->
+      <div class="tab-content" id="tab-skills">
+        <p class="tab-hint">Capability skills available within this plugin. These are automatically invoked by the AI during command execution.</p>
+        <div class="skill-tags">
+          <span class="skill-tag">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+            data-context-extractor
+          </span>
+          <span class="skill-tag">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+            data-exploration
+          </span>
+          <span class="skill-tag">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+            chart-builder
+          </span>
+          <span class="skill-tag">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+            sql-optimizer
+          </span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ========== Browse Plugins Modal ========== -->
+<div class="modal-overlay" id="browseModal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <h2>Browse plugins</h2>
+        <p>Extend how SunnyAgent performs tasks with ready-to-use workflows. Customize plugins for your tools, data, and best practices.</p>
+      </div>
+      <button class="modal-close" onclick="closeBrowseModal()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-toolbar">
+      <div class="modal-tabs">
+        <button class="modal-tab active">Preset</button>
+        <button class="modal-tab">Uploaded</button>
+      </div>
+      <div class="search-box">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+        <input type="text" placeholder="Search">
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="plugin-browse-grid">
+        <div class="browse-card">
+          <div class="browse-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375"/></svg>
+          </div>
+          <div class="browse-info">
+            <div class="browse-name">Data <span class="browse-version">1.0.0</span></div>
+            <div class="browse-desc">Write SQL, explore datasets, and generate insights faster.</div>
+          </div>
+          <button class="manage-btn">Manage</button>
+        </div>
+        <div class="browse-card">
+          <div class="browse-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155"/></svg>
+          </div>
+          <div class="browse-info">
+            <div class="browse-name">Customer support <span class="browse-version">1.0.0</span></div>
+            <div class="browse-desc">Handle customer inquiries, track issues, and resolve support tickets efficiently.</div>
+          </div>
+          <button class="manage-btn">Manage</button>
+        </div>
+        <div class="browse-card">
+          <div class="browse-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"/></svg>
+          </div>
+          <div class="browse-info">
+            <div class="browse-name">Human resources <span class="browse-version">1.0.0</span></div>
+            <div class="browse-desc">Manage employee onboarding, performance reviews, and HR workflows.</div>
+          </div>
+          <button class="manage-btn">Manage</button>
+        </div>
+        <div class="browse-card">
+          <div class="browse-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 1 1-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 0 0 4.486-6.336l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085"/></svg>
+          </div>
+          <div class="browse-info">
+            <div class="browse-name">Manufacturing QC <span class="browse-version">0.1.0</span></div>
+            <div class="browse-desc">Quality control analysis and reporting for manufacturing processes.</div>
+          </div>
+          <button class="manage-btn">Manage</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Upload Modal ========== -->
+<div class="modal-overlay" id="uploadModal">
+  <div class="modal modal-upload">
+    <div class="modal-header">
+      <h2>Upload local plugin</h2>
+      <button class="modal-close" onclick="closeUploadModal()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="upload-warning">
+      请确保您信任该插件后再安装使用。上传的插件不受 SunnyAgent 控制，SunnyAgent 无法验证其是否按预期工作。
+    </div>
+    <div class="upload-zone">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+      <p>Drag and drop or click to upload</p>
+      <button class="btn">Browse files</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeUploadModal()">Cancel</button>
+      <button class="btn btn-primary">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Skill Modal -->
+<div class="modal-overlay" id="uploadSkillModal">
+  <div class="modal modal-upload">
+    <div class="modal-header">
+      <h2>Upload skill</h2>
+      <button class="modal-close" onclick="closeUploadSkillModal()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="20" height="20"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="upload-warning">
+      Skill 目录必须包含 SKILL.md 文件作为入口描述。可选包含 scripts/ 目录用于扩展能力。上传后 Skill 默认启用，可随时在 Skills 列表中停用。
+    </div>
+    <div class="upload-zone">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+      <p>Drag and drop or click to upload</p>
+      <span style="font-size: 12px; color: #94A3B8; margin-top: 4px;">支持 .zip 格式，目录需包含 SKILL.md</span>
+      <button class="btn" style="margin-top: 8px;">Browse files</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeUploadSkillModal()">Cancel</button>
+      <button class="btn btn-primary">Upload</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Dropdown toggle
+const addBtn = document.getElementById('addBtn');
+const dropdown = document.getElementById('addDropdown');
+
+addBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  dropdown.classList.toggle('show');
+});
+
+document.addEventListener('click', () => {
+  dropdown.classList.remove('show');
+});
+
+dropdown.addEventListener('click', (e) => {
+  e.stopPropagation();
+});
+
+// View switching: Skills vs Plugin
+function showSkillsView() {
+  document.getElementById('skillsView').classList.add('active');
+  document.getElementById('pluginView').classList.add('hidden');
+  document.getElementById('navSkills').classList.add('active');
+  document.querySelectorAll('.plugin-item').forEach(i => i.classList.remove('active'));
+  document.querySelectorAll('.plugin-subnav').forEach(s => s.style.maxHeight = '0');
+}
+
+function showPluginView() {
+  document.getElementById('skillsView').classList.remove('active');
+  document.getElementById('pluginView').classList.remove('hidden');
+  document.getElementById('navSkills').classList.remove('active');
+}
+
+// Plugin selection
+function selectPlugin(el) {
+  showPluginView();
+  document.querySelectorAll('.plugin-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  // Collapse all subnavs
+  document.querySelectorAll('.plugin-subnav').forEach(s => s.style.maxHeight = '0');
+  // Expand next sibling if it's a subnav
+  const next = el.nextElementSibling;
+  if (next && next.classList.contains('plugin-subnav')) {
+    next.style.maxHeight = '200px';
+  }
+}
+
+// Skill selection
+function selectSkill(el, name) {
+  document.querySelectorAll('.skill-list-item').forEach(i => {
+    i.classList.remove('active');
+    i.classList.remove('expanded');
+  });
+  document.querySelectorAll('.skill-files').forEach(f => f.classList.remove('expanded'));
+  el.classList.add('active');
+  // Check if this skill has files (next sibling is skill-files)
+  const next = el.nextElementSibling;
+  if (next && next.classList.contains('skill-files')) {
+    el.classList.add('expanded');
+    next.classList.add('expanded');
+  }
+}
+
+// Toggle skill group collapse
+function toggleSkillGroup(header) {
+  header.classList.toggle('collapsed');
+  let next = header.nextElementSibling;
+  while (next && !next.classList.contains('skill-group-header')) {
+    if (header.classList.contains('collapsed')) {
+      next.style.display = 'none';
+    } else {
+      next.style.display = '';
+    }
+    next = next.nextElementSibling;
+  }
+}
+
+// Tabs
+function switchTab(tabId, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + tabId).classList.add('active');
+}
+
+// Modals
+function openBrowseModal() {
+  dropdown.classList.remove('show');
+  document.getElementById('browseModal').classList.add('show');
+}
+
+function closeBrowseModal() {
+  document.getElementById('browseModal').classList.remove('show');
+}
+
+function openUploadModal() {
+  dropdown.classList.remove('show');
+  document.getElementById('uploadModal').classList.add('show');
+}
+
+function closeUploadModal() {
+  document.getElementById('uploadModal').classList.remove('show');
+}
+
+function openUploadSkillModal() {
+  document.getElementById('uploadSkillModal').classList.add('show');
+}
+
+function closeUploadSkillModal() {
+  document.getElementById('uploadSkillModal').classList.remove('show');
+}
+
+// More menu toggle
+function toggleMoreMenu(btn, e) {
+  e.stopPropagation();
+  const dd = btn.querySelector('.more-dropdown');
+  // Close all other more-dropdowns first
+  document.querySelectorAll('.more-dropdown.show').forEach(d => {
+    if (d !== dd) d.classList.remove('show');
+  });
+  dd.classList.toggle('show');
+}
+
+document.addEventListener('click', () => {
+  document.querySelectorAll('.more-dropdown.show').forEach(d => d.classList.remove('show'));
+});
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.classList.remove('show');
+    }
+  });
+});
+
+// Modal tab switching
+document.querySelectorAll('.modal-tab').forEach(tab => {
+  tab.addEventListener('click', function() {
+    this.parentElement.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+    this.classList.add('active');
+  });
+});
+</script>
+
+</body>
+</html>
