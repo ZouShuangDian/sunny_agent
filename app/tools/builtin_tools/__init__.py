@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.tools.builtin_tools.ask_user import AskUserTool
 from app.tools.builtin_tools.bash_tool import BashTool
 from app.tools.builtin_tools.cron_create import CronCreateTool
+from app.tools.builtin_tools.cron_manage import CronManageTool
 from app.tools.builtin_tools.present_files import PresentFilesTool
 from app.tools.builtin_tools.read_file import ReadFileTool
 from app.tools.builtin_tools.str_replace_file import StrReplaceFileTool
@@ -45,5 +46,6 @@ def create_builtin_registry() -> ToolRegistry:
 
     # 定时任务工具（tier=L3）
     registry.register(CronCreateTool())
+    registry.register(CronManageTool())
 
     return registry
