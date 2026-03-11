@@ -139,6 +139,7 @@ from app.api.users import router as users_router
 from app.api.roles import router as roles_router
 from app.api.sessions import router as sessions_router
 from app.api.skills import router as skills_router
+from app.api.cron_jobs import router as cron_jobs_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
@@ -152,6 +153,7 @@ app.include_router(sessions_router)
 app.include_router(users_router)
 app.include_router(roles_router)
 app.include_router(sessions_router)
+app.include_router(cron_jobs_router)
 
 
 if __name__ == "__main__":

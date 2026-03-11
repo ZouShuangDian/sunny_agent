@@ -11,6 +11,7 @@ from app.db.models.plugin import Plugin, PluginCommand
 from app.db.models.data_scope import DataScopePolicy
 from app.db.models.project import Project
 from app.db.models.file import File
+from app.db.models.cron_job import CronJob
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
@@ -19,4 +20,5 @@ __all__ = [
     "Plugin", "PluginCommand",
     "DataScopePolicy",
     "Project", "File",
+    "CronJob",
 ]

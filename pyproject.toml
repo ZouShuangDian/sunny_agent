@@ -25,8 +25,12 @@ dependencies = [
     "json-repair (>=0.25,<1.0) ; python_version >= \"3.11\" and python_version < \"4.0\"",
     "prometheus-client (>=0.24.1,<0.25.0)",
     "httpx (>=0.28.1,<0.29.0)",
-    "prompt-toolkit (>=3.0.52,<4.0.0)"
+    "prompt-toolkit (>=3.0.52,<4.0.0)",
+    "croniter (>=2.0,<3.0)",
 ]
+# ⚠️ arq>=0.26（Worker 进程依赖）未列入上方 dependencies：
+# arq 0.27 要求 redis<6，与本项目 redis>=7.1 存在声明冲突（运行时兼容）。
+# 安装方式：pip install arq --no-deps（Dockerfile / CI 脚本中执行）
 
 [tool.poetry]
 package-mode = false

@@ -94,6 +94,17 @@ class Settings(BaseSettings):
     OUTPUT_VALIDATOR_ENABLED: bool = False        # 是否启用输出校验器（全局开关）
     OUTPUT_VALIDATOR_HALLUCINATION: bool = False  # 是否启用幻觉检测（额外 LLM 调用）
 
+    # ── arq Worker ──
+    ARQ_QUEUE_NAME: str = "sunny:queue"
+    ARQ_MAX_JOBS: int = 10               # 单实例最大并发任务数
+    ARQ_JOB_TIMEOUT: int = 600           # 单任务超时（秒）
+    ARQ_MAX_TRIES: int = 1               # 不自动重试（失败直接标记 failed）
+
+    # ── Cron 调度 ──
+    MAX_CRON_JOBS_PER_USER: int = 20     # 单用户最大定时任务数
+    CRON_SCAN_INTERVAL: int = 1          # Scanner 扫描间隔（分钟），默认每分钟
+    CRON_MIN_INTERVAL_MINUTES: int = 30  # 定时任务最小触发间隔（分钟），防止资源滥用
+
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表
 
