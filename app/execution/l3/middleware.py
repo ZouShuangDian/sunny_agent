@@ -82,8 +82,9 @@ class TodoMiddleware:
             f"{goal_line}"
             f"当前 Todo 列表（自动同步）：\n"
             f"```json\n{json.dumps(todos, ensure_ascii=False, indent=2)}\n```\n"
-            f"⚠️ 重要：若准备给出最终回答，必须先调用 `todo_write` 将所有已完成任务标记为 `completed`，"
-            f"不可在 in_progress 或 pending 状态下直接结束。\n"
+            f"⚠️ 严格要求：上方列表中仍有 pending 或 in_progress 的任务，"
+            f"你必须继续逐步执行，禁止跳过未完成的任务直接给出最终回答。"
+            f"只有当所有任务都实际完成并标记为 completed 后，才可输出最终回答。\n"
             f"<!-- todo-reminder-end -->"
         )
         ctx.messages[0] = {"role": "system", "content": base + block}

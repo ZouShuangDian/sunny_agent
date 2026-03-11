@@ -43,7 +43,8 @@ from app.execution.l3.schemas import L3Config, ThinkResult
 from app.execution.l3.think_strategy import BatchThinkStrategy, StreamThinkStrategy, ThinkStrategy
 from app.execution.l3.thinker import Thinker
 from app.execution.schemas import ExecutionResult
-from app.execution.session_context import reset_session_id, set_session_id
+from app.execution.session_context import get_session_id, reset_session_id, set_session_id
+from app.execution.user_context import get_user_id
 from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
 from app.cache.redis_client import redis_client
@@ -519,6 +520,8 @@ class L3ReActEngine:
             user_input=intent_result.raw_input,
             user_goal=user_goal,
             max_iterations=self.config.max_iterations,
+            user_id=get_user_id() or "",
+            session_id=get_session_id() or "",
         )
 
         plugin_ctx = get_plugin_context()

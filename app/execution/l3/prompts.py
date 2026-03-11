@@ -56,10 +56,10 @@ _L3_REACT_TEMPLATE = """\
 
 1. **开始前**：创建完整任务清单，每项 status 设为 `pending`
 2. **开始某步**：立即标记为 `in_progress`（同时只允许一个处于此状态）
-3. **完成某步**：**立即**标记为 `completed`——禁止等到最后批量更新
-4. **不确定进度**：用 `todo_read` 查看当前状态，决定下一步
-5. **单步或纯查询**：无需创建 Todo，直接执行
-6. **给出最终回答前**：**一次性**调用 `todo_write`，在同一次调用中将所有剩余任务批量标记为 `completed`（此处允许批量更新）——禁止多次连续调用逐条收尾，一步完成后立即给出回答
+3. **完成某步**：**立即**标记为 `completed`。如果某步执行过程中顺带完成了其他步骤（如一次搜索覆盖了多个信息需求），可以在同一次 `todo_write` 调用中将这些步骤一起标记为 `completed`
+4. **禁止跳步**：必须实际执行每一项任务才能标记完成。**禁止未执行就标记 completed，禁止在仍有 pending 任务时直接给出最终回答**。只有当所有任务都已实际完成后，才可输出最终回答
+5. **不确定进度**：用 `todo_read` 查看当前状态，决定下一步
+6. **单步或纯查询**：无需创建 Todo，直接执行
 
 ## 行为准则
 
@@ -78,16 +78,25 @@ _L3_REACT_TEMPLATE = """\
 - 表格数据使用 Markdown 表格呈现
 - 分步骤说明时使用有序列表
 
+## 当前环境
+
+- 当前日期：{today}
+- 用户工号：{user_id}
+- 会话 ID：{session_id}
+- 文件输出目录：`/mnt/users/{user_id}/outputs/{session_id}/`（write_file / present_files 必须使用此路径）
+
 ## 当前任务
 
 用户问题：{user_input}
-{goal_line}当前日期：{today}"""
+{goal_line}"""
 
 
 def build_l3_system_prompt(
     user_input: str,
     user_goal: str | None = None,
     max_iterations: int = 10,
+    user_id: str = "",
+    session_id: str = "",
 ) -> str:
     """
     构建 L3 ReAct System Prompt。
@@ -96,6 +105,8 @@ def build_l3_system_prompt(
         user_input: 用户原始输入
         user_goal: 用户目标（来自 IntentResult.intent.user_goal）
         max_iterations: 最大推理步数（告知 LLM 合理规划步骤）
+        user_id: 当前用户工号（注入到 prompt 中，供 write_file 等工具使用）
+        session_id: 当前会话 ID（注入到 prompt 中，供 write_file 等工具使用）
     """
     today = date.today().strftime("%Y年%m月%d日")
     # user_goal == user_input 时省略"用户目标"行避免重复
@@ -107,4 +118,6 @@ def build_l3_system_prompt(
         goal_line=goal_line,
         today=today,
         max_iterations=max_iterations,
+        user_id=user_id,
+        session_id=session_id,
     )
