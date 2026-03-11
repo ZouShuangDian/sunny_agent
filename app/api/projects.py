@@ -83,47 +83,29 @@ def check_project_access(project: Project, user: AuthenticatedUser) -> None:
     """
     检查用户是否有权访问项目
     
-    权限规则：
-    - 超级管理员：拥有所有权限
+    权限规则（新）：
     - 项目所有者：完全权限
-    - 同公司用户：只读权限
-    - 其他用户：无权限
+    - 其他用户（包括超级管理员）：无权限
     
     Raises:
         HTTPException: 403 无权限
     """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 项目所有者拥有完全权限
-    if str(project.owner_id) == user.id:
-        return
-    
-    # 检查公司隔离（ABAC）
-    if project.company and project.company != user.company:
-        raise HTTPException(status_code=403, detail="无权访问其他公司的项目")
-    
-    # 同公司用户可以查看但不能修改
-    return
+    # 只有项目所有者可以访问
+    if str(project.owner_id) != user.id:
+        raise HTTPException(status_code=403, detail="无权访问此项目")
 
 
 def check_project_modify_permission(project: Project, user: AuthenticatedUser) -> None:
     """
     检查用户是否有权修改/删除项目
     
-    权限规则：
-    - 超级管理员：拥有所有权限
+    权限规则（新）：
     - 项目所有者：完全权限
-    - 其他用户：无权限
+    - 其他用户（包括超级管理员）：无权限
     
     Raises:
         HTTPException: 403 无权限
     """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
     # 只有项目所有者可以修改/删除
     if str(project.owner_id) != user.id:
         raise HTTPException(status_code=403, detail="无权修改或删除此项目")
@@ -239,20 +221,12 @@ async def list_projects(
     """
     获取项目列表（分页，按 updated_at DESC 排序）
     
-    权限规则：
-    - 超级管理员：查看所有项目
-    - 普通用户：只能查看自己创建或同公司的项目（ABAC 公司隔离）
+    权限规则（新）：
+    - 所有用户：只能查看自己创建的项目
     """
     try:
-        # 基础查询
-        query = select(Project)
-        
-        # 应用公司隔离过滤器（超级管理员除外）
-        if not is_super_admin(user):
-            # 用户只能看到自己创建的项目或同公司的项目
-            query = query.where(
-                (Project.owner_id == UUID(user.id))
-            )
+        # 基础查询 - 用户只能看到自己创建的项目
+        query = select(Project).where(Project.owner_id == UUID(user.id))
         
         # 统计总数
         count_query = query

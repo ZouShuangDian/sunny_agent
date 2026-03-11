@@ -139,11 +139,9 @@ async def get_project_or_404(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
-    # 检查访问权限（超级管理员除外）
-    if not is_super_admin(user):
-        # 检查是否是项目所有者
-        if str(project.owner_id) == user.id:
-            return project
+    # 检查访问权限（新）：只有项目所有者可以访问
+    if str(project.owner_id) != user.id:
+        raise HTTPException(status_code=403, detail="无权访问此项目")
     
     return project
 
@@ -197,28 +195,22 @@ def check_file_delete_permission(
     """
     检查用户是否有权删除文件
     
-    权限规则：
-    - 超级管理员：可以删除任何文件
-    - 项目所有者：可以删除项目内所有文件
-    - 文件上传者：可以删除自己上传的文件
-    - 其他用户：无权限
+    权限规则（新）：
+    - 项目内文件：只有项目所有者可以删除
+    - 个人文件：只有文件上传者可以删除
+    - 其他用户（包括超级管理员）：无权限
     
     Raises:
         HTTPException: 403 无权限
     """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 项目所有者可以删除项目内所有文件
-    if project and str(project.owner_id) == user.id:
-        return
-    
-    # 文件上传者可以删除自己的文件
-    if str(file_record.uploaded_by) == user.id:
-        return
-    
-    raise HTTPException(status_code=403, detail="无权删除此文件")
+    if project:
+        # 项目内文件：只有项目所有者可以删除
+        if str(project.owner_id) != user.id:
+            raise HTTPException(status_code=403, detail="无权删除此项目文件")
+    else:
+        # 个人文件：只有文件上传者可以删除
+        if str(file_record.uploaded_by) != user.id:
+            raise HTTPException(status_code=403, detail="无权删除此文件")
 
 
 def file_to_list_item(file_record: File) -> dict:
@@ -292,10 +284,9 @@ async def upload_file(
         # 验证项目存在性和访问权限
         project = await get_project_or_404(session, project_id, user)
 
-        # 检查用户是否有权上传（项目所有者或同公司）
-        if not is_super_admin(user):
-            if str(project.owner_id) != user.id:
-                raise HTTPException(status_code=403, detail="no permission to upload to this project")
+        # 检查用户是否有权上传（新）：只有项目所有者可以上传
+        if str(project.owner_id) != user.id:
+            raise HTTPException(status_code=403, detail="无权上传到此项目")
 
         # 解析标签
         tag_list = None

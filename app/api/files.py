@@ -99,40 +99,16 @@ async def check_file_access(
     """
     检查用户是否有权访问文件
     
-    权限规则：
-    - 超级管理员：可以访问任何文件
+    权限规则（新）：
     - 文件上传者：可以访问自己上传的文件
-    - 项目所有者：可以访问项目内的文件
-    - 同公司用户：可以访问同公司文件
-    - 其他用户：无权限
+    - 其他用户（包括超级管理员、项目所有者）：无权限
     
     Raises:
         HTTPException: 403 无权限
     """
-    # 超级管理员绕过所有检查
-    if is_super_admin(user):
-        return
-    
-    # 文件上传者可以访问自己的文件
-    if str(file_record.uploaded_by) == user.id:
-        return
-    
-    # 检查文件所属项目
-    if file_record.project_id:
-        stmt = select(Project).where(Project.id == file_record.project_id)
-        result = await session.execute(stmt)
-        project = result.scalar_one_or_none()
-        
-        if project:
-            # 项目所有者可以访问
-            if str(project.owner_id) == user.id:
-                return
-    
-    # 检查公司隔离（通过上传者）
-    # 这里简化处理，实际可能需要查询用户表
-    # 暂时只允许上传者、项目所有者、管理员访问
-    
-    raise HTTPException(status_code=403, detail="无权访问此文件")
+    # 只有文件上传者可以访问自己的文件
+    if str(file_record.uploaded_by) != user.id:
+        raise HTTPException(status_code=403, detail="无权访问此文件")
 
 
 # ============ API 端点 ============
