@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import structlog
 from arq.connections import ArqRedis
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 
 from app.config import get_settings
 from app.cron.utils import calc_next_run
@@ -50,6 +50,16 @@ async def scan_and_enqueue(ctx: dict) -> None:
             rows = result.all()
 
             for job, user_id in rows:
+                # 到期检查：expires_at 已过则自动禁用，不入队执行
+                if job.expires_at and job.expires_at <= now:
+                    await session.execute(
+                        update(CronJob)
+                        .where(CronJob.id == job.id)
+                        .values(enabled=False)
+                    )
+                    log.info("定时任务已到期，自动禁用", cron_job_id=str(job.id), name=job.name)
+                    continue
+
                 real_next = calc_next_run(job.cron_expr, job.timezone, after=now)
 
                 # SQL 表达式原子 +1（而非 Python 级 +=1，避免并发丢计数）

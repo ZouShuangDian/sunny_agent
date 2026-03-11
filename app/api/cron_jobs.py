@@ -10,6 +10,7 @@ DELETE /api/cron-jobs/{id}     删除
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -39,6 +40,7 @@ class CronJobCreate(BaseModel):
     timezone: str = Field("Asia/Shanghai", max_length=50)
     input_text: str = Field(..., description="投喂给 Agent 的用户消息")
     session_id: str | None = Field(None, max_length=64, description="结果推送到哪个会话")
+    expires_at: datetime | None = Field(None, description="到期日期（可选），到期后自动禁用")
 
 
 class CronJobUpdate(BaseModel):
@@ -50,6 +52,7 @@ class CronJobUpdate(BaseModel):
     input_text: str | None = None
     session_id: str | None = None
     enabled: bool | None = None
+    expires_at: datetime | None = None
 
 
 def _serialize_job(job) -> dict[str, Any]:
@@ -64,6 +67,7 @@ def _serialize_job(job) -> dict[str, Any]:
         "input_text": job.input_text,
         "session_id": job.session_id,
         "enabled": job.enabled,
+        "expires_at": job.expires_at.isoformat() if job.expires_at else None,
         "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
         "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
         "last_status": job.last_status,
@@ -95,6 +99,7 @@ async def create_cron_job(
             description=body.description,
             timezone_str=body.timezone,
             session_id=body.session_id,
+            expires_at=body.expires_at,
         )
     except CronJobLimitExceeded as e:
         raise HTTPException(status_code=409, detail=str(e))

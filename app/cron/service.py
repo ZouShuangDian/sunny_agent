@@ -36,6 +36,7 @@ class CronService:
         description: str | None = None,
         timezone_str: str = "Asia/Shanghai",
         session_id: str | None = None,
+        expires_at: datetime | None = None,
     ) -> CronJob:
         """创建定时任务
 
@@ -78,6 +79,7 @@ class CronService:
             input_text=input_text,
             session_id=session_id,
             next_run_at=next_run,
+            expires_at=expires_at,
         )
         self.db.add(job)
         await self.db.commit()
@@ -143,7 +145,7 @@ class CronService:
             )
 
         # 逐字段更新（不过滤 None，允许清空 session_id / description 等 nullable 字段）
-        allowed_fields = {"name", "description", "cron_expr", "timezone", "input_text", "session_id", "enabled"}
+        allowed_fields = {"name", "description", "cron_expr", "timezone", "input_text", "session_id", "enabled", "expires_at"}
         for key, value in fields.items():
             if key in allowed_fields:
                 setattr(job, key, value)

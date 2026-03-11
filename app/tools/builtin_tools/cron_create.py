@@ -5,6 +5,8 @@ CronCreateTool — Agent 在对话中创建定时任务
 LLM 调用此工具创建 cron_jobs 记录，返回创建结果供用户确认。
 """
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from app.cron.service import CronJobLimitExceeded, CronService
@@ -30,6 +32,10 @@ class _Params(BaseModel):
     )
     timezone: str = Field(
         "Asia/Shanghai", description="时区，默认 Asia/Shanghai",
+    )
+    expires_at: str | None = Field(
+        None,
+        description="到期日期（可选），ISO 8601 格式如 '2026-03-19T00:00:00+08:00'，到期后自动停止执行",
     )
 
 
@@ -66,6 +72,14 @@ class CronCreateTool(BaseTool):
         if not usernumb:
             return ToolResult.fail("无法获取当前用户信息，请重新登录")
 
+        # 解析 expires_at（ISO 字符串 → datetime）
+        expires_at = None
+        if args.get("expires_at"):
+            try:
+                expires_at = datetime.fromisoformat(args["expires_at"])
+            except ValueError:
+                return ToolResult.fail(f"expires_at 格式无效，请使用 ISO 8601 格式")
+
         async with async_session() as db:
             service = CronService(db)
             try:
@@ -76,6 +90,7 @@ class CronCreateTool(BaseTool):
                     input_text=args["input_text"],
                     description=args.get("description"),
                     timezone_str=args.get("timezone", "Asia/Shanghai"),
+                    expires_at=expires_at,
                 )
             except CronJobLimitExceeded as e:
                 return ToolResult.fail(str(e))
@@ -90,5 +105,6 @@ class CronCreateTool(BaseTool):
             timezone=job.timezone,
             input_text=job.input_text,
             next_run_at=job.next_run_at.isoformat() if job.next_run_at else None,
+            expires_at=job.expires_at.isoformat() if job.expires_at else None,
             enabled=job.enabled,
         )

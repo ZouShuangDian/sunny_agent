@@ -54,6 +54,10 @@ class CronJob(Base):
 
     # -- 状态 --
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="到期日期（可选），到期后 Scanner 自动禁用",
+    )
     next_run_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
         comment="下次触发时间（Scanner 按此查询，原子 UPDATE 推进）",
