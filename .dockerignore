@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# 虚拟环境
+venv
+env
+ENV
+.venv
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+logs
+
+# 临时文件
+tmp
+temp
+*.tmp
+
+# 测试
+tests
+.pytest_cache
+.coverage
+htmlcov
+
+# 项目特定目录
+openspec
+sandbox_service
+scripts
+
+# 文档
+docs
+README.md
+CHANGELOG.md
+*.md
