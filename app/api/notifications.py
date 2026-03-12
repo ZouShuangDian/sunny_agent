@@ -216,12 +216,22 @@ async def _event_generator(usernumb: str):
 
     流程：先 subscribe → 查 DB 未读推送（断线补偿）→ 循环监听 Pub/Sub
     注意：先 subscribe 再查 DB 会导致短暂重叠，前端需按 id 去重。
+
+    Pub/Sub 使用独立 Redis 连接（不占用主连接池），避免 SSE 长连接耗尽连接池。
     """
+    import redis.asyncio as aioredis
+
     channel = RedisKeys.notify_channel(usernumb)
     heartbeat_seconds = _settings.SSE_HEARTBEAT_SECONDS
 
-    # 创建专用 pubsub 对象（从连接池获取独立连接，不影响常规命令）
-    pubsub = redis_client.pubsub()
+    # 创建独立 Redis 连接用于 Pub/Sub（不经过主连接池，SSE 长连接不会占用池槽位）
+    dedicated_conn = aioredis.from_url(
+        _settings.REDIS_URL,
+        decode_responses=True,
+        socket_timeout=5,
+        socket_connect_timeout=5,
+    )
+    pubsub = dedicated_conn.pubsub()
 
     try:
         # 先 subscribe 再查 DB，消除通知丢失窗口
@@ -258,6 +268,7 @@ async def _event_generator(usernumb: str):
                 yield ": heartbeat\n\n"
 
     finally:
-        # 保证 pubsub 资源释放，防止连接泄漏
+        # 保证资源释放：先退订，再关闭 pubsub 和独立连接
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()
+        await dedicated_conn.aclose()

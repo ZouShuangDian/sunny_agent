@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # ── Redis ──
     REDIS_URL: str
-    REDIS_MAX_CONNECTIONS: int = 10
+    REDIS_MAX_CONNECTIONS: int = 50
 
     # ── JWT ──
     JWT_SECRET: str = "dev-secret-change-me-in-production"
