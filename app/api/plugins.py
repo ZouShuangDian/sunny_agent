@@ -21,6 +21,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.api.response import ApiResponse, ok
@@ -334,3 +335,41 @@ async def delete_plugin(
 
     log.info("Plugin 已删除", plugin_name=plugin_name, usernumb=user.usernumb)
     return ok(message=f"Plugin '{plugin_name}' 已删除")
+
+
+# ── PATCH /api/plugins/{plugin_name} ─────────────────────
+
+class _ToggleBody(BaseModel):
+    is_active: bool
+
+
+@router.patch("/{plugin_name}", response_model=ApiResponse)
+async def toggle_plugin(
+    plugin_name: str,
+    body: _ToggleBody,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """启用/禁用 Plugin（仅能操作自己的 Plugin）"""
+    async with async_session() as session:
+        async with session.begin():
+            result = await session.execute(text("""
+                UPDATE sunny_agent.plugins
+                SET is_active = :is_active, updated_at = now()
+                WHERE name = :name AND owner_usernumb = :usernumb
+                RETURNING id
+            """), {
+                "name": plugin_name,
+                "usernumb": user.usernumb,
+                "is_active": body.is_active,
+            })
+            row = result.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Plugin '{plugin_name}' 不存在或无权限操作",
+                )
+
+    state = "已启用" if body.is_active else "已禁用"
+    log.info("Plugin 状态切换", plugin_name=plugin_name, is_active=body.is_active, usernumb=user.usernumb)
+    return ok(message=f"Plugin '{plugin_name}' {state}")
