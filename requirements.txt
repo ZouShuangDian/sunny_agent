@@ -1,0 +1,23 @@
+# 从 pyproject.toml 提取，供 pip install -r 使用
+fastapi>=0.128.7,<0.129.0
+uvicorn[standard]>=0.40.0,<0.41.0
+sqlalchemy[asyncio]>=2.0.46,<3.0.0
+asyncpg>=0.31.0,<0.32.0
+alembic>=1.18.4,<2.0.0
+redis[hiredis]>=7.1.1,<8.0.0
+pyjwt>=2.11.0,<3.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+python-multipart>=0.0.22,<0.0.23
+structlog>=25.5.0,<26.0.0
+pydantic>=2.0
+pydantic-settings>=2.12.0,<3.0.0
+python-dotenv>=1.2.1,<2.0.0
+uuid6>=2025.0.1,<2026.0.0
+litellm>=1.40,<2.0
+json-repair>=0.25,<1.0
+prometheus-client>=0.24.1,<0.25.0
+httpx>=0.28.1,<0.29.0
+prompt-toolkit>=3.0.52,<4.0.0
+croniter>=2.0,<3.0
+# ⚠️ arq 未列入：arq 声明依赖 redis<6，与本项目 redis>=7 冲突（运行时兼容）
+# 安装方式：pip install arq --no-deps
