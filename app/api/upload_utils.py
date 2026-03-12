@@ -34,8 +34,14 @@ def find_zip_root(zf: zipfile.ZipFile) -> str | None:
     """
     检测 ZIP 是否有统一根目录（所有文件都在同一个顶级目录下）。
     返回根目录名（含末尾 "/"），或 None（无根目录，文件在 ZIP 根部）。
+
+    自动忽略 Mac 压缩工具生成的 __MACOSX 目录。
     """
-    names = [info.filename for info in zf.infolist() if not info.filename.endswith("/")]
+    names = [
+        info.filename for info in zf.infolist()
+        if not info.filename.endswith("/")
+        and not info.filename.startswith("__MACOSX/")
+    ]
     if not names:
         return None
     first_parts = {n.split("/")[0] for n in names}

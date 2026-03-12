@@ -68,6 +68,11 @@ async def upload_skill(
             zip_root = find_zip_root(zf)
             zf.extractall(extract_dir)
 
+        # 清理 Mac 压缩工具生成的 __MACOSX 目录
+        macosx_dir = extract_dir / "__MACOSX"
+        if macosx_dir.exists():
+            shutil.rmtree(macosx_dir)
+
         # 3. 找到实际 Skill 根目录
 
         if zip_root:

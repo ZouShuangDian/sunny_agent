@@ -150,11 +150,13 @@ async def upload_plugin(
 
         with zipfile.ZipFile(zip_tmp, "r") as zf:
             check_zip_safety(zf)
+            zip_root = find_zip_root(zf)
             zf.extractall(extract_dir)
 
-        # 3. 找到实际插件根目录（自动处理有/无顶级目录两种打包方式）
-        with zipfile.ZipFile(zip_tmp, "r") as zf:
-            zip_root = find_zip_root(zf)
+        # 清理 Mac 压缩工具生成的 __MACOSX 目录
+        macosx_dir = extract_dir / "__MACOSX"
+        if macosx_dir.exists():
+            shutil.rmtree(macosx_dir)
 
         if zip_root:
             plugin_src = extract_dir / zip_root.rstrip("/")

@@ -27,10 +27,10 @@ log = structlog.get_logger()
 # ── 常量 ────────────────────────────────────────────────────────────────────
 
 TOOL_CALL_RESULT_MAX_LEN = 500
-"""tool_calls.result 超过此长度时截断"""
+"""tool_calls.result 超过此长度时截断（纯文本安全截断，不影响 JSON 结构）"""
 
-L3_STEP_CONTENT_MAX_LEN = 1000
-"""L3 step content 超过此长度时截断"""
+L3_STEP_CONTENT_MAX_LEN = 0
+"""L3 step content 截断阈值。0 = 不截断（content 可能是 JSON，粗暴截断会破坏结构导致前端解析失败）"""
 
 
 # ── Pydantic 响应模型 ──────────────────────────────────────────────────────
@@ -247,8 +247,6 @@ async def get_session_messages(
         steps_result = await db.execute(steps_query)
         for s in steps_result.scalars().all():
             content = s.content or ""
-            if len(content) > L3_STEP_CONTENT_MAX_LEN:
-                content = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
             steps_map.setdefault(s.message_id, []).append(L3StepItem(
                 step_index=s.step_index,
                 role=s.role,
@@ -279,10 +277,6 @@ async def get_session_messages(
                 live_step_items = []
                 for s in raw:
                     item = json.loads(s)
-                    # 与 PG 路径对齐：截断超长 content
-                    content = item.get("content") or ""
-                    if len(content) > L3_STEP_CONTENT_MAX_LEN:
-                        item["content"] = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
                     live_step_items.append(L3StepItem(**item))
                 # 构造临时 assistant 消息，格式与完成后的 assistant 消息一致
                 messages.append(MessageItem(
