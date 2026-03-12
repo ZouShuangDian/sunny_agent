@@ -40,9 +40,17 @@ class ToolRegistry:
     def has_tool(self, name: str) -> bool:
         return name in self._tools
 
-    def get_all_schemas(self) -> list[dict]:
-        """获取所有已注册工具的 OpenAI function calling schema"""
-        return [tool.schema() for tool in self._tools.values()]
+    def get_all_schemas(self, *, include_mode_only: bool = False) -> list[dict]:
+        """获取已注册工具的 OpenAI function calling schema
+
+        Args:
+            include_mode_only: 是否包含 mode_only=True 的工具。
+                普通对话传 False（默认），/mode:xxx 路径传 True。
+        """
+        return [
+            tool.schema() for tool in self._tools.values()
+            if include_mode_only or not tool.mode_only
+        ]
 
     def get_schemas(self, allowed_tools: list[str]) -> list[dict]:
         """获取指定工具的 schema（按需过滤）"""

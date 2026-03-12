@@ -13,6 +13,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.cron.scanner import scan_and_enqueue
 from app.tasks.cron_executor import execute_cron_job
+from app.tasks.task_executor import execute_async_task
 
 settings = get_settings()
 log = structlog.get_logger()
@@ -52,7 +53,7 @@ async def shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """arq Worker 配置"""
 
-    functions = [execute_cron_job]
+    functions = [execute_cron_job, execute_async_task]
     cron_jobs = [
         arq_cron(
             scan_and_enqueue,

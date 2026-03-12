@@ -1,11 +1,12 @@
 """
 定时任务 CRUD API
 
-POST   /api/cron-jobs          创建
-GET    /api/cron-jobs          列表（分页）
-GET    /api/cron-jobs/{id}     详情
-PATCH  /api/cron-jobs/{id}     修改
-DELETE /api/cron-jobs/{id}     删除
+POST   /api/cron-jobs              创建
+GET    /api/cron-jobs              列表（分页）
+GET    /api/cron-jobs/executions   执行记录列表（分页，支持 status/cron_job_id 过滤）
+GET    /api/cron-jobs/{id}         详情
+PATCH  /api/cron-jobs/{id}         修改
+DELETE /api/cron-jobs/{id}         删除
 """
 
 from __future__ import annotations
@@ -53,6 +54,21 @@ class CronJobUpdate(BaseModel):
     session_id: str | None = None
     enabled: bool | None = None
     expires_at: datetime | None = None
+
+
+def _serialize_execution(exe) -> dict[str, Any]:
+    """CronJobExecution ORM 对象 -> JSON 可序列化 dict"""
+    return {
+        "id": str(exe.id),
+        "cron_job_id": str(exe.cron_job_id),
+        "name": exe.name,
+        "input_text": exe.input_text[:200] if exe.input_text else None,
+        "session_id": exe.session_id,
+        "status": exe.status,
+        "error_message": exe.error_message,
+        "started_at": exe.started_at.isoformat() if exe.started_at else None,
+        "completed_at": exe.completed_at.isoformat() if exe.completed_at else None,
+    }
 
 
 def _serialize_job(job) -> dict[str, Any]:
@@ -122,6 +138,30 @@ async def list_cron_jobs(
 
     return ok(data={
         "items": [_serialize_job(j) for j in items],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    })
+
+
+@router.get("/executions")
+async def list_executions(
+    status: str | None = Query(None, description="按状态过滤：completed/failed/timeout/running"),
+    cron_job_id: str | None = Query(None, description="按定时任务 ID 过滤"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """查询定时任务执行记录列表（分页）"""
+    service = CronService(db)
+    items, total = await service.list_executions(
+        user.usernumb, status=status, cron_job_id=cron_job_id,
+        offset=offset, limit=limit,
+    )
+
+    return ok(data={
+        "items": [_serialize_execution(e) for e in items],
         "total": total,
         "offset": offset,
         "limit": limit,

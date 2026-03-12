@@ -44,6 +44,7 @@ def _serialize_notification(n: Notification) -> dict:
         "content": n.content,
         "session_id": n.session_id,
         "cron_job_id": n.cron_job_id,
+        "task_id": n.task_id,
         "is_read": n.is_read,
         "created_at": n.created_at.isoformat() if n.created_at else None,
     }

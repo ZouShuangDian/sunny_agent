@@ -12,6 +12,7 @@ from app.db.models.data_scope import DataScopePolicy
 from app.db.models.project import Project
 from app.db.models.file import File
 from app.db.models.cron_job import CronJob
+from app.db.models.cron_execution import CronJobExecution
 from app.db.models.notification import Notification
 
 __all__ = [
@@ -21,6 +22,6 @@ __all__ = [
     "Plugin", "PluginCommand",
     "DataScopePolicy",
     "Project", "File",
-    "CronJob",
+    "CronJob", "CronJobExecution",
     "Notification",
 ]
