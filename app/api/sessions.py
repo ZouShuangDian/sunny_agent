@@ -210,11 +210,28 @@ async def get_session_messages(
     if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 查找最近的 compaction 节点，前端只显示压缩点之后的消息
+    compaction_query = (
+        select(ChatMessage.created_at)
+        .where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.is_compaction == True,  # noqa: E712
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    compaction_result = await db.execute(compaction_query)
+    compaction_time = compaction_result.scalar_one_or_none()
+
     # 构建消息查询
     conditions = [
         ChatMessage.session_id == session_id,
         ChatMessage.is_compaction == False,  # noqa: E712
     ]
+
+    # 只返回压缩点之后的消息（压缩点本身是摘要，不展示）
+    if compaction_time:
+        conditions.append(ChatMessage.created_at > compaction_time)
 
     # cursor 分页：查 before message_id 对应的 created_at
     if before:
