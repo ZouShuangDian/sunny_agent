@@ -290,15 +290,16 @@ async def _process_message_internal(
         # 启动流式卡片
         card_id = await bs_manager.start_streaming(receive_id, receive_id_type)
         
-        # 11. AI处理 - 先获取完整回复
-        from app.execution.pipeline import run_agent_pipeline
+        # 11. AI处理 - 使用流式版本（支持媒体文件）
+        from app.execution.pipeline import run_agent_pipeline_streaming
         
-        reply_text, _ = await run_agent_pipeline(
+        reply_text, _ = await run_agent_pipeline_streaming(
             usernumb=employee_no,
             user_id=str(user.id) if user else "",
             input_text=text_content,
             session_id=session_id,
             source="feishu",
+            media_paths=media_paths if media_paths else None,
         )
         
         # 12. 人机延迟 - 模拟人类回复节奏
