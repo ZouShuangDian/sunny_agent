@@ -7,6 +7,7 @@ GET    /api/cron-jobs/executions   执行记录列表（分页，支持 status/c
 GET    /api/cron-jobs/{id}         详情
 PATCH  /api/cron-jobs/{id}         修改
 DELETE /api/cron-jobs/{id}         删除
+POST   /api/cron-jobs/{id}/run     立即执行一次
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.response import ok
 from app.cron.service import CronJobLimitExceeded, CronService
 from app.db.engine import get_db
+from app.db.models.user import User
 from app.security.auth import AuthenticatedUser, get_current_user
+from app.tasks.arq_pool import get_arq_pool
 
 log = structlog.get_logger()
 
@@ -222,3 +225,39 @@ async def delete_cron_job(
         raise HTTPException(status_code=404, detail="定时任务不存在或无权删除")
 
     return ok(message="定时任务已删除")
+
+
+@router.post("/{job_id}/run")
+async def run_cron_job_now(
+    job_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """立即执行一次定时任务（入队到 Worker，不影响原有调度周期）"""
+    service = CronService(db)
+    job = await service.get_by_id(job_id, user.usernumb)
+    if not job:
+        raise HTTPException(status_code=404, detail="定时任务不存在")
+
+    # 查 user.id（UUID），execute_cron_job 需要
+    from sqlalchemy import select as sa_select
+    result = await db.execute(
+        sa_select(User.id).where(User.usernumb == user.usernumb)
+    )
+    user_row = result.scalar_one_or_none()
+    if not user_row:
+        raise HTTPException(status_code=500, detail="用户记录异常")
+
+    pool = await get_arq_pool()
+    await pool.enqueue_job(
+        "execute_cron_job",
+        cron_job_id=str(job.id),
+        usernumb=job.usernumb,
+        user_id=str(user_row),
+        input_text=job.input_text,
+        session_id=job.session_id,
+        name=job.name,
+    )
+
+    log.info("定时任务手动触发执行", cron_job_id=str(job.id), usernumb=user.usernumb)
+    return ok(message=f"定时任务「{job.name}」已触发执行")

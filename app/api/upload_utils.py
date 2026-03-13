@@ -77,6 +77,51 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
     return fm, body
 
 
+def scan_directory_files(root_dir: "Path", *, max_file_size: int = 512_000) -> list[dict]:
+    """
+    递归扫描目录，返回所有文件的路径和内容。
+
+    跳过隐藏文件/目录（. 开头）和 __pycache__。
+    文本文件返回 content 字符串，超大文件或二进制文件只返回路径不含 content。
+
+    返回格式：[{"path": "scripts/search.py", "type": "file", "content": "..."}]
+    """
+    from pathlib import Path
+
+    root = Path(root_dir).resolve()
+    files = []
+
+    # 跳过的目录名
+    skip_dirs = {"__pycache__", ".git", "node_modules"}
+
+    for item in sorted(root.rglob("*")):
+        if not item.is_file():
+            continue
+
+        # 跳过隐藏文件和特定目录
+        rel = item.relative_to(root)
+        parts = rel.parts
+        if any(p.startswith(".") or p in skip_dirs for p in parts):
+            continue
+
+        entry: dict = {"path": str(rel), "type": "file"}
+
+        # 尝试读取文本内容（小文件）
+        if item.stat().st_size <= max_file_size:
+            try:
+                entry["content"] = item.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, ValueError):
+                entry["content"] = None  # 二进制文件
+                entry["binary"] = True
+        else:
+            entry["content"] = None
+            entry["truncated"] = True
+
+        files.append(entry)
+
+    return files
+
+
 def validate_name(name: str, label: str = "name") -> None:
     """校验 name 格式，不合法则抛 400"""
     if not name:
