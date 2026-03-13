@@ -13,6 +13,18 @@ from app.db.models.project import Project
 from app.db.models.file import File
 from app.db.models.cron_job import CronJob
 from app.db.models.notification import Notification
+from app.db.models.feishu import (
+    DMPolicy,
+    FeishuAccessConfig,
+    FeishuChatSessionMapping,
+    FeishuGroupConfig,
+    FeishuMediaFiles,
+    FeishuMessageLogs,
+    FeishuUserBindings,
+    GroupPolicy,
+    MediaType,
+    MessageStatus,
+)
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
@@ -23,4 +35,15 @@ __all__ = [
     "Project", "File",
     "CronJob",
     "Notification",
+    # Feishu Models
+    "DMPolicy",
+    "GroupPolicy",
+    "MediaType",
+    "MessageStatus",
+    "FeishuAccessConfig",
+    "FeishuGroupConfig",
+    "FeishuUserBindings",
+    "FeishuMediaFiles",
+    "FeishuMessageLogs",
+    "FeishuChatSessionMapping",
 ]

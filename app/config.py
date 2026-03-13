@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     MAX_CRON_JOBS_PER_USER: int = 20     # 单用户最大定时任务数
     CRON_SCAN_INTERVAL: int = 1          # Scanner 扫描间隔（分钟），默认每分钟
     CRON_MIN_INTERVAL_MINUTES: int = 30  # 定时任务最小触发间隔（分钟），防止资源滥用
+    # 外部 Webhook 服务配置（由 feishu-sunnyagent-api 项目提供）
+    # Webhook URL: https://larkchannel.51dnbsc.top/webhook
+    # 消息队列: Redis List "feishu:webhook:queue"
 
     # ── 通知 ──
     NOTIFICATION_RETENTION_DAYS: int = 30  # 已读通知保留天数（清理策略）

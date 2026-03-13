@@ -66,6 +66,73 @@ class RedisKeys:
         """用户级通知 Pub/Sub channel（SSE 订阅用）"""
         return f"notify:{usernumb}"
 
+
+class FeishuRedisKeys:
+    """
+    飞书集成模块 Redis Key 统一管理
+    命名规范：feishu:{功能类型}:{标识}
+    """
+
+    # ── ARQ 队列 ──
+    ARQ_QUEUE = "arq:feishu:queue"
+
+    # ── Webhook 消息队列 ──
+    EXTERNAL_WEBHOOK_QUEUE = "feishu:webhook:queue"
+    PROCESSING_QUEUE = "feishu:processing:queue"
+
+    # ── Token 缓存 ──
+    @staticmethod
+    def token(app_id: str) -> str:
+        """飞书应用 Token 缓存 (TTL 7000s)"""
+        return f"feishu:token:{app_id}"
+
+    # ── 用户缓存 ──
+    @staticmethod
+    def user(app_id: str, open_id: str) -> str:
+        """飞书用户身份解析缓存 (TTL 1h)"""
+        return f"feishu:user:{app_id}:{open_id}"
+
+    # ── 幂等校验 ──
+    @staticmethod
+    def processed(event_id: str, message_id: str) -> str:
+        """消息幂等校验标记 (TTL 24h)"""
+        return f"feishu:processed:{event_id}:{message_id}"
+
+    # ── 消息防抖（Debounce） ──
+    @staticmethod
+    def debounce_buffer(open_id: str, chat_id: str) -> str:
+        """防抖消息缓冲队列"""
+        return f"feishu:buffer:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_state(open_id: str, chat_id: str) -> str:
+        """防抖状态标记"""
+        return f"feishu:state:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_timer(open_id: str, chat_id: str) -> str:
+        """防抖定时器标记"""
+        return f"feishu:timer:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_no_text(open_id: str, chat_id: str) -> str:
+        """无文本防抖标记"""
+        return f"feishu:no_text:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_lock(open_id: str, chat_id: str) -> str:
+        """防抖分布式锁"""
+        return f"feishu:lock:{open_id}:{chat_id}"
+
+
+# 保持向后兼容：导出常用 key 生成函数
+token_blacklist = RedisKeys.token_blacklist
+working_memory = RedisKeys.working_memory
+rate_limit = RedisKeys.rate_limit
+feishu_token = FeishuRedisKeys.token
+feishu_user = FeishuRedisKeys.user
+feishu_processed = FeishuRedisKeys.processed
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(
