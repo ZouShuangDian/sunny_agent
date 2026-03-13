@@ -129,6 +129,7 @@ def _build_tool_calls(raw: list | None) -> list[ToolCallItem] | None:
 @router.get("")
 async def list_sessions(
     status: str = Query("active", description="过滤状态：active / archived / all"),
+    project_id: str | None = Query(None, description="项目 ID；不传则只返回不属于任何项目的对话"),
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(20, ge=1, le=50, description="每页数量（上限 50）"),
     db: AsyncSession = Depends(get_db),
@@ -142,6 +143,12 @@ async def list_sessions(
         base_where.append(ChatSession.status.in_(["active", "running"]))
     elif status != "all":
         base_where.append(ChatSession.status == status)
+
+    # 项目隔离：传 project_id 查项目内对话，不传则只查无项目归属的对话
+    if project_id:
+        base_where.append(ChatSession.project_id == project_id)
+    else:
+        base_where.append(ChatSession.project_id.is_(None))
 
     # 查询列表
     query = (
