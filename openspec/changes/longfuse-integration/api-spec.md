@@ -20,7 +20,8 @@
 │                                                                     │
 │   ┌─────────────┐                      ┌─────────────────────┐     │
 │   │   前端 UI   │  ── HTTP/JSON ──▶   │  SunnyAgent 后端    │     │
-│   │  (Vue.js)   │  ◀── Response ───   │    (FastAPI)        │     │
+│   │(sunny-agent │  ◀── Response ───   │    (FastAPI)        │     │
+│   │   -web)     │                      │  (sunny_agent)      │     │
 │   └─────────────┘                      └──────────┬──────────┘     │
 │                                                   │                 │
 │                                                   │ HTTP/JSON       │
@@ -59,7 +60,7 @@
 **错误响应**:
 ```json
 {
-  "code": 40001,
+  "code": 40000,
   "message": "错误描述",
   "data": null
 }
@@ -67,14 +68,16 @@
 
 ### 错误码定义
 
+> 遵循现有 codebase 约定：`code = http_status * 100`，子错误码在基础码上 +1/+2
+
 | 错误码 | 说明 |
 |--------|------|
 | 0 | 成功 |
-| 40001 | 参数错误 |
-| 40101 | 未登录 |
-| 40301 | 权限不足 |
-| 50001 | Langfuse 服务不可用 |
-| 50002 | Langfuse 未初始化 |
+| 40000 | 参数错误 |
+| 40100 | 未登录 |
+| 40300 | 权限不足 |
+| 50000 | Langfuse 服务不可用 |
+| 50001 | Langfuse 未初始化（`50000` 子码） |
 
 ---
 
@@ -131,7 +134,7 @@ Authorization: Bearer <token>
 GET /api/v1/observability/console-url
 ```
 
-**权限**: 已登录用户
+**权限**: 仅管理员（FR-035：仅对管理员显示控制台入口）
 
 **响应**:
 
@@ -353,7 +356,7 @@ PUT /api/v1/observability/config
 
 ```json
 {
-  "code": 50001,
+  "code": 50000,
   "message": "Langfuse 服务连接失败",
   "data": {
     "success": false,
@@ -412,7 +415,7 @@ POST /api/v1/observability/config/validate
 
 ### 1.9 初始化 Langfuse 项目
 
-在已连接的 Langfuse 服务上自动创建项目并生成 API Key。
+手动触发内置 Langfuse 服务的项目初始化（通常由 `LANGFUSE_INIT_*` 环境变量自动完成，此端点用于初始化失败时的手动重试）。外部服务场景下，管理员应通过 `PUT /config` 手动提供已有的 API Key，不调用此端点。
 
 ```http
 POST /api/v1/observability/config/initialize
@@ -420,7 +423,7 @@ POST /api/v1/observability/config/initialize
 
 **权限**: 管理员
 
-**请求体**: 无（使用已配置的 Langfuse 服务地址）
+**请求体**: 无（使用已配置的 Langfuse 服务地址，仅适用于内置服务模式）
 
 **响应**:
 
@@ -444,7 +447,7 @@ POST /api/v1/observability/config/initialize
 
 ```json
 {
-  "code": 50001,
+  "code": 50000,
   "message": "初始化失败",
   "data": {
     "success": false,
@@ -775,7 +778,7 @@ trace_xxx,user_001,session_xxx,agent_execution,2026-03-05T09:15:00Z,2026-03-05T0
 数据量超限时返回:
 ```json
 {
-  "code": 40001,
+  "code": 40000,
   "message": "导出数据量超过限制",
   "data": {
     "requestedCount": 15000,
@@ -797,10 +800,7 @@ trace_xxx,user_001,session_xxx,agent_execution,2026-03-05T09:15:00Z,2026-03-05T0
 GET {LANGFUSE_HOST}/api/public/health
 ```
 
-**请求头**:
-```
-Authorization: Basic base64(LANGFUSE_PUBLIC_KEY:LANGFUSE_SECRET_KEY)
-```
+**请求头**: 无需认证（公开端点）
 
 **响应**:
 ```json
@@ -813,6 +813,8 @@ Authorization: Basic base64(LANGFUSE_PUBLIC_KEY:LANGFUSE_SECRET_KEY)
 ---
 
 ### 2.2 获取每日用量指标
+
+> ⚠️ **待验证**：此端点在 Langfuse v3 中的可用性需在 Phase 1.5 Spike 3 中确认。如不可用，改用 `GET /api/public/traces` 分页拉取后在 SunnyAgent 后端聚合。
 
 ```http
 GET {LANGFUSE_HOST}/api/public/metrics/daily
@@ -847,6 +849,8 @@ GET {LANGFUSE_HOST}/api/public/metrics/daily
 ---
 
 ### 2.3 获取汇总用量
+
+> ⚠️ **待验证**：同 2.2，此端点可用性需在 Phase 1.5 Spike 3 中确认。
 
 ```http
 GET {LANGFUSE_HOST}/api/public/metrics/usage
@@ -1025,25 +1029,17 @@ interface TraceExportResponse {
 | 变量名 | 必填 | 说明 |
 |--------|------|------|
 | LANGFUSE_HOST | 是 | Langfuse 服务地址 |
-| LANGFUSE_PUBLIC_KEY | 是* | Langfuse Public Key（自动初始化后生成） |
-| LANGFUSE_SECRET_KEY | 是* | Langfuse Secret Key（自动初始化后生成） |
-| LANGFUSE_ADMIN_API_KEY | 是 | 管理员 API Key（用于自动初始化） |
-| LANGFUSE_ORG_ID | 是 | 组织 ID |
+| LANGFUSE_PUBLIC_KEY | 是 | Langfuse Public Key（内置服务由 docker-compose 预配置生成） |
+| LANGFUSE_SECRET_KEY | 是 | Langfuse Secret Key（内置服务由 docker-compose 预配置生成） |
+| LANGFUSE_ADMIN_EMAIL | 是 | Langfuse 管理员邮箱（内置服务同时用于 `LANGFUSE_INIT_USER_EMAIL`） |
+| LANGFUSE_ADMIN_PASSWORD | 是 | Langfuse 管理员密码（内置服务同时用于 `LANGFUSE_INIT_USER_PASSWORD`） |
 
-> *注: 首次启动时由系统自动生成并存储到数据库
+> 内置服务场景下，以上配置同时作为 docker-compose 的 `LANGFUSE_INIT_*` 环境变量，Langfuse 启动时自动创建组织、项目、管理员账号和 API Key
 
 ---
 
 ## 五、费用计算规则
 
-Token 费用预估基于以下默认价格（可配置）：
+费用直接使用 Langfuse 原生的 `totalCost` 字段聚合。Langfuse v3 内置模型价格表，在 Trace 记录时按实际使用的模型自动计算费用，SunnyAgent 无需自行维护价格配置。
 
-| 类型 | 价格 (USD / 1M tokens) |
-|------|------------------------|
-| 输入 Token | $2.00 |
-| 输出 Token | $8.00 |
-
-计算公式：
-```
-estimatedCost = (inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000
-```
+> 如 Langfuse 未配置某模型价格，`totalCost` 可能为 0，此时前端应显示"费用不可用"提示。
