@@ -95,6 +95,13 @@ class BaseTool(ABC):
         """操作风险等级：read / suggest / write / critical（为 HITL 审批预留）"""
         return "read"
 
+    @property
+    def mode_only(self) -> bool:
+        """是否仅在内置模式（/mode:xxx）下暴露给 LLM。
+        True 时，普通对话不会将此工具的 schema 注入 LLM，防止误触发。
+        """
+        return False
+
     def schema(self) -> dict:
         """生成 OpenAI function calling 格式的 tool schema"""
         json_schema = self.params_model.model_json_schema()

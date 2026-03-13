@@ -60,6 +60,12 @@ class RedisKeys:
         """Agent 执行中的实时步骤（Redis List，TTL 24h 兜底）"""
         return f"live_steps:{session_id}"
 
+    # ── 用户存在性缓存 ──
+    @staticmethod
+    def user_active(user_id: str) -> str:
+        """用户存在且激活的缓存标记（TTL 10min）"""
+        return f"ua:{user_id}"
+
     # ── 通知 Pub/Sub ──
     @staticmethod
     def notify_channel(usernumb: str) -> str:

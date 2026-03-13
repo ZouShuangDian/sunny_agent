@@ -13,14 +13,14 @@ import uuid
 
 # revision identifiers, used by Alembic.
 revision = 'f8e9d0c1b2a3'
-down_revision = None
+down_revision = '27f10f89e920'
 branch_labels = None
 depends_on = None
 
 
 def upgrade():
-    schema = op.get_context().dialect.default_schema_name or 'sunny_agent'
-    
+    schema = 'sunny_agent'
+
     # 1. 创建 feishu_access_config 表
     op.create_table(
         'feishu_access_config',
@@ -178,8 +178,8 @@ def upgrade():
 
 
 def downgrade():
-    schema = op.get_context().dialect.default_schema_name or 'sunny_agent'
-    
+    schema = 'sunny_agent'
+
     # 删除表的顺序（先删除有外键依赖的表）
     op.drop_table('feishu_chat_session_mapping', schema=schema)
     op.drop_table('feishu_message_logs', schema=schema)

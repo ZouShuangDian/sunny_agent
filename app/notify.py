@@ -24,6 +24,8 @@ class NotificationType:
 
     CRON_COMPLETED = "cron_completed"
     CRON_FAILED = "cron_failed"
+    TASK_COMPLETED = "task_completed"
+    TASK_FAILED = "task_failed"
     SYSTEM_ANNOUNCE = "system_announce"  # 预留
 
 
@@ -35,6 +37,7 @@ async def notify_user(
     content: str | None = None,
     session_id: str | None = None,
     cron_job_id: str | None = None,
+    task_id: str | None = None,
 ) -> None:
     """发送用户通知（DB + Pub/Sub 双写）
 
@@ -45,6 +48,7 @@ async def notify_user(
         content: 通知详情（可选）
         session_id: 关联会话 ID（可选）
         cron_job_id: 关联定时任务 ID（可选）
+        task_id: 关联异步任务 ID（可选）
     """
     notification_id = uuid7()
 
@@ -59,6 +63,7 @@ async def notify_user(
                 content=content,
                 session_id=session_id,
                 cron_job_id=cron_job_id,
+                task_id=task_id,
             ))
             await db.commit()
     except Exception:
@@ -74,6 +79,7 @@ async def notify_user(
         "content": content,
         "session_id": session_id,
         "cron_job_id": cron_job_id,
+        "task_id": task_id,
         "is_read": False,
         "created_at": None,  # Pub/Sub 实时推送无需精确时间，前端可用本地时间
     }

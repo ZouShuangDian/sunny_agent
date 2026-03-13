@@ -21,10 +21,13 @@ from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.api.response import ApiResponse, ok
-from app.api.upload_utils import NAME_RE, check_zip_safety, find_zip_root, parse_frontmatter
+from app.api.upload_utils import (
+    NAME_RE, check_zip_safety, find_zip_root, parse_frontmatter, scan_directory_files,
+)
 from app.config import get_settings
 from app.db.engine import async_session
 from app.plugins.service import plugin_service
@@ -47,26 +50,29 @@ def _validate_plugin_json(plugin_json_path: Path, usernumb: str) -> dict:
         raise HTTPException(status_code=400, detail="ZIP 缺少 .claude-plugin/plugin.json")
 
     try:
-        data = json.loads(plugin_json_path.read_text(encoding="utf-8"))
+        raw = plugin_json_path.read_bytes()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("gbk", errors="replace")
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"plugin.json JSON 格式错误：{e}")
 
-    # 必填字段
-    required = ["name", "version", "description"]
+    # 必填字段（version 和 author 可选，兼容 Claude 官方 Plugin 格式）
+    required = ["name", "description"]
     for field in required:
         if not data.get(field):
             raise HTTPException(status_code=400, detail=f"plugin.json 缺少必填字段：{field}")
 
-    # author.usernumb 必须与登录用户一致
-    author = data.get("author", {})
-    if not isinstance(author, dict) or not author.get("usernumb"):
-        raise HTTPException(status_code=400, detail="plugin.json 缺少 author.usernumb 字段")
-
-    if author["usernumb"] != usernumb:
-        raise HTTPException(
-            status_code=403,
-            detail=f"author.usernumb（{author['usernumb']}）与登录用户（{usernumb}）不符",
-        )
+    # author.usernumb 校验：有 author 且有 usernumb 时才校验一致性，否则跳过
+    author = data.get("author") or {}
+    if isinstance(author, dict) and author.get("usernumb"):
+        if author["usernumb"] != usernumb:
+            raise HTTPException(
+                status_code=403,
+                detail=f"author.usernumb（{author['usernumb']}）与登录用户（{usernumb}）不符",
+            )
 
     # name 格式校验
     name = data["name"]
@@ -149,11 +155,13 @@ async def upload_plugin(
 
         with zipfile.ZipFile(zip_tmp, "r") as zf:
             check_zip_safety(zf)
+            zip_root = find_zip_root(zf)
             zf.extractall(extract_dir)
 
-        # 3. 找到实际插件根目录（自动处理有/无顶级目录两种打包方式）
-        with zipfile.ZipFile(zip_tmp, "r") as zf:
-            zip_root = find_zip_root(zf)
+        # 清理 Mac 压缩工具生成的 __MACOSX 目录
+        macosx_dir = extract_dir / "__MACOSX"
+        if macosx_dir.exists():
+            shutil.rmtree(macosx_dir)
 
         if zip_root:
             plugin_src = extract_dir / zip_root.rstrip("/")
@@ -212,7 +220,7 @@ async def upload_plugin(
                 """), {
                     "id": plugin_id,
                     "name": plugin_name,
-                    "version": plugin_data["version"],
+                    "version": plugin_data.get("version") or "0.0.0",
                     "description": plugin_data["description"],
                     "owner_usernumb": user.usernumb,
                     "path": plugin_rel_path,
@@ -253,7 +261,7 @@ async def upload_plugin(
         return ok(
             data={
                 "plugin": plugin_name,
-                "version": plugin_data["version"],
+                "version": plugin_data.get("version"),
                 "description": plugin_data["description"],
                 "commands": [
                     {"name": c["name"], "description": c["description"]}
@@ -279,6 +287,49 @@ async def list_plugins(
     """列出当前用户所有 Plugin（含命令数）"""
     plugins = await plugin_service.list_user_plugins(user.usernumb)
     return ok(data={"plugins": plugins, "total": len(plugins)})
+
+
+# ── GET /api/plugins/commands ─────────────────────────────────
+
+@router.get("/commands", response_model=ApiResponse)
+async def list_available_commands(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    返回当前用户所有可用的 Plugin Commands（仅已启用的 Plugin）。
+
+    前端用于展示命令面板 / 自动补全。
+    """
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT
+                p.name       AS plugin_name,
+                p.description AS plugin_description,
+                pc.name      AS command_name,
+                pc.description AS command_description,
+                pc.argument_hint
+            FROM sunny_agent.plugins p
+            JOIN sunny_agent.plugin_commands pc
+                ON pc.plugin_id = p.id
+            WHERE p.owner_usernumb = :usernumb
+              AND p.is_active = TRUE
+            ORDER BY p.name, pc.name
+        """), {"usernumb": user.usernumb})
+        rows = result.fetchall()
+
+    commands = [
+        {
+            "plugin_name": row.plugin_name,
+            "plugin_description": row.plugin_description,
+            "command_name": row.command_name,
+            "command_description": row.command_description,
+            "argument_hint": row.argument_hint,
+            "full_command": f"/{row.plugin_name}:{row.command_name}",
+        }
+        for row in rows
+    ]
+
+    return ok(data={"commands": commands, "total": len(commands)})
 
 
 # ── DELETE /api/plugins/{plugin_name} ────────────────────────
@@ -334,3 +385,87 @@ async def delete_plugin(
 
     log.info("Plugin 已删除", plugin_name=plugin_name, usernumb=user.usernumb)
     return ok(message=f"Plugin '{plugin_name}' 已删除")
+
+
+# ── PATCH /api/plugins/{plugin_name} ─────────────────────
+
+class _ToggleBody(BaseModel):
+    is_active: bool
+
+
+@router.patch("/{plugin_name}", response_model=ApiResponse)
+async def toggle_plugin(
+    plugin_name: str,
+    body: _ToggleBody,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """启用/禁用 Plugin（仅能操作自己的 Plugin）"""
+    async with async_session() as session:
+        async with session.begin():
+            result = await session.execute(text("""
+                UPDATE sunny_agent.plugins
+                SET is_active = :is_active, updated_at = now()
+                WHERE name = :name AND owner_usernumb = :usernumb
+                RETURNING id
+            """), {
+                "name": plugin_name,
+                "usernumb": user.usernumb,
+                "is_active": body.is_active,
+            })
+            row = result.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Plugin '{plugin_name}' 不存在或无权限操作",
+                )
+
+    state = "已启用" if body.is_active else "已禁用"
+    log.info("Plugin 状态切换", plugin_name=plugin_name, is_active=body.is_active, usernumb=user.usernumb)
+    return ok(message=f"Plugin '{plugin_name}' {state}")
+
+
+# ── GET /api/plugins/{plugin_name}/files ──────────────────────
+
+@router.get("/{plugin_name}/files", response_model=ApiResponse)
+async def get_plugin_files(
+    plugin_name: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    获取 Plugin 完整文件内容（目录树 + 文件内容一次性返回）。
+
+    权限：仅 Plugin 创建者可查看。
+    """
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT name, description, version, path
+            FROM sunny_agent.plugins
+            WHERE name = :name AND owner_usernumb = :usernumb
+        """), {"name": plugin_name, "usernumb": user.usernumb})
+        row = result.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_name}' 不存在或无权限查看")
+
+    volume_root = Path(settings.SANDBOX_HOST_VOLUME).resolve()
+    plugin_dir = (volume_root / row.path).resolve()
+
+    try:
+        plugin_dir.relative_to(volume_root)
+    except ValueError:
+        raise HTTPException(status_code=500, detail="Plugin 路径异常")
+
+    if not plugin_dir.exists():
+        raise HTTPException(status_code=404, detail="Plugin 文件目录不存在")
+
+    files = scan_directory_files(plugin_dir)
+
+    return ok(data={
+        "name": row.name,
+        "description": row.description,
+        "version": row.version,
+        "files": files,
+    })
+
+

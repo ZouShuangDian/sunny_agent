@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.cron.utils import calc_next_run, check_min_interval, validate_cron_expr, validate_timezone
 from app.db.models.cron_job import CronJob
+from app.db.models.cron_execution import CronJobExecution
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -175,3 +176,48 @@ class CronService:
         if deleted:
             log.info("定时任务已删除", cron_job_id=job_id, usernumb=usernumb)
         return deleted
+
+    # ==================== 执行记录查询 ====================
+
+    async def list_executions(
+        self,
+        usernumb: str,
+        *,
+        status: str | None = None,
+        cron_job_id: str | None = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> tuple[list[CronJobExecution], int]:
+        """查询用户的定时任务执行记录（分页）
+
+        Args:
+            usernumb: 用户工号
+            status: 按状态过滤（completed/failed/timeout/running）
+            cron_job_id: 按定时任务 ID 过滤
+            offset: 分页偏移
+            limit: 分页大小
+        """
+        # 构建过滤条件
+        conditions = [CronJobExecution.usernumb == usernumb]
+        if status:
+            conditions.append(CronJobExecution.status == status)
+        if cron_job_id:
+            conditions.append(CronJobExecution.cron_job_id == cron_job_id)
+
+        # 总数
+        count_result = await self.db.execute(
+            select(func.count()).select_from(CronJobExecution).where(*conditions)
+        )
+        total = count_result.scalar_one()
+
+        # 分页列表（按开始时间倒序）
+        result = await self.db.execute(
+            select(CronJobExecution)
+            .where(*conditions)
+            .order_by(CronJobExecution.started_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        items = list(result.scalars().all())
+
+        return items, total

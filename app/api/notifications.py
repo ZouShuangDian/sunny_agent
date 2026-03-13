@@ -44,6 +44,7 @@ def _serialize_notification(n: Notification) -> dict:
         "content": n.content,
         "session_id": n.session_id,
         "cron_job_id": n.cron_job_id,
+        "task_id": n.task_id,
         "is_read": n.is_read,
         "created_at": n.created_at.isoformat() if n.created_at else None,
     }
@@ -211,45 +212,39 @@ async def notification_stream(request: Request):
 
 
 async def _event_generator(usernumb: str):
-    """SSE 事件生成器
+    """SSE 事件生成器（纯实时推送，不补偿历史）
 
-    流程：先 subscribe → 查 DB 未读推送（断线补偿）→ 循环监听 Pub/Sub
-    注意：先 subscribe 再查 DB 会导致短暂重叠，前端需按 id 去重。
+    职责分离：
+    - SSE 只推送连接期间的实时通知（Pub/Sub）
+    - 历史未读通知由前端主动调 GET /api/notifications 获取
+    这样页面刷新时不会因断线补偿导致重复推送。
+
+    Pub/Sub 使用独立 Redis 连接（不占用主连接池），避免 SSE 长连接耗尽连接池。
     """
+    import redis.asyncio as aioredis
+
     channel = RedisKeys.notify_channel(usernumb)
     heartbeat_seconds = _settings.SSE_HEARTBEAT_SECONDS
 
-    # 创建专用 pubsub 对象（从连接池获取独立连接，不影响常规命令）
-    pubsub = redis_client.pubsub()
+    # 创建独立 Redis 连接用于 Pub/Sub（不经过主连接池，SSE 长连接不会占用池槽位）
+    dedicated_conn = aioredis.from_url(
+        _settings.REDIS_URL,
+        decode_responses=True,
+        socket_timeout=5,
+        socket_connect_timeout=5,
+    )
+    pubsub = dedicated_conn.pubsub()
 
     try:
-        # 先 subscribe 再查 DB，消除通知丢失窗口
         await pubsub.subscribe(channel)
 
-        # 查询并推送未读通知（断线补偿）
-        async with async_session() as db:
-            result = await db.execute(
-                select(Notification)
-                .where(
-                    Notification.usernumb == usernumb,
-                    Notification.is_read == False,  # noqa: E712
-                )
-                .order_by(Notification.created_at.desc())
-                .limit(20)
-            )
-            unread = result.scalars().all()
-            for n in reversed(unread):
-                data = json.dumps(_serialize_notification(n), ensure_ascii=False)
-                yield f"data: {data}\n\n"
-
-        # 监听 Redis Pub/Sub 接收新通知
+        # 仅监听实时 Pub/Sub，不查 DB 历史未读
         while True:
             message = await pubsub.get_message(
                 ignore_subscribe_messages=True,
                 timeout=heartbeat_seconds,
             )
             if message and message["type"] == "message":
-                # redis decode_responses=True，message['data'] 已经是 str
                 raw = message["data"]
                 payload = raw if isinstance(raw, str) else raw.decode("utf-8")
                 yield f"data: {payload}\n\n"
@@ -257,6 +252,6 @@ async def _event_generator(usernumb: str):
                 yield ": heartbeat\n\n"
 
     finally:
-        # 保证 pubsub 资源释放，防止连接泄漏
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()
+        await dedicated_conn.aclose()

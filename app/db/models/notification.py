@@ -35,7 +35,7 @@ class Notification(Base):
     # ── 通知内容 ──
     type: Mapped[str] = mapped_column(
         String(32), nullable=False,
-        comment="通知类型：cron_completed / cron_failed",
+        comment="通知类型：cron_completed / cron_failed / task_completed / task_failed",
     )
     title: Mapped[str] = mapped_column(
         String(200), nullable=False, comment="通知标题"
@@ -52,6 +52,10 @@ class Notification(Base):
     cron_job_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True,
         comment="关联的定时任务 ID（str(UUID)）",
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+        comment="关联的异步任务 ID（str(UUID)）",
     )
 
     # ── 状态 ──

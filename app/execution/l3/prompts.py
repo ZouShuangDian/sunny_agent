@@ -35,7 +35,9 @@ _L3_REACT_TEMPLATE = """\
 - 手册中若要求执行脚本 → 使用 `skill_exec(skill_name, script, args)`
 - **禁止**：未调用 `skill_call` 的情况下直接调用 `skill_exec`
 
-**何时不使用**：简单单步操作，直接调用基础工具更高效
+**何时不使用**：
+- 简单单步操作，直接调用基础工具更高效
+- 用户只是询问"有哪些技能/Skill"等信息性问题 → 直接根据 `skill_call` 工具描述中的列表回答，**不要调用工具**
 
 ## SubAgent 使用规范
 

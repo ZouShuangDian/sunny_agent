@@ -54,7 +54,7 @@ class ChatPersistence:
             user_id: 用户 ID
             first_message: 第一条消息（用于生成标题）
             project_id: 项目 ID（可选，用于关联项目）
-            source: 会话来源（'chat' | 'cron'），新建时写入
+            source: 会话来源（'chat' | 'cron' | 'async_task'），新建时写入
         """
         async with self._session_factory() as db:
             existing = await db.execute(

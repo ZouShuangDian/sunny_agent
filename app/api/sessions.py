@@ -27,10 +27,10 @@ log = structlog.get_logger()
 # ── 常量 ────────────────────────────────────────────────────────────────────
 
 TOOL_CALL_RESULT_MAX_LEN = 500
-"""tool_calls.result 超过此长度时截断"""
+"""tool_calls.result 超过此长度时截断（纯文本安全截断，不影响 JSON 结构）"""
 
-L3_STEP_CONTENT_MAX_LEN = 1000
-"""L3 step content 超过此长度时截断"""
+L3_STEP_CONTENT_MAX_LEN = 0
+"""L3 step content 截断阈值。0 = 不截断（content 可能是 JSON，粗暴截断会破坏结构导致前端解析失败）"""
 
 
 # ── Pydantic 响应模型 ──────────────────────────────────────────────────────
@@ -129,6 +129,7 @@ def _build_tool_calls(raw: list | None) -> list[ToolCallItem] | None:
 @router.get("")
 async def list_sessions(
     status: str = Query("active", description="过滤状态：active / archived / all"),
+    project_id: str | None = Query(None, description="项目 ID；不传则只返回不属于任何项目的对话"),
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(20, ge=1, le=50, description="每页数量（上限 50）"),
     db: AsyncSession = Depends(get_db),
@@ -142,6 +143,12 @@ async def list_sessions(
         base_where.append(ChatSession.status.in_(["active", "running"]))
     elif status != "all":
         base_where.append(ChatSession.status == status)
+
+    # 项目隔离：传 project_id 查项目内对话，不传则只查无项目归属的对话
+    if project_id:
+        base_where.append(ChatSession.project_id == project_id)
+    else:
+        base_where.append(ChatSession.project_id.is_(None))
 
     # 查询列表
     query = (
@@ -203,11 +210,28 @@ async def get_session_messages(
     if not session_row:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 查找最近的 compaction 节点，前端只显示压缩点之后的消息
+    compaction_query = (
+        select(ChatMessage.created_at)
+        .where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.is_compaction == True,  # noqa: E712
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    compaction_result = await db.execute(compaction_query)
+    compaction_time = compaction_result.scalar_one_or_none()
+
     # 构建消息查询
     conditions = [
         ChatMessage.session_id == session_id,
         ChatMessage.is_compaction == False,  # noqa: E712
     ]
+
+    # 只返回压缩点之后的消息（压缩点本身是摘要，不展示）
+    if compaction_time:
+        conditions.append(ChatMessage.created_at > compaction_time)
 
     # cursor 分页：查 before message_id 对应的 created_at
     if before:
@@ -247,8 +271,6 @@ async def get_session_messages(
         steps_result = await db.execute(steps_query)
         for s in steps_result.scalars().all():
             content = s.content or ""
-            if len(content) > L3_STEP_CONTENT_MAX_LEN:
-                content = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
             steps_map.setdefault(s.message_id, []).append(L3StepItem(
                 step_index=s.step_index,
                 role=s.role,
@@ -279,10 +301,6 @@ async def get_session_messages(
                 live_step_items = []
                 for s in raw:
                     item = json.loads(s)
-                    # 与 PG 路径对齐：截断超长 content
-                    content = item.get("content") or ""
-                    if len(content) > L3_STEP_CONTENT_MAX_LEN:
-                        item["content"] = content[:L3_STEP_CONTENT_MAX_LEN] + "...（已截断）"
                     live_step_items.append(L3StepItem(**item))
                 # 构造临时 assistant 消息，格式与完成后的 assistant 消息一致
                 messages.append(MessageItem(

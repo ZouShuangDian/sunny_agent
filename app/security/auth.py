@@ -8,12 +8,16 @@ from dataclasses import dataclass, field
 
 import jwt
 import redis.asyncio as aioredis
+import structlog
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 
 from app.cache.redis_client import RedisKeys, get_redis
 from app.config import get_settings
 from app.utils.token_util import hash_password, verify_password
+
+log = structlog.get_logger()
 
 settings = get_settings()
 bearer_scheme = HTTPBearer()
@@ -111,9 +115,32 @@ async def get_current_user(
     if jti and await redis.exists(RedisKeys.token_blacklist(jti)):
         raise HTTPException(status_code=401, detail="Token 已注销")
 
-    # 3. 构造用户上下文
+    # 3. 校验用户在 DB 中存在且激活（Redis 缓存 10 分钟）
+    user_id = payload["sub"]
+    cache_key = RedisKeys.user_active(user_id)
+    cached = await redis.get(cache_key)
+    if not cached:
+        # 缓存未命中，查 DB
+        from app.db.engine import async_session
+        from app.db.models.user import User
+        async with async_session() as session:
+            result = await session.execute(
+                select(User.is_active).where(User.id == uuid.UUID(user_id))
+            )
+            row = result.scalar_one_or_none()
+
+        if row is None:
+            log.warning("JWT 用户在 DB 中不存在", user_id=user_id)
+            raise HTTPException(status_code=401, detail="用户不存在，请重新登录")
+        if not row:
+            raise HTTPException(status_code=403, detail="账户已禁用")
+
+        # 写入缓存，10 分钟过期
+        await redis.setex(cache_key, 600, "1")
+
+    # 4. 构造用户上下文
     return AuthenticatedUser(
-        id=payload["sub"],
+        id=user_id,
         usernumb=payload.get("usernumb", ""),
         username=payload.get("username", ""),
         role=payload.get("role", "viewer"),

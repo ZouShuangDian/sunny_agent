@@ -49,6 +49,7 @@ from app.guardrails.schemas import IntentResult
 from app.llm.client import LLMClient
 from app.cache.redis_client import redis_client
 from app.execution.l3.live_steps_writer import LiveStepsWriter
+from app.execution.mode_context import get_mode_context
 from app.execution.plugin_context import PluginCommandContext, get_plugin_context
 from app.streaming.events import SSEEvent
 from app.tools.registry import ToolRegistry
@@ -328,7 +329,9 @@ class L3ReActEngine:
             messages=self._build_initial_messages(intent_result),
             observer=observer,
             config=self.config,
-            tool_schemas=self.tool_registry.get_all_schemas(),
+            tool_schemas=self.tool_registry.get_all_schemas(
+                include_mode_only=get_mode_context() is not None,
+            ),
             user_goal=user_goal,
             event_emitter=event_emitter,
         )
@@ -527,6 +530,10 @@ class L3ReActEngine:
         plugin_ctx = get_plugin_context()
         if plugin_ctx:
             system_prompt += _build_plugin_context_block(plugin_ctx)
+
+        mode_ctx = get_mode_context()
+        if mode_ctx:
+            system_prompt += mode_ctx.system_prompt_block
 
         history_messages = intent_result.history_messages or []
         selected_history = self._select_history_by_token(history_messages)

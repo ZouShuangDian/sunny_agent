@@ -38,6 +38,13 @@ _llm_client = LLMClient()
 _execution_router = ExecutionRouter(_llm_client)
 _chat_persistence = ChatPersistence(async_session)
 
+# source → sub_intent 映射表
+_SOURCE_SUB_INTENT_MAP = {
+    "chat": "chat",
+    "cron": "cron_execution",
+    "async_task": "async_task_execution",
+}
+
 
 async def run_agent_pipeline(
     *,
@@ -47,6 +54,7 @@ async def run_agent_pipeline(
     session_id: str | None = None,
     trace_id: str | None = None,
     source: str = "chat",
+    sub_intent: str | None = None,
 ) -> tuple[str, str]:
     """完整的 Agent 执行管线（非流式）
 
@@ -65,7 +73,8 @@ async def run_agent_pipeline(
         input_text: 投喂给 Agent 的用户消息
         session_id: 可选，为空则每次新建
         trace_id: 可选，用于日志追踪
-        source: 会话来源（'chat' | 'cron'）
+        source: 会话来源（'chat' | 'cron' | 'async_task'）
+        sub_intent: 可选，为空时按 source 自动映射
 
     Returns:
         (reply_text, session_id) 二元组
@@ -100,10 +109,11 @@ async def run_agent_pipeline(
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
 
+        actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
         intent_result = IntentResult(
             intent=IntentDetail(
                 primary="general",
-                sub_intent="cron_execution",
+                sub_intent=actual_sub_intent,
                 user_goal=input_text,
             ),
             raw_input=input_text,

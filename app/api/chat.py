@@ -41,6 +41,12 @@ from app.execution.plugin_context import (
     reset_plugin_context,
     set_plugin_context,
 )
+from app.execution.mode_context import (
+    BUILTIN_MODES,
+    ModeContext,
+    reset_mode_context,
+    set_mode_context,
+)
 from app.chat_ops import agent_scope, set_session_running, finalize_execution, cleanup_session
 from app.plugins.service import plugin_service
 from app.security.audit import audit_logger
@@ -248,6 +254,54 @@ def _build_plugin_error_result(message: str, session_id: str, trace_id: str) -> 
     )
 
 
+# ── 内置模式处理 ──
+
+async def _build_mode_intent(
+    message: str,
+    mode_name: str,
+    user: AuthenticatedUser,
+    session_id: str,
+    memory: WorkingMemory,
+    trace_id: str,
+) -> tuple[IntentResult, CtxToken]:
+    """
+    内置模式（/mode:xxx）intent 构造。
+
+    返回 (IntentResult, mode_context_token)。
+    """
+    prompt_block = BUILTIN_MODES[mode_name]
+
+    # 提取 /mode:xxx 之后的用户输入
+    _, _, user_input = message.partition(" ")
+    user_input = user_input.strip()
+    raw_input = user_input if user_input else f"进入{mode_name}模式"
+
+    # 设置 ModeContext ContextVar
+    mode_ctx = ModeContext(
+        mode_name=mode_name,
+        user_input=user_input,
+        system_prompt_block=prompt_block,
+    )
+    mode_token = set_mode_context(mode_ctx)
+
+    # 加载历史消息
+    context_builder = ContextBuilder(memory)
+    history_messages = await context_builder.load_history_messages(session_id)
+
+    intent_result = IntentResult(
+        intent=IntentDetail(
+            primary="builtin_mode",
+            sub_intent=f"mode:{mode_name}",
+            user_goal=raw_input,
+        ),
+        raw_input=raw_input,
+        session_id=session_id,
+        trace_id=trace_id,
+        history_messages=history_messages,
+    )
+    return intent_result, mode_token
+
+
 # ── 公共意图管线 ──
 
 async def _run_intent_pipeline(
@@ -257,25 +311,35 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
-) -> tuple[IntentResult, CtxToken | None]:
+) -> tuple[IntentResult, CtxToken | None, CtxToken | None]:
     """
     公共意图管线，/chat 和 /chat/stream 共享。
-    返回 (intent_result, plugin_token)。
+    返回 (intent_result, plugin_token, mode_token)。
 
-    Plugin 命令在此内部处理：跳过意图分析，直接构造 synthetic intent。
-    非 Plugin 路径：加载历史 + 直接构造 IntentResult。
+    检测优先级：/mode:xxx（内置模式）→ /plugin:command（Plugin）→ 常规对话。
     """
-    # Plugin 命令快速路径
+    # 斜杠命令快速路径
     if message.startswith("/") and ":" in message.split()[0]:
+        cmd_part = message.split()[0][1:]  # 去掉 /
+        prefix, _, command = cmd_part.partition(":")
+
+        # 内置模式：/mode:deep-research
+        if prefix == "mode" and command in BUILTIN_MODES:
+            intent_result, mode_token = await _build_mode_intent(
+                message, command, user, session_id, memory, trace_id,
+            )
+            return intent_result, None, mode_token
+
+        # Plugin 命令：/plugin-name:command-name
         intent_result, plugin_token = await _build_plugin_intent(
             message, user, session_id, memory, trace_id,
         )
         if intent_result is not None:
-            return intent_result, plugin_token
+            return intent_result, plugin_token, None
         # Plugin 未找到 → 直接返回错误
-        return _build_plugin_error_result(message, session_id, trace_id), None
+        return _build_plugin_error_result(message, session_id, trace_id), None, None
 
-    # 非 Plugin：加载历史 + 直接构造 IntentResult
+    # 常规对话：加载历史 + 直接构造 IntentResult
     context_builder = ContextBuilder(memory)
     history_messages = await context_builder.load_history_messages(session_id)
 
@@ -286,7 +350,7 @@ async def _run_intent_pipeline(
         trace_id=trace_id,
         history_messages=history_messages,
     )
-    return intent_result, None
+    return intent_result, None, None
 
 
 # ── 公共会话初始化（含 PG 回源） ──
@@ -336,8 +400,8 @@ async def chat(
     session_id = body.session_id or str(uuid.uuid4())
     await _init_session(session_id, user, memory, body.message)
 
-    # 意图管线（Plugin 命令在管线内部处理）
-    final_result, plugin_token = await _run_intent_pipeline(
+    # 意图管线（Plugin / Mode 命令在管线内部处理）
+    final_result, plugin_token, mode_token = await _run_intent_pipeline(
         message=body.message, user=user, session_id=session_id,
         memory=memory, redis=redis, trace_id=trace_id,
     )
@@ -409,9 +473,11 @@ async def chat(
             context_usage=exec_result.context_usage if exec_result else None,
         ))
     finally:
-        # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
+        # ContextVar 精确还原（非命令路径 token=None，跳过 reset）
         if plugin_token is not None:
             reset_plugin_context(plugin_token)
+        if mode_token is not None:
+            reset_mode_context(mode_token)
 
 
 # ── POST /chat/stream — SSE 流式响应 ──
@@ -438,8 +504,8 @@ async def chat_stream(
             session_id = body.session_id or str(uuid.uuid4())
             await _init_session(session_id, user, memory, body.message)
 
-            # 返回二元组：Plugin 路径返回 plugin_token，非 Plugin 路径 plugin_token=None
-            final_result, plugin_token = await _run_intent_pipeline(
+            # 返回三元组：Plugin/Mode 路径返回对应 token，其余为 None
+            final_result, plugin_token, mode_token = await _run_intent_pipeline(
                 message=body.message, user=user, session_id=session_id,
                 memory=memory, redis=redis, trace_id=trace_id,
             )
@@ -554,9 +620,11 @@ async def chat_stream(
                 # 兜底清理：如果 set_session_running 后、内层 try 前发生异常，确保不卡在 running
                 if session_is_running:
                     asyncio.create_task(cleanup_session(session_id))
-                # Plugin ContextVar 精确还原（非 Plugin 路径 plugin_token=None，跳过 reset）
+                # ContextVar 精确还原（非命令路径 token=None，跳过 reset）
                 if plugin_token is not None:
                     reset_plugin_context(plugin_token)
+                if mode_token is not None:
+                    reset_mode_context(mode_token)
 
         except Exception as e:
             log.error("SSE 流式处理异常", error=str(e), exc_info=True)

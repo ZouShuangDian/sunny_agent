@@ -25,7 +25,9 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.api.response import ApiResponse, ok
-from app.api.upload_utils import check_zip_safety, find_zip_root, parse_frontmatter, validate_name
+from app.api.upload_utils import (
+    check_zip_safety, find_zip_root, parse_frontmatter, scan_directory_files, validate_name,
+)
 from app.config import get_settings
 from app.db.engine import async_session
 from app.security.auth import AuthenticatedUser, get_current_user
@@ -67,6 +69,11 @@ async def upload_skill(
             check_zip_safety(zf)
             zip_root = find_zip_root(zf)
             zf.extractall(extract_dir)
+
+        # 清理 Mac 压缩工具生成的 __MACOSX 目录
+        macosx_dir = extract_dir / "__MACOSX"
+        if macosx_dir.exists():
+            shutil.rmtree(macosx_dir)
 
         # 3. 找到实际 Skill 根目录
 
@@ -342,3 +349,50 @@ async def toggle_skill(
     state = "已开启" if body.is_enabled else "已关闭"
     log.info("Skill 开关切换", skill_name=skill_name, is_enabled=body.is_enabled, usernumb=user.usernumb)
     return ok(message=f"Skill '{skill_name}' {state}")
+
+
+# ── GET /api/skills/{skill_name}/files ────────────────────────
+
+@router.get("/{skill_name}/files", response_model=ApiResponse)
+async def get_skill_files(
+    skill_name: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    获取 Skill 完整文件内容（目录树 + 文件内容一次性返回）。
+
+    权限：系统 Skill 所有人可查看，个人 Skill 仅创建者可查看。
+    """
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT s.name, s.description, s.scope, s.path, s.has_scripts
+            FROM sunny_agent.skills s
+            WHERE s.name = :name AND s.is_active = TRUE
+              AND (s.scope = 'system' OR s.owner_usernumb = :usernumb)
+        """), {"name": skill_name, "usernumb": user.usernumb})
+        row = result.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' 不存在或无权限查看")
+
+    # 读取 volume 上的文件
+    volume_root = Path(settings.SANDBOX_HOST_VOLUME).resolve()
+    skill_dir = (volume_root / row.path).resolve()
+
+    try:
+        skill_dir.relative_to(volume_root)
+    except ValueError:
+        raise HTTPException(status_code=500, detail="Skill 路径异常")
+
+    if not skill_dir.exists():
+        raise HTTPException(status_code=404, detail="Skill 文件目录不存在")
+
+    files = scan_directory_files(skill_dir)
+
+    return ok(data={
+        "name": row.name,
+        "description": row.description,
+        "scope": row.scope,
+        "has_scripts": row.has_scripts,
+        "files": files,
+    })

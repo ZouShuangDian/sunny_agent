@@ -7,12 +7,14 @@ arq 任务函数：定时任务执行。
 
 import asyncio
 import uuid as _uuid
+from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import update
 
 from app.db.engine import async_session
 from app.db.models.cron_job import CronJob
+from app.db.models.cron_execution import CronJobExecution
 from app.execution.pipeline import run_agent_pipeline
 from app.notify import NotificationType, notify_user
 
@@ -39,6 +41,15 @@ async def execute_cron_job(
         usernumb=usernumb,
     )
 
+    # 写入执行记录（running 状态）
+    execution_id = await _create_execution(
+        cron_job_id=cron_job_id,
+        usernumb=usernumb,
+        name=name,
+        input_text=input_text,
+        session_id=session_id,
+    )
+
     try:
         # P0-3：解包 tuple 返回值
         reply, actual_sid = await run_agent_pipeline(
@@ -53,6 +64,9 @@ async def execute_cron_job(
         # P0-2：shield 保护，防止 CancelledError 中断
         await asyncio.shield(
             _update_cron_status(cron_job_id, status="completed", error=None)
+        )
+        await asyncio.shield(
+            _finish_execution(execution_id, status="completed", error=None)
         )
         await asyncio.shield(notify_user(
             usernumb,
@@ -70,6 +84,9 @@ async def execute_cron_job(
         await asyncio.shield(
             _update_cron_status(cron_job_id, status="timeout", error="arq job_timeout exceeded")
         )
+        await asyncio.shield(
+            _finish_execution(execution_id, status="timeout", error="arq job_timeout exceeded")
+        )
         await asyncio.shield(notify_user(
             usernumb,
             notify_type=NotificationType.CRON_FAILED,
@@ -84,6 +101,9 @@ async def execute_cron_job(
         await asyncio.shield(
             _update_cron_status(cron_job_id, status="failed", error=str(e)[:500])
         )
+        await asyncio.shield(
+            _finish_execution(execution_id, status="failed", error=str(e)[:500])
+        )
         await asyncio.shield(notify_user(
             usernumb,
             notify_type=NotificationType.CRON_FAILED,
@@ -94,6 +114,46 @@ async def execute_cron_job(
 
     finally:
         structlog.contextvars.unbind_contextvars("trace_id", "cron_job_id", "usernumb")
+
+
+async def _create_execution(
+    cron_job_id: str,
+    usernumb: str,
+    name: str,
+    input_text: str,
+    session_id: str | None,
+) -> str:
+    """创建执行记录，返回 execution_id"""
+    execution = CronJobExecution(
+        cron_job_id=cron_job_id,
+        usernumb=usernumb,
+        name=name,
+        input_text=input_text,
+        session_id=session_id,
+        status="running",
+    )
+    async with async_session() as session:
+        session.add(execution)
+        await session.commit()
+        await session.refresh(execution)
+        eid = str(execution.id)
+    log.info("执行记录已创建", execution_id=eid)
+    return eid
+
+
+async def _finish_execution(execution_id: str, status: str, error: str | None) -> None:
+    """完成执行记录（更新状态和完成时间）"""
+    async with async_session() as session:
+        await session.execute(
+            update(CronJobExecution)
+            .where(CronJobExecution.id == execution_id)
+            .values(
+                status=status,
+                error_message=error,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
 
 
 async def _update_cron_status(cron_job_id: str, status: str, error: str | None) -> None:
