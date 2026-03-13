@@ -289,6 +289,49 @@ async def list_plugins(
     return ok(data={"plugins": plugins, "total": len(plugins)})
 
 
+# ── GET /api/plugins/commands ─────────────────────────────────
+
+@router.get("/commands", response_model=ApiResponse)
+async def list_available_commands(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    返回当前用户所有可用的 Plugin Commands（仅已启用的 Plugin）。
+
+    前端用于展示命令面板 / 自动补全。
+    """
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT
+                p.name       AS plugin_name,
+                p.description AS plugin_description,
+                pc.name      AS command_name,
+                pc.description AS command_description,
+                pc.argument_hint
+            FROM sunny_agent.plugins p
+            JOIN sunny_agent.plugin_commands pc
+                ON pc.plugin_id = p.id
+            WHERE p.owner_usernumb = :usernumb
+              AND p.is_active = TRUE
+            ORDER BY p.name, pc.name
+        """), {"usernumb": user.usernumb})
+        rows = result.fetchall()
+
+    commands = [
+        {
+            "plugin_name": row.plugin_name,
+            "plugin_description": row.plugin_description,
+            "command_name": row.command_name,
+            "command_description": row.command_description,
+            "argument_hint": row.argument_hint,
+            "full_command": f"/{row.plugin_name}:{row.command_name}",
+        }
+        for row in rows
+    ]
+
+    return ok(data={"commands": commands, "total": len(commands)})
+
+
 # ── DELETE /api/plugins/{plugin_name} ────────────────────────
 
 @router.delete("/{plugin_name}", response_model=ApiResponse)
@@ -424,3 +467,5 @@ async def get_plugin_files(
         "version": row.version,
         "files": files,
     })
+
+
