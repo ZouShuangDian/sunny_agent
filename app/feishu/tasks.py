@@ -20,6 +20,11 @@ from app.config import get_settings
 from app.db.engine import async_session
 from app.feishu.access_control import get_access_controller
 from app.feishu.block_streaming import get_block_streaming_manager
+from app.feishu.card_status_manager import (
+    get_card_status_manager,
+    CardStatus,
+    cleanup_card_status_manager,
+)
 from app.feishu.client import FeishuClient, FeishuError, get_feishu_client
 from app.feishu.debounce import get_debounce_manager
 from app.feishu.media_downloader import get_media_downloader
@@ -78,12 +83,31 @@ async def _process_message_internal(
                message_id=message_id,
                chat_type=chat_type)
     
-    # 2. 创建/更新审计日志
-    log_entry = await _create_or_update_log(
-        db, event_id, message_id, open_id, chat_id, chat_type, msg_type, content
+    # ← 新增：创建卡片状态管理器
+    card_status = await get_card_status_manager(
+        open_id=open_id,
+        chat_id=chat_id,
+        app_id=app_id,
+    )
+    
+    # ← 新增：开始卡片会话（显示"⏳ 思考中..."）
+    receive_id = chat_id if chat_type == "group" else open_id
+    receive_id_type = "chat_id" if chat_type == "group" else "open_id"
+    
+    await card_status.start_session(
+        open_id=open_id,
+        chat_id=chat_id,
+        receive_id=receive_id,
+        app_id=app_id,
+        receive_id_type=receive_id_type,
     )
     
     try:
+        # 2. 创建/更新审计日志
+        log_entry = await _create_or_update_log(
+            db, event_id, message_id, open_id, chat_id, chat_type, msg_type, content
+        )
+        
         # 3. 更新状态为处理中
         log_entry.status = "processing"
         log_entry.processing_started_at = datetime.utcnow()
@@ -99,6 +123,8 @@ async def _process_message_internal(
             if result == "buffered":
                 # 消息已缓冲，稍后处理
                 log_entry.status = "buffering"
+                # ← 新增：更新状态为校验中
+                await card_status.update_status(CardStatus.VALIDATING)
                 await db.commit()
                 logger.info("Message buffered",
                            event_id=event_id,
@@ -214,6 +240,10 @@ async def _process_message_internal(
             log_entry.error_message = reason
             await db.commit()
             
+            # ← 新增：拒绝时也显示状态
+            await card_status.update_status(CardStatus.VALIDATING)
+            await asyncio.sleep(0.5)  # 短暂显示校验状态
+            
             # 发送拒绝提示
             feishu_client = await get_feishu_client(app_id, db)
             rejection_msg = access_controller.get_rejection_message(reason)
@@ -222,6 +252,9 @@ async def _process_message_internal(
                 text=rejection_msg,
                 receive_id_type="chat_id" if chat_type == "group" else "open_id"
             )
+            
+            # ← 清理状态管理器
+            await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
             
             return {"status": "rejected", "reason": reason}
         
@@ -279,16 +312,13 @@ async def _process_message_internal(
         except Exception as e:
             logger.warning("Failed to load block_streaming_config", error=str(e))
         
-        # 创建 BlockStreamingManager
-        feishu_client = await get_feishu_client(app_id, db)
-        bs_manager = await get_block_streaming_manager(feishu_client, bs_config)
-        
-        # 获取接收ID
+        # ← 修改：使用 CardStatusManager 统一管理状态和 BlockStreaming
+        # 获取接收 ID
         receive_id = chat_id if chat_type == "group" else open_id
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
         
-        # 启动流式卡片
-        card_id, message_id = await bs_manager.start_streaming(receive_id, receive_id_type)
+        # ← 更新状态为"生成答案中"
+        await card_status.update_status(CardStatus.GENERATING)
         
         # 11. AI处理 - 使用流式版本（支持媒体文件）
         from app.execution.pipeline import run_agent_pipeline_streaming
@@ -325,7 +355,7 @@ async def _process_message_internal(
         #     await asyncio.sleep(delay_ms / 1000)
         
         # 13. BlockStreaming 流式累积和发送
-        # 按段落/句子智能分割
+        # ← 修改：使用 CardStatusManager 统一更新卡片内容
         import re
         
         # 先按段落分割
@@ -334,18 +364,22 @@ async def _process_message_internal(
         for para in paragraphs:
             if not para.strip():
                 continue
-                
-            # 添加到 BlockStreaming 缓冲区，内部会自动更新卡片
-            await bs_manager.update_streaming(
-                open_id=open_id,
-                chat_id=chat_id,
-                text=para,
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-            )
+            
+            # ← 使用 CardStatusManager 更新卡片内容（显示生成的文本）
+            await card_status.update_card_content(para)
         
-        # 关闭流式卡片，发送剩余内容并清除 "[Generating...]" 状态
-        await bs_manager.close_streaming(open_id, chat_id, final_text=reply_text)
+        # 关闭流式卡片，发送剩余内容并清除状态
+        await card_status.complete(
+            final_answer=reply_text,
+            send_as_message=False,  # 更新到同一张卡片，不另发消息
+        )
+        
+        # ← 清理状态管理器
+        await cleanup_card_status_manager(
+            open_id=open_id,
+            chat_id=chat_id,
+            app_id=app_id,
+        )
         
         # 13. 完成处理
         processing_end = datetime.utcnow()
@@ -375,6 +409,15 @@ async def _process_message_internal(
                     event_id=event_id,
                     error=str(e),
                     exc_info=True)
+        
+        # ← 新增：设置错误状态
+        if card_status:
+            await card_status.set_error(str(e))
+            await cleanup_card_status_manager(
+                open_id=open_id,
+                chat_id=chat_id,
+                app_id=app_id,
+            )
         
         log_entry.status = "failed"
         log_entry.error_type = "processing_error"

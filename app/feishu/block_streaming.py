@@ -1,6 +1,23 @@
 """
 BlockStreaming 模块
 实现流式累积、分块发送、段落感知刷新
+
+支持两种模式:
+1. Block模式(默认): 累积文本后批量刷新 (min_chars/max_chars/idle_ms)
+2. 打字机模式: 50ms/次，每次2字符，逐字显示打字机效果
+
+使用示例:
+    # Block模式（默认）
+    config = {"min_chars": 800, "max_chars": 1200}
+    manager = BlockStreamingManager(client, config)
+    
+    # 打字机模式
+    config = {
+        "typewriter_mode": True,
+        "typewriter_interval_ms": 50,
+        "typewriter_chars_per_update": 2
+    }
+    manager = BlockStreamingManager(client, config)
 """
 
 import asyncio
@@ -19,6 +36,10 @@ DEFAULT_MAX_CHARS = 1200
 DEFAULT_IDLE_MS = 1000
 DEFAULT_CHUNK_SIZE = 2000
 
+# 打字机模式配置
+DEFAULT_TYPEWRITER_INTERVAL_MS = 50  # 50ms/次
+DEFAULT_TYPEWRITER_CHARS_PER_UPDATE = 2  # 每次2字符
+
 
 class BlockStreamingState:
     """BlockStreaming 状态管理"""
@@ -30,12 +51,18 @@ class BlockStreamingState:
         idle_ms: int = DEFAULT_IDLE_MS,
         flush_on_enqueue: bool = True,
         paragraph_aware: bool = True,
+        typewriter_mode: bool = False,
+        typewriter_interval_ms: int = DEFAULT_TYPEWRITER_INTERVAL_MS,
+        typewriter_chars_per_update: int = DEFAULT_TYPEWRITER_CHARS_PER_UPDATE,
     ):
         self.min_chars = min_chars
         self.max_chars = max_chars
         self.idle_ms = idle_ms
         self.flush_on_enqueue = flush_on_enqueue
         self.paragraph_aware = paragraph_aware
+        self.typewriter_mode = typewriter_mode
+        self.typewriter_interval_ms = typewriter_interval_ms
+        self.typewriter_chars_per_update = typewriter_chars_per_update
         
         self.buffer = ""
         self.last_update_time = 0
@@ -46,6 +73,11 @@ class BlockStreamingState:
         self.chunks_sent = 0
         self.total_text = ""
         self.sequence = 0  # 用于流式更新的序列号
+        
+        # 打字机模式专用
+        self.displayed_text = ""  # 已显示的文本
+        self.pending_text = ""    # 待显示的文本缓冲区
+        self.typewriter_task: Optional[asyncio.Task] = None  # 打字机更新任务
         
     def add_text(self, text: str) -> bool:
         """
@@ -113,7 +145,12 @@ class BlockStreamingState:
 
 
 class BlockStreamingManager:
-    """BlockStreaming 管理器"""
+    """BlockStreaming 管理器
+    
+    支持两种模式:
+    1. Block模式(默认): 累积文本后批量刷新 (min_chars/max_chars)
+    2. 打字机模式: 50ms/次，每次2字符，逐字显示
+    """
     
     def __init__(
         self,
@@ -129,6 +166,15 @@ class BlockStreamingManager:
         self.flush_on_enqueue = self.config.get("flush_on_enqueue", True)
         self.paragraph_aware = self.config.get("paragraph_aware", True)
         self.chunk_size = self.config.get("chunk_size", DEFAULT_CHUNK_SIZE)
+        
+        # 打字机模式配置
+        self.typewriter_mode = self.config.get("typewriter_mode", False)
+        self.typewriter_interval_ms = self.config.get(
+            "typewriter_interval_ms", DEFAULT_TYPEWRITER_INTERVAL_MS
+        )
+        self.typewriter_chars_per_update = self.config.get(
+            "typewriter_chars_per_update", DEFAULT_TYPEWRITER_CHARS_PER_UPDATE
+        )
         
         self._streaming_states: dict[str, BlockStreamingState] = {}
         self._idle_timers: dict[str, asyncio.Task] = {}
@@ -152,6 +198,9 @@ class BlockStreamingManager:
                 idle_ms=self.idle_ms,
                 flush_on_enqueue=self.flush_on_enqueue,
                 paragraph_aware=self.paragraph_aware,
+                typewriter_mode=self.typewriter_mode,
+                typewriter_interval_ms=self.typewriter_interval_ms,
+                typewriter_chars_per_update=self.typewriter_chars_per_update,
             )
         
         return self._streaming_states[key]
@@ -214,6 +263,10 @@ class BlockStreamingManager:
         """
         更新流式回复
         
+        支持两种模式:
+        - Block模式: 累积文本后批量刷新
+        - 打字机模式: 50ms/次，每次2字符
+        
         Returns:
             (是否应该发送, 要发送的文本)
         """
@@ -225,13 +278,30 @@ class BlockStreamingManager:
                 card_id, message_id = await self.start_streaming(receive_id, receive_id_type)
                 state.card_id = card_id
                 state.message_id = message_id
+                
+                # 打字机模式: 启动打字机更新任务
+                if state.typewriter_mode:
+                    state.typewriter_task = asyncio.create_task(
+                        self._typewriter_update_loop(state)
+                    )
+                    logger.info("Typewriter mode started",
+                               open_id=open_id,
+                               chat_id=chat_id,
+                               interval_ms=state.typewriter_interval_ms,
+                               chars_per_update=state.typewriter_chars_per_update)
             except Exception as e:
                 # 创建失败，回退到普通消息
                 logger.error("Failed to start streaming, falling back",
                             error=str(e))
                 return True, text
         
-        # 添加文本到缓冲
+        # 打字机模式: 追加到待显示缓冲区
+        if state.typewriter_mode:
+            state.total_text += text
+            state.pending_text += text
+            return False, ""
+        
+        # Block模式: 原有逻辑
         should_flush = state.add_text(text)
         
         # 启动空闲定时器
@@ -250,6 +320,46 @@ class BlockStreamingManager:
             return True, buffer_text
         
         return False, ""
+    
+    async def _typewriter_update_loop(self, state: BlockStreamingState):
+        """
+        打字机模式更新循环
+        
+        每50ms更新一次，每次显示2个字符
+        """
+        interval = state.typewriter_interval_ms / 1000.0  # 转换为秒
+        chars_per_update = state.typewriter_chars_per_update
+        
+        logger.debug(f"Starting typewriter loop: interval={interval}s, chars={chars_per_update}")
+        
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                
+                # 检查是否有待显示的文本
+                if not state.pending_text:
+                    # 如果没有待显示文本且总文本已显示完毕，退出循环
+                    if len(state.displayed_text) >= len(state.total_text):
+                        break
+                    continue
+                
+                # 取出指定数量的字符
+                chars_to_display = state.pending_text[:chars_per_update]
+                state.pending_text = state.pending_text[chars_per_update:]
+                
+                # 更新已显示文本
+                state.displayed_text += chars_to_display
+                state.sequence += 1
+                
+                # 更新卡片
+                await self.update_card_content(state, state.displayed_text)
+                
+            except asyncio.CancelledError:
+                logger.debug("Typewriter loop cancelled")
+                break
+            except Exception as e:
+                logger.warning(f"Typewriter update failed: {e}")
+                continue
     
     async def update_card_content(self, state: BlockStreamingState, content: str):
         """更新流式卡片内容"""
@@ -328,9 +438,28 @@ class BlockStreamingManager:
         try:
             # Step 1: 发送剩余内容
             final_content = final_text or state.total_text
-            if state.buffer:
-                await self.update_card_content(state, state.buffer)
-                state.clear_buffer()
+            
+            # 打字机模式: 等待打字机任务完成或强制刷新
+            if state.typewriter_mode:
+                if state.typewriter_task and not state.typewriter_task.done():
+                    # 快速刷新剩余内容
+                    if state.pending_text:
+                        state.displayed_text += state.pending_text
+                        state.pending_text = ""
+                        state.sequence += 1
+                        await self.update_card_content(state, state.displayed_text)
+                    
+                    # 取消打字机任务
+                    state.typewriter_task.cancel()
+                    try:
+                        await state.typewriter_task
+                    except asyncio.CancelledError:
+                        pass
+            else:
+                # Block模式: 原有逻辑
+                if state.buffer:
+                    await self.update_card_content(state, state.buffer)
+                    state.clear_buffer()
             
             # Step 2: 关闭流式模式
             # 生成 summary（截断文本用于聊天预览）
@@ -346,7 +475,8 @@ class BlockStreamingManager:
             logger.info("Streaming session closed",
                        open_id=open_id,
                        chat_id=chat_id,
-                       card_id=state.card_id)
+                       card_id=state.card_id,
+                       typewriter_mode=state.typewriter_mode)
             
         except Exception as e:
             logger.error("Failed to close streaming session",

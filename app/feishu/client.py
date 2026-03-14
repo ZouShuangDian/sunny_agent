@@ -419,6 +419,13 @@ class FeishuClient:
             json_data["sequence"] = sequence
             json_data["uuid"] = f"stream_{card_id}_{sequence}"
         
+        # 添加调试日志
+        logger.debug("Updating streaming card",
+                    card_id=card_id,
+                    element_id=element_id,
+                    sequence=sequence,
+                    content_length=len(content))
+        
         try:
             response = await self._request(
                 "PUT",
@@ -433,8 +440,11 @@ class FeishuClient:
         except FeishuError as e:
             # 流式更新失败时不抛出异常，避免中断整个流程
             logger.warning("Failed to update streaming card", 
-                          card_id=card_id, 
-                          error=e.message)
+                          card_id=card_id,
+                          element_id=element_id,
+                          sequence=sequence,
+                          error=e.message,
+                          response=e.response)
             return {"code": e.code or -1, "msg": e.message}
     
     async def close_streaming_card(
@@ -461,6 +471,12 @@ class FeishuClient:
             json_data["sequence"] = sequence
             json_data["uuid"] = f"close_{card_id}_{sequence}"
         
+        # 添加调试日志
+        logger.debug("Closing streaming card",
+                    card_id=card_id,
+                    sequence=sequence,
+                    json_data=json_data)
+        
         try:
             response = await self._request(
                 "PATCH",
@@ -471,8 +487,11 @@ class FeishuClient:
             return response
         except FeishuError as e:
             logger.error("Failed to close streaming card", 
-                        card_id=card_id, 
-                        error=e.message)
+                        card_id=card_id,
+                        sequence=sequence,
+                        json_data=json_data,
+                        error=e.message,
+                        response=e.response)
             raise
     
     async def download_media(
@@ -493,6 +512,73 @@ class FeishuClient:
             raise FeishuError(f"下载媒体文件失败: HTTP {response.status_code}")
         
         return response.content
+    
+    async def delete_message(self, message_id: str) -> dict:
+        """
+        删除消息（撤回）
+        
+        调用 DELETE /im/v1/messages/{message_id}
+        用于删除"思考中..."等临时消息
+        """
+        try:
+            response = await self._request(
+                "DELETE",
+                f"/im/v1/messages/{message_id}",
+            )
+            logger.info("Message deleted", message_id=message_id)
+            return response
+        except FeishuError as e:
+            logger.warning("Failed to delete message", 
+                          message_id=message_id, 
+                          error=e.message)
+            # 不抛出异常，因为删除失败不应该影响主流程
+            return {"code": e.code or -1, "msg": e.message}
+    
+    async def replace_card_content(
+        self,
+        card_id: str,
+        new_content: str,
+        element_id: str = "streaming_content",
+    ) -> dict:
+        """
+        覆盖卡片内容
+        
+        将指定卡片的内容完全替换为新内容。适用于将"思考中..."替换为最终回复。
+        
+        Args:
+            card_id: 卡片ID
+            new_content: 新内容（支持Markdown格式）
+            element_id: 要更新的元素ID，默认为"streaming_content"
+        
+        Returns:
+            API响应
+        
+        Example:
+            # 将卡片内容从"思考中..."替换为"我明白了你的问题"
+            await client.replace_card_content(
+                card_id="23232",
+                new_content="我明白了你的问题"
+            )
+        """
+        try:
+            response = await self._request(
+                "PUT",
+                f"/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
+                json_data={
+                    "content": new_content,
+                    "uuid": f"replace_{card_id}_{str(int(time.time()))}",
+                }
+            )
+            logger.info("Card content replaced",
+                       card_id=card_id,
+                       element_id=element_id,
+                       content_length=len(new_content))
+            return response
+        except FeishuError as e:
+            logger.error("Failed to replace card content",
+                        card_id=card_id,
+                        error=e.message)
+            raise
     
     async def close(self):
         """关闭HTTP客户端"""

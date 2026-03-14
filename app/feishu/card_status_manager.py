@@ -48,10 +48,13 @@ class CardSession:
     card_id: str
     message_id: str
     status: CardStatus = CardStatus.THINKING
+    app_id: str = ""  # 支持多机器人
     open_id: str = ""
     chat_id: str = ""
     receive_id: str = ""
     receive_id_type: str = "open_id"
+    element_id: str = "streaming_content"  # 流式元素 ID
+    accumulated_content: str = ""  # ← 新增：累积的内容（用于流式更新）
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     sequence: int = 0
@@ -117,6 +120,7 @@ class CardStatusManager:
         open_id: str,
         chat_id: str,
         receive_id: str,
+        app_id: str = "",
         receive_id_type: str = "open_id",
         title: str = None,
     ) -> CardSession:
@@ -127,6 +131,7 @@ class CardStatusManager:
             open_id: 用户 open_id
             chat_id: 会话 chat_id
             receive_id: 接收者 ID
+            app_id: 机器人应用 ID（支持多机器人）
             receive_id_type: 接收者 ID 类型
             title: 卡片标题（可选）
         
@@ -145,6 +150,7 @@ class CardStatusManager:
                 card_id=card_id,
                 message_id=message_id,
                 status=CardStatus.THINKING,
+                app_id=app_id,
                 open_id=open_id,
                 chat_id=chat_id,
                 receive_id=receive_id,
@@ -303,9 +309,51 @@ class CardStatusManager:
     
     def _get_state(self):
         """获取 BlockStreamingState"""
-        return self.block_streaming_manager._get_or_create_state(
+        state = self.block_streaming_manager._get_or_create_state(
             self.session.open_id,
             self.session.chat_id,
+        )
+        # ← 关键修复：确保 state 中的 card_id 与 session 一致
+        # 这样 update_card_content 时就能正确更新卡片
+        if self.session and self.session.card_id:
+            state.card_id = self.session.card_id
+            state.element_id = self.session.element_id
+        return state
+    
+    async def update_card_content(self, content: str):
+        """
+        更新卡片内容（用于显示 AI 生成的文本）
+        
+        采用累积模式：每次更新时将新内容追加到已有内容后面
+        
+        Args:
+            content: 要显示的内容（新内容片段）
+        """
+        if not self.session:
+            logger.warning("Cannot update card content: no active session")
+            return
+        
+        if not self.session.card_id:
+            logger.warning("Cannot update card content: no card_id in session")
+            return
+        
+        # ← 累积内容：将新内容追加到已有内容后面
+        self.session.accumulated_content += content
+        
+        # 使用累积的全部内容更新卡片
+        state = self._get_state()
+        # 确保 state 中的 card_id 与 session 一致
+        state.card_id = self.session.card_id
+        state.element_id = self.session.element_id
+        
+        logger.debug("Updating card with accumulated content",
+                    card_id=self.session.card_id,
+                    accumulated_length=len(self.session.accumulated_content),
+                    new_content_length=len(content))
+        
+        await self.block_streaming_manager.update_card_content(
+            state, 
+            self.session.accumulated_content  # ← 使用累积的全部内容
         )
     
     def get_session(self) -> Optional[CardSession]:
@@ -321,13 +369,14 @@ class CardStatusManager:
                 self.session = None
 
 
-# 全局管理器实例
+# 全局管理器实例（支持多机器人，key 包含 app_id）
 _card_status_managers: dict[str, CardStatusManager] = {}
 
 
 async def get_card_status_manager(
     open_id: str,
     chat_id: str,
+    app_id: str = "",
     feishu_client: FeishuClient = None,
     block_streaming_manager: BlockStreamingManager = None,
 ) -> CardStatusManager:
@@ -337,18 +386,20 @@ async def get_card_status_manager(
     Args:
         open_id: 用户 open_id
         chat_id: 会话 chat_id
+        app_id: 机器人应用 ID（支持多机器人）
         feishu_client: 飞书客户端（可选）
         block_streaming_manager: 流式管理器（可选）
     
     Returns:
         CardStatusManager 实例
     """
-    key = f"{open_id}:{chat_id}"
+    # Key 包含 app_id，支持多机器人隔离
+    key = f"{app_id}:{open_id}:{chat_id}"
     
     if key not in _card_status_managers:
         # 获取依赖
         if not feishu_client:
-            feishu_client = await get_feishu_client()
+            feishu_client = await get_feishu_client(app_id) if app_id else await get_feishu_client()
         
         if not block_streaming_manager:
             block_streaming_manager = await get_block_streaming_manager(feishu_client)
@@ -361,9 +412,9 @@ async def get_card_status_manager(
     return _card_status_managers[key]
 
 
-async def cleanup_card_status_manager(open_id: str, chat_id: str):
+async def cleanup_card_status_manager(open_id: str, chat_id: str, app_id: str = ""):
     """清理卡片状态管理器"""
-    key = f"{open_id}:{chat_id}"
+    key = f"{app_id}:{open_id}:{chat_id}"
     if key in _card_status_managers:
         await _card_status_managers[key].cleanup()
         del _card_status_managers[key]
@@ -374,3 +425,14 @@ async def cleanup_all_card_status_managers():
     for key, manager in list(_card_status_managers.items()):
         await manager.cleanup()
     _card_status_managers.clear()
+
+
+# 导出 CardStatus 和 STATUS_TEXTS 供外部使用
+__all__ = [
+    "CardStatus",
+    "STATUS_TEXTS",
+    "CardStatusManager",
+    "get_card_status_manager",
+    "cleanup_card_status_manager",
+    "cleanup_all_card_status_managers",
+]
