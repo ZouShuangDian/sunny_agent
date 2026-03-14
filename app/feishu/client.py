@@ -316,30 +316,75 @@ class FeishuClient:
     
     async def create_streaming_card(
         self,
-        receive_id: str,
-        initial_content: str = "思考中...",
-        receive_id_type: str = "open_id",
+        title: str = None,
+        initial_content: str = "⏳ 思考中...",
     ) -> dict:
-        """创建流式卡片"""
-        card_data = {
+        """
+        创建流式卡片实体
+        
+        调用 POST /cardkit/v1/cards 创建卡片，返回 card_id
+        卡片配置 streaming_mode: true，显示 "[Generating...]" 预览
+        """
+        card_json = {
             "schema": "2.0",
-            "config": {"streaming_mode": True},
-            "header": {
-                "template": "blue",
-                "title": {"tag": "plain_text", "content": "AI助手"},
+            "config": {
+                "streaming_mode": True,
+                "summary": {
+                    "content": "[Generating...]"
+                },
+                "streaming_config": {
+                    "print_frequency_ms": {"default": 50},
+                    "print_step": {"default": 2},
+                    "print_strategy": "fast"
+                }
             },
             "body": {
                 "elements": [
                     {
-                        "tag": "div",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": initial_content,
-                        },
+                        "tag": "markdown",
+                        "content": initial_content,
+                        "element_id": "streaming_content"
                     }
                 ]
-            },
+            }
         }
+        
+        # 如果有标题，添加 header
+        if title:
+            card_json["header"] = {
+                "title": {
+                    "content": title,
+                    "tag": "plain_text"
+                }
+            }
+        
+        response = await self._request(
+            "POST",
+            "/cardkit/v1/cards",
+            json_data={
+                "type": "card_json",
+                "data": json.dumps(card_json)
+            }
+        )
+        
+        logger.info("Created streaming card", card_id=response.get("data", {}).get("card_id"))
+        return response
+    
+    async def send_streaming_card(
+        self,
+        receive_id: str,
+        card_id: str,
+        receive_id_type: str = "open_id",
+    ) -> dict:
+        """
+        发送流式卡片消息
+        
+        调用 POST /im/v1/messages 将卡片作为消息发送
+        """
+        content = json.dumps({
+            "type": "card",
+            "data": {"card_id": card_id}
+        })
         
         response = await self._request(
             "POST",
@@ -348,10 +393,12 @@ class FeishuClient:
             json_data={
                 "receive_id": receive_id,
                 "msg_type": "interactive",
-                "content": json.dumps(card_data),
+                "content": content
             }
         )
         
+        logger.info("Sent streaming card message", 
+                   message_id=response.get("data", {}).get("message_id"))
         return response
     
     async def update_streaming_card(
@@ -359,29 +406,74 @@ class FeishuClient:
         card_id: str,
         element_id: str,
         content: str,
+        sequence: int = None,
     ) -> dict:
-        """更新流式卡片内容"""
-        return await self._request(
-            "PUT",
-            f"/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
-            json_data={
-                "content": {
-                    "tag": "plain_text",
-                    "content": content,
-                }
-            }
-        )
+        """
+        更新流式卡片内容
+        
+        调用 PUT /cardkit/v1/cards/{card_id}/elements/{element_id}/content
+        sequence 参数确保更新顺序，每次更新需要递增
+        """
+        json_data = {"content": content}
+        if sequence is not None:
+            json_data["sequence"] = sequence
+            json_data["uuid"] = f"stream_{card_id}_{sequence}"
+        
+        try:
+            response = await self._request(
+                "PUT",
+                f"/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
+                json_data=json_data
+            )
+            logger.debug("Updated streaming card", 
+                        card_id=card_id, 
+                        sequence=sequence,
+                        content_length=len(content))
+            return response
+        except FeishuError as e:
+            # 流式更新失败时不抛出异常，避免中断整个流程
+            logger.warning("Failed to update streaming card", 
+                          card_id=card_id, 
+                          error=e.message)
+            return {"code": e.code or -1, "msg": e.message}
     
     async def close_streaming_card(
         self,
         card_id: str,
+        sequence: int = None,
+        final_summary: str = None,
     ) -> dict:
-        """关闭流式卡片更新"""
-        return await self._request(
-            "PATCH",
-            f"/cardkit/v1/cards/{card_id}/settings",
-            json_data={"streaming_mode": False}
-        )
+        """
+        关闭流式卡片
+        
+        调用 PATCH /cardkit/v1/cards/{card_id}/settings
+        设置 streaming_mode: false 并更新 summary 清除 "[Generating...]"
+        """
+        config_obj = {
+            "streaming_mode": False,
+            "summary": {"content": final_summary or ""}
+        }
+        
+        json_data = {
+            "settings": json.dumps({"config": config_obj})
+        }
+        if sequence is not None:
+            json_data["sequence"] = sequence
+            json_data["uuid"] = f"close_{card_id}_{sequence}"
+        
+        try:
+            response = await self._request(
+                "PATCH",
+                f"/cardkit/v1/cards/{card_id}/settings",
+                json_data=json_data
+            )
+            logger.info("Closed streaming card", card_id=card_id)
+            return response
+        except FeishuError as e:
+            logger.error("Failed to close streaming card", 
+                        card_id=card_id, 
+                        error=e.message)
+            raise
     
     async def download_media(
         self,

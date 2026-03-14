@@ -41,9 +41,11 @@ class BlockStreamingState:
         self.last_update_time = 0
         self.is_idle_timer_running = False
         self.card_id: Optional[str] = None
-        self.element_id = "content"
+        self.message_id: Optional[str] = None
+        self.element_id = "streaming_content"
         self.chunks_sent = 0
         self.total_text = ""
+        self.sequence = 0  # 用于流式更新的序列号
         
     def add_text(self, text: str) -> bool:
         """
@@ -158,29 +160,43 @@ class BlockStreamingManager:
         self,
         receive_id: str,
         receive_id_type: str = "open_id",
-    ) -> str:
+        title: str = None,
+    ) -> tuple[str, str]:
         """
-        开始流式回复，创建卡片
+        开始流式回复，创建并发送卡片
+        
+        Flow:
+        1. createStreamingCard() -> POST /cardkit/v1/cards
+        2. sendStreamingCard() -> POST /im/v1/messages
         
         Returns:
-            卡片ID
+            (card_id, message_id)
         """
         try:
-            response = await self.feishu_client.create_streaming_card(
+            # Step 1: 创建卡片实体
+            create_response = await self.feishu_client.create_streaming_card(
+                title=title,
+                initial_content="⏳ 思考中...",
+            )
+            card_id = create_response.get("data", {}).get("card_id")
+            
+            if not card_id:
+                raise ValueError("Failed to get card_id from create_streaming_card response")
+            
+            # Step 2: 发送卡片消息
+            send_response = await self.feishu_client.send_streaming_card(
                 receive_id=receive_id,
-                initial_content="思考中...",
+                card_id=card_id,
                 receive_id_type=receive_id_type,
             )
+            message_id = send_response.get("data", {}).get("message_id")
             
-            # 从响应中提取卡片ID
-            # 注意：实际实现需要根据飞书API响应结构调整
-            card_id = response.get("data", {}).get("message_id", "")
-            
-            logger.info("Streaming card created", 
+            logger.info("Streaming card created and sent", 
                        receive_id=receive_id,
-                       card_id=card_id)
+                       card_id=card_id,
+                       message_id=message_id)
             
-            return card_id
+            return card_id, message_id
             
         except Exception as e:
             logger.error("Failed to create streaming card",
@@ -206,7 +222,9 @@ class BlockStreamingManager:
         # 如果没有卡片ID，先创建
         if not state.card_id:
             try:
-                state.card_id = await self.start_streaming(receive_id, receive_id_type)
+                card_id, message_id = await self.start_streaming(receive_id, receive_id_type)
+                state.card_id = card_id
+                state.message_id = message_id
             except Exception as e:
                 # 创建失败，回退到普通消息
                 logger.error("Failed to start streaming, falling back",
@@ -228,22 +246,35 @@ class BlockStreamingManager:
             buffer_text = state.get_buffer()
             state.clear_buffer()
             # 立即更新卡片
-            await self.update_card_content(state.card_id, buffer_text)
+            await self.update_card_content(state, buffer_text)
             return True, buffer_text
         
         return False, ""
     
-    async def update_card_content(self, card_id: str, content: str):
+    async def update_card_content(self, state: BlockStreamingState, content: str):
         """更新流式卡片内容"""
+        if not state.card_id:
+            logger.error("Cannot update card: no card_id")
+            return
+        
         try:
+            # 递增序列号
+            state.sequence += 1
+            
             await self.feishu_client.update_streaming_card(
-                card_id=card_id,
-                element_id="content",
+                card_id=state.card_id,
+                element_id=state.element_id,
                 content=content,
+                sequence=state.sequence,
             )
-            logger.debug("Streaming card updated", card_id=card_id, content_length=len(content))
+            logger.debug("Streaming card updated", 
+                        card_id=state.card_id, 
+                        sequence=state.sequence,
+                        content_length=len(content))
         except Exception as e:
-            logger.error("Failed to update streaming card", card_id=card_id, error=str(e))
+            logger.error("Failed to update streaming card", 
+                        card_id=state.card_id, 
+                        error=str(e))
     
     async def _idle_timer_task(self, open_id: str, chat_id: str, receive_id: str, receive_id_type: str = "open_id"):
         """空闲定时器任务"""
@@ -256,7 +287,7 @@ class BlockStreamingManager:
                 buffer_text = state.get_buffer()
                 if buffer_text:
                     # 发送剩余内容
-                    await self.update_card_content(state.card_id, buffer_text)
+                    await self.update_card_content(state, buffer_text)
                     state.clear_buffer()
                     logger.debug("Idle flush triggered",
                                open_id=open_id,
@@ -273,49 +304,71 @@ class BlockStreamingManager:
         self,
         open_id: str,
         chat_id: str,
+        final_text: str = None,
     ):
-        """关闭流式回复，发送剩余内容"""
+        """
+        关闭流式回复，发送剩余内容并关闭流式模式
+        
+        Flow:
+        1. 发送剩余内容（如果有）
+        2. closeStreamingMode() -> PATCH /cardkit/v1/cards/{id}/settings
+        """
         key = self._get_state_key(open_id, chat_id)
         state = self._streaming_states.get(key)
         
-        if state:
-            # 发送剩余内容
-            if state.buffer and state.card_id:
-                try:
-                    await self.update_card_content(state.card_id, state.buffer)
-                    state.clear_buffer()
-                except Exception as e:
-                    logger.error("Failed to send final content", error=str(e))
-            
-            # 关闭卡片
-            if state.card_id:
-                try:
-                    await self.feishu_client.close_streaming_card(state.card_id)
-                    logger.info("Streaming card closed",
-                               open_id=open_id,
-                               chat_id=chat_id)
-                except Exception as e:
-                    logger.error("Failed to close streaming card",
-                                error=str(e))
-            
-            # 关闭卡片
-            if state.card_id:
-                try:
-                    await self.feishu_client.close_streaming_card(state.card_id)
-                    logger.info("Streaming card closed",
-                               open_id=open_id,
-                               chat_id=chat_id)
-                except Exception as e:
-                    logger.error("Failed to close streaming card",
-                                error=str(e))
+        if not state or not state.card_id:
+            # 清理状态
+            if key in self._streaming_states:
+                del self._streaming_states[key]
+            if key in self._idle_timers:
+                self._idle_timers[key].cancel()
+                del self._idle_timers[key]
+            return
         
-        # 清理状态
-        if key in self._streaming_states:
-            del self._streaming_states[key]
-        
-        if key in self._idle_timers:
-            self._idle_timers[key].cancel()
-            del self._idle_timers[key]
+        try:
+            # Step 1: 发送剩余内容
+            final_content = final_text or state.total_text
+            if state.buffer:
+                await self.update_card_content(state, state.buffer)
+                state.clear_buffer()
+            
+            # Step 2: 关闭流式模式
+            # 生成 summary（截断文本用于聊天预览）
+            summary = self._truncate_for_summary(final_content)
+            state.sequence += 1
+            
+            await self.feishu_client.close_streaming_card(
+                card_id=state.card_id,
+                sequence=state.sequence,
+                final_summary=summary,
+            )
+            
+            logger.info("Streaming session closed",
+                       open_id=open_id,
+                       chat_id=chat_id,
+                       card_id=state.card_id)
+            
+        except Exception as e:
+            logger.error("Failed to close streaming session",
+                        open_id=open_id,
+                        chat_id=chat_id,
+                        error=str(e))
+        finally:
+            # 清理状态
+            if key in self._streaming_states:
+                del self._streaming_states[key]
+            if key in self._idle_timers:
+                self._idle_timers[key].cancel()
+                del self._idle_timers[key]
+    
+    def _truncate_for_summary(self, text: str, max_length: int = 50) -> str:
+        """截断文本用于聊天预览 summary"""
+        if not text:
+            return ""
+        cleaned = text.replace("\n", " ").strip()
+        if len(cleaned) <= max_length:
+            return cleaned
+        return cleaned[:max_length - 3] + "..."
     
     def chunk_text(self, text: str) -> List[str]:
         """
@@ -353,6 +406,63 @@ class BlockStreamingManager:
         
         return chunks
     
+    async def send_message(
+        self,
+        receive_id: str,
+        content: str,
+        msg_type: str = "text",
+        receive_id_type: str = "open_id",
+    ) -> dict:
+        """
+        发送普通消息（非流式）
+        
+        Flow:
+        sendMessageFeishu() -> POST /im/v1/messages
+        
+        Args:
+            receive_id: 接收者ID
+            content: 消息内容
+            msg_type: 消息类型 ("text" | "post")
+            receive_id_type: 接收者ID类型
+        
+        Returns:
+            API响应
+        """
+        try:
+            if msg_type == "text":
+                return await self.feishu_client.send_text_message(
+                    receive_id=receive_id,
+                    text=content,
+                    receive_id_type=receive_id_type,
+                )
+            elif msg_type == "post":
+                # 富文本消息
+                post_content = {
+                    "zh_cn": {
+                        "title": "",
+                        "content": [[{"tag": "text", "text": content}]]
+                    }
+                }
+                import json
+                return await self.feishu_client._request(
+                    "POST",
+                    "/im/v1/messages",
+                    params={"receive_id_type": receive_id_type},
+                    json_data={
+                        "receive_id": receive_id,
+                        "msg_type": "post",
+                        "content": json.dumps(post_content),
+                    }
+                )
+            else:
+                raise ValueError(f"Unsupported msg_type: {msg_type}")
+        except Exception as e:
+            logger.error("Failed to send message",
+                        receive_id=receive_id,
+                        msg_type=msg_type,
+                        error=str(e))
+            raise
+    
     async def send_chunks(
         self,
         receive_id: str,
@@ -375,32 +485,36 @@ class BlockStreamingManager:
         try:
             await self.feishu_client.update_streaming_card(
                 card_id=card_id,
-                element_id="content",
+                element_id="streaming_content",
                 content=first_chunk,
+                sequence=1,
             )
         except Exception as e:
             logger.error("Failed to update streaming card",
                         card_id=card_id,
                         error=str(e))
             # 失败时发送普通消息
-            await self.feishu_client.send_text_message(
+            await self.send_message(
                 receive_id=receive_id,
-                text=first_chunk,
+                content=first_chunk,
+                msg_type="text",
                 receive_id_type=receive_id_type,
             )
         
         # 后续块用普通消息
-        for chunk in chunks[1:]:
+        for i, chunk in enumerate(chunks[1:], start=2):
             try:
-                await self.feishu_client.send_text_message(
+                await self.send_message(
                     receive_id=receive_id,
-                    text=chunk,
+                    content=chunk,
+                    msg_type="text",
                     receive_id_type=receive_id_type,
                 )
                 # 小延迟避免发送过快
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error("Failed to send chunk",
+                            chunk_index=i,
                             error=str(e))
 
 

@@ -288,7 +288,7 @@ async def _process_message_internal(
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
         
         # 启动流式卡片
-        card_id = await bs_manager.start_streaming(receive_id, receive_id_type)
+        card_id, message_id = await bs_manager.start_streaming(receive_id, receive_id_type)
         
         # 11. AI处理 - 使用流式版本（支持媒体文件）
         from app.execution.pipeline import run_agent_pipeline_streaming
@@ -316,20 +316,16 @@ async def _process_message_internal(
             # 数据库配置可以覆盖默认配置
             human_delay_config = {**DEFAULT_HUMAN_LIKE_DELAY, **access_config.human_like_delay}
         
-        if human_delay_config.get("enabled", True):
-            import random
-            min_ms = human_delay_config.get("min_ms", 500)
-            max_ms = human_delay_config.get("max_ms", 1500)
-            delay_ms = random.randint(min_ms, max_ms)
-            logger.info("Applying human-like delay", delay_ms=delay_ms)
-            await asyncio.sleep(delay_ms / 1000)
+        # if human_delay_config.get("enabled", True):
+        #     import random
+        #     min_ms = human_delay_config.get("min_ms", 500)
+        #     max_ms = human_delay_config.get("max_ms", 1500)
+        #     delay_ms = random.randint(min_ms, max_ms)
+        #     logger.info("Applying human-like delay", delay_ms=delay_ms)
+        #     await asyncio.sleep(delay_ms / 1000)
         
-        # 13. BlockStreaming 累积和发送
-        # 使用 BlockStreaming 的累积机制，而非简单打字机
-        card_id = await bs_manager.start_streaming(receive_id, receive_id_type)
-        
-        # 按段落/句子智能分割，而非固定字符
-        # 分割策略：段落(>\n\n) > 句子(>. ) > 固定块
+        # 13. BlockStreaming 流式累积和发送
+        # 按段落/句子智能分割
         import re
         
         # 先按段落分割
@@ -339,38 +335,17 @@ async def _process_message_internal(
             if not para.strip():
                 continue
                 
-            # 添加到 BlockStreaming 缓冲区
-            should_flush, text_to_send = await bs_manager.update_streaming(
+            # 添加到 BlockStreaming 缓冲区，内部会自动更新卡片
+            await bs_manager.update_streaming(
                 open_id=open_id,
                 chat_id=chat_id,
                 text=para,
                 receive_id=receive_id,
                 receive_id_type=receive_id_type,
             )
-            
-            if should_flush and text_to_send:
-                # 更新流式卡片
-                await bs_manager.update_card_content(
-                    card_id=card_id,
-                    content=text_to_send,
-                )
         
-        # 关闭流式卡片，发送剩余内容
-        await bs_manager.close_streaming(open_id, chat_id)
-        
-        # 13. 发送完整回复（如果文本很长，用普通消息补充）
-        if len(reply_text) > 3000:  # 如果超过3000字符，发送完整文本
-            await feishu_client.send_text_message(
-                receive_id=receive_id,
-                text=reply_text,
-                receive_id_type=receive_id_type,
-            )
-        else:
-            # 私聊直接回复
-            await feishu_client.send_text_message(
-                receive_id=open_id,
-                text=reply_text,
-            )
+        # 关闭流式卡片，发送剩余内容并清除 "[Generating...]" 状态
+        await bs_manager.close_streaming(open_id, chat_id, final_text=reply_text)
         
         # 13. 完成处理
         processing_end = datetime.utcnow()
@@ -510,24 +485,25 @@ def _extract_text_content(content: dict, msg_type: str) -> str:
     return ""
 
 
-# ARQ Worker 配置
-class WorkerSettings:
-    """ARQ Worker配置"""
-    
-    functions = [process_feishu_message]
-    redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    queue_name = FeishuRedisKeys.ARQ_QUEUE
-    
-    max_jobs = 10
-    job_timeout = 300  # 5分钟
-    retry_jobs = True
-    max_tries = 3
-    keep_result = 3600  # 1小时
-
-
-async def startup(ctx):
-    """Worker启动钩子"""
+async def _startup(ctx):
+    """Worker启动钩子（内部实现）"""
     logger.info("Feishu Worker starting up")
+    
+    # 预初始化执行管线（避免请求时延迟）
+    # 这会触发 pipeline.py 模块级初始化：
+    # - LLMClient 创建
+    # - ExecutionRouter 初始化（工具注册、SubAgent 加载）
+    logger.info("Pre-initializing execution pipeline...")
+    import time
+    start_time = time.time()
+    
+    from app.execution import pipeline
+    # 触发模块级单例初始化
+    _ = pipeline._execution_router
+    _ = pipeline._llm_client
+    
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"Execution pipeline pre-initialized", elapsed_ms=elapsed_ms)
     
     # 启动消息转移循环
     ctx["message_transfer_task"] = asyncio.create_task(
@@ -542,8 +518,8 @@ async def startup(ctx):
     )
 
 
-async def shutdown(ctx):
-    """Worker关闭钩子"""
+async def _shutdown(ctx):
+    """Worker关闭钩子（内部实现）"""
     logger.info("Feishu Worker shutting down")
     
     # 取消任务
@@ -560,7 +536,27 @@ async def shutdown(ctx):
     await close_all_feishu_clients()
 
 
+# ARQ Worker 配置
+class WorkerSettings:
+    """ARQ Worker配置"""
+    
+    functions = [process_feishu_message]
+    redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+    queue_name = FeishuRedisKeys.ARQ_QUEUE
+    
+    max_jobs = 10
+    job_timeout = 300  # 5分钟
+    retry_jobs = True
+    max_tries = 3
+    keep_result = 3600  # 1小时
+    
+    on_startup = _startup
+    on_shutdown = _shutdown
 
+
+# 保持向后兼容的导出
+startup = _startup
+shutdown = _shutdown
 
 
 async def message_transfer_loop():
