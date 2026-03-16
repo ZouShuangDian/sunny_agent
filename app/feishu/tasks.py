@@ -94,14 +94,6 @@ async def _process_message_internal(
     receive_id = chat_id if chat_type == "group" else open_id
     receive_id_type = "chat_id" if chat_type == "group" else "open_id"
     
-    await card_status.start_session(
-        open_id=open_id,
-        chat_id=chat_id,
-        receive_id=receive_id,
-        app_id=app_id,
-        receive_id_type=receive_id_type,
-    )
-    
     try:
         # 2. 创建/更新审计日志
         log_entry = await _create_or_update_log(
@@ -123,8 +115,6 @@ async def _process_message_internal(
             if result == "buffered":
                 # 消息已缓冲，稍后处理
                 log_entry.status = "buffering"
-                # ← 新增：更新状态为校验中
-                await card_status.update_status(CardStatus.VALIDATING)
                 await db.commit()
                 logger.info("Message buffered",
                            event_id=event_id,
@@ -137,6 +127,14 @@ async def _process_message_internal(
                 logger.info("Session is processing, will merge with current batch",
                            event_id=event_id)
         
+        await card_status.start_session(
+            open_id=open_id,
+            chat_id=chat_id,
+            receive_id=receive_id,
+            app_id=app_id,
+            receive_id_type=receive_id_type,
+        )
+
         # 5. 检查是否应该flush（Debounced消息）
         should_flush, flushed_messages = await debounce_manager.should_flush(open_id, chat_id)
         
@@ -149,6 +147,8 @@ async def _process_message_internal(
         
         # 6. 用户身份解析（使用消息中的 app_id 支持多机器人）
         try:
+            # ← 新增：更新状态为校验中
+            await card_status.update_status(CardStatus.VALIDATING)
             user_resolver = get_user_resolver()
             user, employee_no, error = await user_resolver.resolve_user(
                 db, open_id, app_id
