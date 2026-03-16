@@ -130,6 +130,18 @@ class FeishuRedisKeys:
         """防抖分布式锁"""
         return f"feishu:lock:{open_id}:{chat_id}"
 
+    # ── 媒体文件下载缓存（多实例兼容） ──
+    @staticmethod
+    def media_cache(app_id: str, message_id: str) -> str:
+        """媒体文件预下载缓存 (TTL 10min)"""
+        return f"feishu:media_cache:{app_id}:{message_id}"
+
+    # ── 媒体文件上下文（历史引用） ──
+    @staticmethod
+    def media_context(app_id: str, open_id: str, chat_id: str) -> str:
+        """媒体文件上下文列表 (TTL 10min, 最多50条)"""
+        return f"feishu:media_context:{app_id}:{open_id}:{chat_id}"
+
 
 # 保持向后兼容：导出常用 key 生成函数
 token_blacklist = RedisKeys.token_blacklist

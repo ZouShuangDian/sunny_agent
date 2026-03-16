@@ -6,6 +6,7 @@ Feishu ARQ 任务
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from app.feishu.card_status_manager import (
 from app.feishu.client import FeishuClient, FeishuError, get_feishu_client
 from app.feishu.debounce import get_debounce_manager
 from app.feishu.media_downloader import get_media_downloader
+from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuChatSessionMapping, FeishuMessageLogs
 from app.feishu.user_resolver import get_user_resolver
 
@@ -110,6 +112,39 @@ async def _process_message_internal(
         should_debounce = await debounce_manager.check_should_debounce(message)
         
         if should_debounce:
+            # ← 预下载媒体文件（多实例兼容）：如果是支持的媒体类型，异步触发下载
+            # 支持的类型：image, file, audio
+            # 跳过的类型：media(视频), sticker(贴纸) - 暂不支持
+            if msg_type in ["image", "file", "audio"]:
+                # 根据消息类型提取对应的 key
+                if msg_type == "image":
+                    file_key = content.get("image_key")
+                    default_name = "image.jpg"
+                else:  # file, audio
+                    file_key = content.get("file_key")
+                    default_name = f"{msg_type}.bin"
+                
+                file_name = content.get("file_name") or default_name
+                
+                if file_key:
+                    from app.feishu.media_downloader import pre_download_media_async
+                    # 异步触发预下载，不等待结果（使用 open_id 作为 user_id）
+                    asyncio.create_task(pre_download_media_async(
+                        app_id=app_id,
+                        open_id=open_id,
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        file_key=file_key,
+                        file_name=file_name,
+                        file_type=msg_type,
+                        user_id=open_id,
+                    ))
+            elif msg_type in ["media", "sticker"]:
+                # 暂不支持视频和贴纸类型，记录日志
+                logger.info(f"Media type '{msg_type}' not supported yet, skipping download",
+                           message_id=message_id,
+                           msg_type=msg_type)
+            
             result, messages = await debounce_manager.add_message(open_id, chat_id, message)
             
             if result == "buffered":
@@ -139,11 +174,34 @@ async def _process_message_internal(
         should_flush, flushed_messages = await debounce_manager.should_flush(open_id, chat_id)
         
         if should_flush and flushed_messages:
-            # 使用合并后的消息
+            # 使用合并后的消息（支持多实例媒体下载）
             merged_message = flushed_messages[0]
             content = merged_message.get("content", content)
+            
+            # ← 提取合并的媒体文件（从 Redis 缓存读取的下载结果）
+            merged_media = merged_message.get("_media_files", [])
+            for media in merged_media:
+                local_path = media.get("local_path")
+                if local_path:
+                    # 验证路径是否存在（NAS 共享盘）
+                    if Path(local_path).exists():
+                        media_paths.append(local_path)
+                        logger.debug("Media from merged message",
+                                    file_name=media.get("file_name"),
+                                    local_path=local_path)
+                    else:
+                        logger.warning("Media path not found in NAS",
+                                      file_name=media.get("file_name"),
+                                      local_path=local_path)
+                else:
+                    # 下载失败或未下载
+                    logger.warning("Media not downloaded",
+                                  file_name=media.get("file_name"),
+                                  message_id=media.get("message_id"))
+            
             logger.info("Using merged message",
-                       original_count=merged_message.get("merged_count", 1))
+                       original_count=merged_message.get("merged_count", 1),
+                       media_count=len(media_paths))
         
         # 6. 用户身份解析（使用消息中的 app_id 支持多机器人）
         try:
@@ -245,13 +303,14 @@ async def _process_message_internal(
             await asyncio.sleep(0.5)  # 短暂显示校验状态
             
             # 发送拒绝提示
-            feishu_client = await get_feishu_client(app_id, db)
+            # feishu_client = await get_feishu_client(app_id, db)
             rejection_msg = access_controller.get_rejection_message(reason)
-            await feishu_client.send_text_message(
-                receive_id=chat_id if chat_type == "group" else open_id,
-                text=rejection_msg,
-                receive_id_type="chat_id" if chat_type == "group" else "open_id"
-            )
+            await card_status.update_status(custom_text=rejection_msg)
+            # await feishu_client.send_text_message(
+            #     receive_id=chat_id if chat_type == "group" else open_id,
+            #     text=rejection_msg,
+            #     receive_id_type="chat_id" if chat_type == "group" else "open_id"
+            # )
             
             # ← 清理状态管理器
             await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
@@ -263,12 +322,23 @@ async def _process_message_internal(
         
         # 9. 媒体文件下载
         media_paths = []
-        if msg_type in ["image", "file", "audio", "media", "sticker"]:
-            media_downloader = get_media_downloader()
+        download_error_msg = None
+        
+        # 支持的媒体类型：image, file, audio
+        # 跳过的类型：media(视频), sticker(贴纸) - 暂不支持
+        if msg_type in ["image", "file", "audio"]:
+            # 传入 app_id 以获取正确的 FeishuClient
+            media_downloader = get_media_downloader(app_id=app_id)
             
-            # 提取文件信息
-            file_key = content.get("file_key")
-            file_name = content.get("file_name", "unknown")
+            # 根据消息类型提取对应的 key
+            if msg_type == "image":
+                file_key = content.get("image_key")
+                default_name = "image.jpg"
+            else:  # file, audio
+                file_key = content.get("file_key")
+                default_name = f"{msg_type}.bin"
+            
+            file_name = content.get("file_name") or default_name
             
             if file_key:
                 media_file = await media_downloader.download_with_retry(
@@ -280,10 +350,35 @@ async def _process_message_internal(
                     user_id=user.id if user else open_id,  # 使用系统用户ID（UUID）
                     open_id=open_id,  # 保留open_id用于记录
                     chat_id=chat_id,
+                    app_id=app_id,  # 用于上下文隔离
                 )
                 
-                if media_file and media_file.download_status == "completed":
+                if media_file:
+                    # 下载成功
                     media_paths.append(media_file.local_path)
+                else:
+                    # 下载失败（包括文件过大），发送提示但不中断流程
+                    logger.warning("Media download failed or file too large",
+                                  file_key=file_key,
+                                  file_name=file_name)
+                    
+                    # 发送错误提示给用户
+                    try:
+                        feishu_client = await get_feishu_client(app_id, db)
+                        error_hint = f"⚠️ 文件 {file_name} 下载失败（可能超过30MB限制或网络错误）"
+                        await feishu_client.send_text_message(
+                            receive_id=chat_id if chat_type == "group" else open_id,
+                            text=error_hint,
+                            receive_id_type="chat_id" if chat_type == "group" else "open_id"
+                        )
+                    except Exception as send_err:
+                        logger.warning("Failed to send download error message",
+                                      error=str(send_err))
+        elif msg_type in ["media", "sticker"]:
+            # 暂不支持视频和贴纸类型
+            logger.info(f"Media type '{msg_type}' not supported yet, skipping download",
+                       message_id=message_id,
+                       msg_type=msg_type)
         
         # 10. 提取文本内容
         text_content = _extract_text_content(content, msg_type)
@@ -323,16 +418,52 @@ async def _process_message_internal(
         # 11. AI处理 - 使用流式版本（支持媒体文件）
         from app.execution.pipeline import run_agent_pipeline_streaming
         
+        # 加载最近媒体上下文（支持历史引用）
+        context_manager = get_media_context_manager()
+        recent_media = await context_manager.get_recent_media(
+            app_id=app_id,
+            open_id=open_id,
+            chat_id=chat_id,
+            limit=50,
+        )
+        
+        # 构建带上下文的输入文本
+        if recent_media:
+            context_lines = ["[历史媒体文件]"]
+            for media in recent_media:
+                file_name = media.get("file_name", "unknown")
+                file_type = media.get("file_type", "file")
+                path_exists = media.get("path_exists", False)
+                
+                if path_exists:
+                    context_lines.append(f"- {file_type}: {file_name}")
+                else:
+                    context_lines.append(f"- {file_type}: {file_name} [文件已过期]")
+            
+            context_lines.append("")
+            context_lines.append("[当前消息]")
+            context_lines.append(text_content)
+            
+            full_input_text = "\n".join(context_lines)
+            
+            logger.info("Media context loaded for AI",
+                       context_count=len(recent_media),
+                       app_id=app_id,
+                       open_id=open_id,
+                       chat_id=chat_id)
+        else:
+            full_input_text = text_content
+        
         reply_text, session_id = await run_agent_pipeline_streaming(
             usernumb=employee_no,
             user_id=str(user.id) if user else "",
-            input_text=text_content,
+            input_text=full_input_text,
             session_id=session_id,
             source="feishu",
             media_paths=media_paths if media_paths else None,
-            feishu_chat_id=chat_id,  # ← 新增：飞书会话 ID
-            feishu_open_id=open_id,  # ← 新增：飞书用户 ID
-            feishu_chat_type=chat_type,  # ← 新增：飞书会话类型
+            feishu_chat_id=chat_id,
+            feishu_open_id=open_id,
+            feishu_chat_type=chat_type,
         )
         
         # 12. 人机延迟 - 模拟人类回复节奏

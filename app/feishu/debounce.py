@@ -13,6 +13,7 @@ import structlog
 
 from app.cache.redis_client import FeishuRedisKeys, redis_client
 from app.config import get_settings
+from app.feishu.media_downloader import get_cached_media
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -306,8 +307,8 @@ class DebounceManager:
                 messages_raw = await redis_client.lrange(buffer_key, 0, -1)
                 messages = [json.loads(m) for m in messages_raw]
                 
-                # 合并消息
-                merged = self._merge_messages(messages)
+                # 合并消息（从 Redis 缓存读取媒体下载结果）
+                merged = await self._merge_messages(messages)
                 
                 # 设置为处理状态
                 await redis_client.setex(
@@ -331,8 +332,13 @@ class DebounceManager:
         finally:
             await redis_client.delete(lock_key)
     
-    def _merge_messages(self, messages: List[dict]) -> dict:
-        """合并多条消息"""
+    async def _merge_messages(self, messages: List[dict]) -> dict:
+        """
+        合并多条消息（支持多实例的媒体文件下载）
+        
+        从 Redis 缓存读取媒体下载结果，确保在多实例环境下
+        任何 Worker 都能获取到已下载的媒体文件路径。
+        """
         if not messages:
             return {}
         
@@ -342,33 +348,52 @@ class DebounceManager:
         # 按时间排序
         messages.sort(key=lambda m: m.get("create_time", 0))
         
-        # 合并文本内容
+        # 合并文本内容和媒体文件
         texts = []
-        media_placeholders = []
+        merged_media = []
         
         for msg in messages:
             content = msg.get("content", {})
             text = content.get("text", "")
             msg_type = msg.get("msg_type", "")
+            message_id = msg.get("message_id", "")
+            app_id = msg.get("app_id", "")
             
             if text and isinstance(text, str):
                 texts.append(text.strip())
             
-            # 为媒体文件添加占位符
+            # 媒体文件：从 Redis 缓存读取下载结果
             if msg_type in ["image", "file", "audio", "media", "sticker"]:
                 file_name = content.get("file_name", "媒体文件")
-                media_placeholders.append(f"[{msg_type.upper()}: {file_name}]")
+                file_key = content.get("file_key")
+                
+                # 尝试从 Redis 缓存获取已下载的媒体信息
+                cached_media = None
+                if message_id and app_id:
+                    cached_media = await get_cached_media(message_id, app_id)
+                
+                if cached_media and cached_media.get("local_path"):
+                    # 下载成功，使用缓存的路径
+                    merged_media.append({
+                        "file_key": file_key,
+                        "file_name": cached_media.get("file_name") or file_name,
+                        "file_type": cached_media.get("file_type") or msg_type,
+                        "local_path": cached_media["local_path"],
+                        "file_size": cached_media.get("file_size", 0),
+                        "message_id": message_id,
+                    })
+                else:
+                    # 未下载或下载失败，记录原始信息
+                    merged_media.append({
+                        "file_key": file_key,
+                        "file_name": file_name,
+                        "file_type": msg_type,
+                        "local_path": None,
+                        "message_id": message_id,
+                    })
         
-        # 合并后的消息
+        # 合并后的文本
         merged_text = "\n\n".join(texts)
-        
-        # 如果有媒体占位符，添加到文本前面
-        if media_placeholders:
-            media_text = "\n".join(media_placeholders)
-            if merged_text:
-                merged_text = f"{media_text}\n\n{merged_text}"
-            else:
-                merged_text = media_text
         
         # 使用最后一条消息作为基础
         merged = messages[-1].copy()
@@ -376,6 +401,10 @@ class DebounceManager:
         merged["content"]["text"] = merged_text
         merged["merged_count"] = len(messages)
         merged["merged_from"] = [m.get("message_id") for m in messages]
+        
+        # 关键：附加合并的媒体文件列表（多实例兼容）
+        if merged_media:
+            merged["_media_files"] = merged_media
         
         return merged
     

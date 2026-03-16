@@ -7,8 +7,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+import mimetypes
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Tuple
 
 import httpx
 import structlog
@@ -498,20 +500,82 @@ class FeishuClient:
         self,
         file_key: str,
         message_id: str,
-    ) -> bytes:
-        """下载媒体文件"""
+        media_type: str = "file",
+    ) -> Tuple[bytes, str]:
+        """
+        下载媒体文件
+        
+        Args:
+            file_key: 文件key（image_key 或 file_key）
+            message_id: 消息ID
+            media_type: 媒体类型，"image" 或 "file"
+            
+        Returns:
+            (文件内容, 文件名)
+        """
         token = await self._get_access_token()
         
         response = await self.http_client.get(
             f"/im/v1/messages/{message_id}/resources/{file_key}",
             headers={"Authorization": f"Bearer {token}"},
-            params={"type": "file"},
+            params={"type": media_type},
         )
         
         if response.status_code != 200:
             raise FeishuError(f"下载媒体文件失败: HTTP {response.status_code}")
         
-        return response.content
+        # 获取文件名
+        file_name = self._extract_filename_from_response(
+            response, file_key, media_type
+        )
+        
+        return response.content, file_name
+    
+    def _extract_filename_from_response(
+        self,
+        response: httpx.Response,
+        file_key: str,
+        media_type: str,
+    ) -> str:
+        """
+        从响应中提取文件名
+        
+        优先级：
+        1. Content-Disposition header (文件类型)
+        2. Content-Type 推断扩展名 (图片类型)
+        3. 从 key 生成默认文件名
+        """
+        # 尝试从 Content-Disposition 获取文件名（文件类型）
+        disposition = response.headers.get("Content-Disposition", "")
+        if disposition and "filename=" in disposition:
+            try:
+                # 解析 filename="xxx" 或 filename='xxx'
+                filename_part = disposition.split("filename=")[-1].strip()
+                filename_part = filename_part.strip('"').strip("'")
+                if filename_part:
+                    # 防止路径遍历，只保留文件名
+                    file_name = Path(filename_part).name
+                    if file_name.strip():
+                        return file_name
+            except Exception:
+                pass
+        
+        # 图片类型：从 Content-Type 推断扩展名
+        if media_type == "image":
+            content_type = response.headers.get("Content-Type", "")
+            ext = mimetypes.guess_extension(content_type) or ".jpg"
+            ext = ext.lstrip(".")
+            # 生成安全文件名
+            safe_key = "".join(c for c in file_key if c.isalnum() or c in "-_.") or "img"
+            return f"{safe_key}.{ext}"
+        
+        # 音频类型
+        if media_type == "audio":
+            return "audio.opus"
+        
+        # 默认：使用 key 生成文件名
+        safe_key = "".join(c for c in file_key if c.isalnum() or c in "-_.")[:16]
+        return f"file_{safe_key}.bin"
     
     async def delete_message(self, message_id: str) -> dict:
         """
