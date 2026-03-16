@@ -103,7 +103,7 @@ class PluginService:
                 row = result.fetchone()
 
             if row is None:
-                log.debug(
+                log.warning(
                     "Plugin 命令不存在或无权限",
                     plugin_name=plugin_name,
                     command_name=command_name,

@@ -78,23 +78,49 @@ def _build_plugin_context_block(ctx: PluginCommandContext) -> str:
     3. 插件内可用 Skill 列表（含容器内 SKILL.md 路径）
     4. 使用规范（禁止走全局 skill_call）
     """
-    skills_section = (
-        "\n".join(
-            f"- **{s['name']}**: `{s['skill_md_path']}`"
-            for s in ctx.plugin_skills
+    # 构建 Skill 列表，同时计算每个 Skill 的工作目录（scripts/ 的父目录）
+    skill_lines = []
+    skill_work_dirs = []
+    for s in ctx.plugin_skills:
+        # skill_md_path 形如 /mnt/.../skills/quality-complaints/SKILL.md
+        # 工作目录 = SKILL.md 的父目录
+        skill_dir = s["skill_md_path"].rsplit("/", 1)[0]
+        skill_lines.append(
+            f"- **{s['name']}**\n"
+            f"  - SKILL.md: `{s['skill_md_path']}`\n"
+            f"  - 工作目录: `{skill_dir}/`"
         )
-        if ctx.plugin_skills
-        else "（此插件无内置 Skill）"
-    )
+        skill_work_dirs.append(skill_dir)
+
+    skills_section = "\n".join(skill_lines) if skill_lines else "（此插件无内置 Skill）"
+
+    # 如果只有一个 Skill，直接告知工作目录（最常见场景）
+    work_dir_hint = ""
+    if len(skill_work_dirs) == 1:
+        work_dir_hint = (
+            f"\n\n**⚠️ 路径重要提示：** 工作流指引中的相对路径（如 `scripts/xxx.py`、`references/xxx.md`）"
+            f"必须基于 Skill 工作目录执行：\n"
+            f"```\ncd {skill_work_dirs[0]} && python3 scripts/xxx.py\n```\n"
+            f"或使用绝对路径：`python3 {skill_work_dirs[0]}/scripts/xxx.py`"
+        )
+    elif len(skill_work_dirs) > 1:
+        work_dir_hint = (
+            f"\n\n**⚠️ 路径重要提示：** 工作流指引中的相对路径必须基于对应 Skill 的工作目录执行，"
+            f"不要直接在 `/workspace/` 下运行。"
+        )
+
     return (
         f"\n\n---\n## Plugin 命令执行上下文\n\n"
         f"你正在执行用户触发的 Plugin 命令 `/{ctx.plugin_name}:{ctx.command_name}`。\n\n"
+        f"**⚠️ 重要：下方已提供完整的工作流指引，直接按指引执行即可。"
+        f"禁止用 `ls`、`find` 等命令探索插件目录结构——所有你需要的信息都在下方。**\n"
+        f"{work_dir_hint}\n\n"
         f"### 工作流指引（COMMAND.md）\n\n"
         f"{ctx.command_md_content}\n\n"
         f"### 插件内可用 Skill\n\n"
         f"{skills_section}\n\n"
         f"使用插件 Skill 时：通过 `read_file` 读取对应 SKILL.md 路径，按指引操作。\n"
-        f"**禁止**通过 `skill_call` 调用——插件 Skill 不在全局 skill catalog 中。"
+        f"**禁止**通过 `skill_call` 调用——插件 Skill 不在全局 skill catalog 中。\n"
     )
 
 
@@ -530,6 +556,13 @@ class L3ReActEngine:
         plugin_ctx = get_plugin_context()
         if plugin_ctx:
             system_prompt += _build_plugin_context_block(plugin_ctx)
+            log.info(
+                "Plugin 上下文已注入 system prompt",
+                plugin=plugin_ctx.plugin_name,
+                command=plugin_ctx.command_name,
+                content_len=len(plugin_ctx.command_md_content),
+                skills_count=len(plugin_ctx.plugin_skills),
+            )
 
         mode_ctx = get_mode_context()
         if mode_ctx:

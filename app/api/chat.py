@@ -65,9 +65,20 @@ output_validator = OutputValidator(llm_client)
 
 # ── 请求/响应模型 ──
 
+class ChatMeta(BaseModel):
+    """前端结构化扩展字段，所有字段均可选"""
+    command: str | None = None         # 斜杠命令，如 /chatqms-plugin:analyze
+    mode: str | None = None            # 预留：内置模式，如 deep-research
+    attachments: list[str] | None = None  # 预留：附件文件 ID 列表
+
+    class Config:
+        extra = "allow"            # 允许前端传入未定义的扩展字段
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None  # 首次对话不传，服务端生成
+    meta: ChatMeta | None = None   # 前端结构化扩展字段
 
 
 class ChatResponse(BaseModel):
@@ -311,35 +322,45 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
+    meta: dict | None = None,
 ) -> tuple[IntentResult, CtxToken | None, CtxToken | None]:
     """
     公共意图管线，/chat 和 /chat/stream 共享。
     返回 (intent_result, plugin_token, mode_token)。
 
-    检测优先级：/mode:xxx（内置模式）→ /plugin:command（Plugin）→ 常规对话。
+    命令来源：仅通过 meta.command（前端结构化传入），用户手动输入一律走常规对话。
+    命令类型：/mode:xxx（内置模式）→ /plugin:command（Plugin）→ 常规对话。
     """
-    # 斜杠命令快速路径
-    if message.startswith("/") and ":" in message.split()[0]:
-        cmd_part = message.split()[0][1:]  # 去掉 /
+    # ── 1. 前端结构化命令（格式由前端保证：/prefix:command） ──
+    command_str = (meta.command or "").strip() if meta else ""
+
+    if command_str:
+        # 去掉开头的 /（如果有）
+        cmd_part = command_str.lstrip("/")
         prefix, _, command = cmd_part.partition(":")
+        log.info("检测到斜杠命令", prefix=prefix, command=command, trace_id=trace_id)
+
+        # message 是纯用户输入，拼回完整格式传给下游解析
+        full_message = f"/{cmd_part} {message}"
 
         # 内置模式：/mode:deep-research
         if prefix == "mode" and command in BUILTIN_MODES:
             intent_result, mode_token = await _build_mode_intent(
-                message, command, user, session_id, memory, trace_id,
+                full_message, command, user, session_id, memory, trace_id,
             )
             return intent_result, None, mode_token
 
         # Plugin 命令：/plugin-name:command-name
         intent_result, plugin_token = await _build_plugin_intent(
-            message, user, session_id, memory, trace_id,
+            full_message, user, session_id, memory, trace_id,
         )
         if intent_result is not None:
             return intent_result, plugin_token, None
         # Plugin 未找到 → 直接返回错误
-        return _build_plugin_error_result(message, session_id, trace_id), None, None
+        log.warning("Plugin 命令未找到", plugin=prefix, command=command, trace_id=trace_id)
+        return _build_plugin_error_result(full_message, session_id, trace_id), None, None
 
-    # 常规对话：加载历史 + 直接构造 IntentResult
+    # ── 2. 常规对话 ──
     context_builder = ContextBuilder(memory)
     history_messages = await context_builder.load_history_messages(session_id)
 
@@ -403,7 +424,7 @@ async def chat(
     # 意图管线（Plugin / Mode 命令在管线内部处理）
     final_result, plugin_token, mode_token = await _run_intent_pipeline(
         message=body.message, user=user, session_id=session_id,
-        memory=memory, redis=redis, trace_id=trace_id,
+        memory=memory, redis=redis, trace_id=trace_id, meta=body.meta,
     )
 
     try:
@@ -507,7 +528,7 @@ async def chat_stream(
             # 返回三元组：Plugin/Mode 路径返回对应 token，其余为 None
             final_result, plugin_token, mode_token = await _run_intent_pipeline(
                 message=body.message, user=user, session_id=session_id,
-                memory=memory, redis=redis, trace_id=trace_id,
+                memory=memory, redis=redis, trace_id=trace_id, meta=body.meta,
             )
 
             session_is_running = False  # 追踪 running 状态，确保异常时清理

@@ -59,6 +59,10 @@ class AskUserTool(BaseTool):
         return AskUserParams
 
     async def execute(self, args: dict) -> ToolResult:
+        # 兼容 LLM 将 questions 传为 JSON 字符串的情况
+        if isinstance(args.get("questions"), str):
+            import json
+            args["questions"] = json.loads(args["questions"])
         params = AskUserParams(**args)
 
         questions_data = [
