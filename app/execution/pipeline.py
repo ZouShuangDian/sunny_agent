@@ -175,6 +175,9 @@ async def run_agent_pipeline_streaming(
     trace_id: str | None = None,
     source: str = "chat",
     media_paths: list[str] | None = None,
+    feishu_chat_id: str | None = None,
+    feishu_open_id: str | None = None,
+    feishu_chat_type: str | None = None,
 ) -> tuple[str, str]:
     """完整的 Agent 执行管线（流式版本）
     
@@ -182,6 +185,7 @@ async def run_agent_pipeline_streaming(
     
     区别：
     - 支持 media_paths 参数（媒体文件提示）
+    - 支持飞书会话映射（feishu_chat_id, feishu_open_id）
     - 可用于飞书等需要媒体处理的场景
     
     Args:
@@ -192,12 +196,31 @@ async def run_agent_pipeline_streaming(
         trace_id: 可选，用于日志追踪
         source: 会话来源（'chat' | 'cron' | 'feishu'）
         media_paths: 媒体文件路径列表（可选）
+        feishu_chat_id: 飞书会话 ID（可选，用于飞书会话映射）
+        feishu_open_id: 飞书用户 ID（可选，用于飞书会话映射）
+        feishu_chat_type: 飞书会话类型（可选，'p2p' | 'group'）
     
     Returns:
         (reply_text, session_id) 二元组
     """
     sid = session_id or str(_uuid.uuid4())
     tid = trace_id or str(_uuid.uuid4())
+    
+    # ← 新增：如果是飞书来源，创建/更新会话映射
+    if source == "feishu" and feishu_chat_id and feishu_open_id:
+        try:
+            await _create_or_update_feishu_session_mapping(
+                chat_id=feishu_chat_id,
+                open_id=feishu_open_id,
+                session_id=sid,
+                user_id=user_id,
+                chat_type=feishu_chat_type or "p2p",
+            )
+        except Exception as e:
+            log.warning("Failed to create Feishu session mapping",
+                       chat_id=feishu_chat_id,
+                       open_id=feishu_open_id,
+                       error=str(e))
     
     # ContextVar 设置
     user_token = set_user_id(usernumb)
@@ -289,4 +312,74 @@ async def run_agent_pipeline_streaming(
     finally:
         reset_session_id(session_token)
         reset_user_id(user_token)
+
+
+async def _create_or_update_feishu_session_mapping(
+    *,
+    chat_id: str,
+    open_id: str,
+    session_id: str,
+    user_id: str,
+    chat_type: str = "p2p",
+):
+    """
+    创建或更新飞书会话与系统会话的映射关系
+    
+    Args:
+        chat_id: 飞书会话 ID
+        open_id: 飞书用户 ID
+        session_id: 系统会话 ID
+        user_id: 系统用户 UUID（字符串）
+        chat_type: 飞书会话类型（'p2p' | 'group'）
+    """
+    from datetime import datetime
+    from sqlalchemy import select
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from uuid import UUID
+    
+    from app.db.models.feishu import FeishuChatSessionMapping
+    
+    async with async_session() as db:
+        # 尝试使用 PostgreSQL 的 ON CONFLICT 语法进行 upsert
+        try:
+            # 构建 INSERT 语句
+            stmt = pg_insert(FeishuChatSessionMapping).values(
+                chat_id=chat_id,
+                open_id=open_id,
+                session_id=session_id,
+                chat_type=chat_type,
+                user_id=UUID(user_id) if user_id else None,
+                message_count=1,
+                last_active_at=datetime.utcnow(),
+                is_active=True,
+            )
+            
+            # 如果冲突（chat_id + open_id 已存在），则更新
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["chat_id", "open_id"],  # 唯一索引字段
+                set_={
+                    "session_id": session_id,
+                    "last_active_at": datetime.utcnow(),
+                    "message_count": FeishuChatSessionMapping.message_count + 1,
+                    "is_active": True,
+                },
+            )
+            
+            await db.execute(stmt)
+            await db.commit()
+            
+            log.debug("Feishu session mapping created/updated",
+                     chat_id=chat_id,
+                     open_id=open_id,
+                     session_id=session_id,
+                     chat_type=chat_type)
+            
+        except Exception as e:
+            log.error("Failed to create Feishu session mapping",
+                     chat_id=chat_id,
+                     open_id=open_id,
+                     error=str(e))
+            # 回滚事务
+            await db.rollback()
+            raise
 
