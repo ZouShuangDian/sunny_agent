@@ -62,7 +62,7 @@ class MediaDownloader:
         """
         生成存储路径（UUID_文件名格式，确保唯一性）
         
-        格式: uploads/users/{user_id}/feishu_media/{uuid_prefix}_{safe_filename}
+        格式: mnt/users/{user_id}/feishu_media/{uuid_prefix}_{safe_filename}
         
         Args:
             user_id: 系统用户ID (UUID)
@@ -74,7 +74,7 @@ class MediaDownloader:
         if isinstance(user_id, UUID):
             user_id = str(user_id)
         
-        # 统一路径格式: uploads/users/{user_id}/feishu_media/
+        # 统一路径格式: mnt/users/{user_id}/feishu_media/
         user_dir = BASE_UPLOAD_DIR / "users" / user_id / "feishu_media"
         user_dir.mkdir(parents=True, exist_ok=True)
         
@@ -127,6 +127,7 @@ class MediaDownloader:
         chat_id: Optional[str] = None,
         mime_type: Optional[str] = None,
         app_id: Optional[str] = None,  # 应用ID，用于上下文隔离
+        skip_db_record: bool = False,  # 是否跳过数据库记录（预下载使用）
     ) -> Optional[FeishuMediaFiles]:
         """
         下载媒体文件
@@ -144,6 +145,7 @@ class MediaDownloader:
             open_id: 发送者open_id - 用于记录
             chat_id: 群组ID
             mime_type: MIME类型
+            skip_db_record: 是否跳过创建数据库记录（预下载时使用，避免重复记录）
             
         Returns:
             FeishuMediaFiles 记录（成功），None（失败）
@@ -204,49 +206,72 @@ class MediaDownloader:
             # 5. 保存文件到磁盘
             local_path.write_bytes(file_data)
             
-            # 6. 下载成功，创建数据库记录
-            media_file = FeishuMediaFiles(
-                id=uuid7(),
-                file_key=file_key,
-                file_name=file_name,
-                file_type=file_type,
-                message_id=message_id,
-                open_id=open_id,
-                chat_id=chat_id,
-                mime_type=mime_type,
-                local_path=str(local_path),
-                file_size=file_size,
-                download_status="completed",
-            )
-            db.add(media_file)
-            await db.commit()
-            await db.refresh(media_file)
-            
-            # 7. 添加到上下文管理器（支持历史引用）
-            if app_id and chat_id:
-                try:
-                    context_manager = get_media_context_manager()
-                    await context_manager.add_media_message(
-                        app_id=app_id,
-                        open_id=open_id,
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        file_type=file_type,
-                        file_name=file_name,
-                        local_path=str(local_path),
-                    )
-                except Exception as ctx_err:
-                    # 上下文添加失败不应影响主流程
-                    logger.warning("Failed to add to context manager",
-                                  file_key=file_key,
-                                  error=str(ctx_err))
-            
-            logger.info("Media download completed",
-                       file_key=file_key,
-                       file_size=file_size,
-                       local_path=str(local_path))
-            
-            return media_file
+            # 6. 下载成功
+            if skip_db_record:
+                # 预下载模式：不创建数据库记录，返回临时对象
+                logger.info("Media download completed (pre-download, no db record)",
+                           file_key=file_key,
+                           file_size=file_size,
+                           local_path=str(local_path))
+                
+                # 返回临时对象（仅包含必要信息）
+                return FeishuMediaFiles(
+                    id=uuid7(),
+                    file_key=file_key,
+                    file_name=file_name,
+                    file_type=file_type,
+                    message_id=message_id,
+                    open_id=open_id,
+                    chat_id=chat_id,
+                    mime_type=mime_type,
+                    local_path=str(local_path),
+                    file_size=file_size,
+                    download_status="completed",
+                )
+            else:
+                # 主下载模式：创建数据库记录
+                media_file = FeishuMediaFiles(
+                    id=uuid7(),
+                    file_key=file_key,
+                    file_name=file_name,
+                    file_type=file_type,
+                    message_id=message_id,
+                    open_id=open_id,
+                    chat_id=chat_id,
+                    mime_type=mime_type,
+                    local_path=str(local_path),
+                    file_size=file_size,
+                    download_status="completed",
+                )
+                db.add(media_file)
+                await db.commit()
+                await db.refresh(media_file)
+                
+                # 7. 添加到上下文管理器（支持历史引用）
+                if app_id and chat_id:
+                    try:
+                        context_manager = get_media_context_manager()
+                        await context_manager.add_media_message(
+                            app_id=app_id,
+                            open_id=open_id,
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            file_type=file_type,
+                            file_name=file_name,
+                            local_path=str(local_path),
+                        )
+                    except Exception as ctx_err:
+                        # 上下文添加失败不应影响主流程
+                        logger.warning("Failed to add to context manager",
+                                      file_key=file_key,
+                                      error=str(ctx_err))
+                
+                logger.info("Media download completed",
+                           file_key=file_key,
+                           file_size=file_size,
+                           local_path=str(local_path))
+                
+                return media_file
             
         except Exception as e:
             # 下载失败，记录日志但不创建数据库记录
@@ -406,6 +431,7 @@ async def pre_download_media_async(
                 open_id=open_id,
                 chat_id=chat_id,
                 app_id=app_id,
+                skip_db_record=True,  # 预下载不创建数据库记录
             )
         
         if media_file:

@@ -107,7 +107,48 @@ async def _process_message_internal(
         log_entry.processing_started_at = datetime.utcnow()
         await db.commit()
         
-        # 4. Debounce处理
+        # 4. 用户身份解析（提前到 Debounce 之前，以便获取工号用于预下载）
+        try:
+            user_resolver = get_user_resolver()
+            user, employee_no, error = await user_resolver.resolve_user(
+                db, open_id, app_id
+            )
+            
+            if error:
+                # 用户解析失败
+                log_entry.status = "failed"
+                log_entry.error_type = "user_resolution"
+                log_entry.error_message = error
+                await db.commit()
+                
+                # 发送错误提示
+                feishu_client = await get_feishu_client(app_id, db)
+                await feishu_client.send_text_message(
+                    receive_id=open_id,
+                    text=f"❌ {error}"
+                )
+                
+                return {"status": "failed", "error": error}
+        except FeishuError as e:
+            # 飞书客户端配置错误
+            error_msg = str(e)
+            log_entry.status = "failed"
+            log_entry.error_type = "feishu_config_error"
+            log_entry.error_message = error_msg
+            await db.commit()
+            
+            logger.error("Feishu configuration error", 
+                        error=error_msg,
+                        app_id=app_id,
+                        event_id=event_id)
+            
+            return {"status": "failed", "error": error_msg}
+        
+        # 更新日志用户信息
+        log_entry.employee_no = employee_no
+        log_entry.user_id = user.id if user else None
+        
+        # 5. Debounce处理
         debounce_manager = get_debounce_manager()
         should_debounce = await debounce_manager.check_should_debounce(message)
         
@@ -128,7 +169,7 @@ async def _process_message_internal(
                 
                 if file_key:
                     from app.feishu.media_downloader import pre_download_media_async
-                    # 异步触发预下载，不等待结果（使用 open_id 作为 user_id）
+                    # 异步触发预下载，不等待结果（使用工号 employee_no）
                     asyncio.create_task(pre_download_media_async(
                         app_id=app_id,
                         open_id=open_id,
@@ -137,7 +178,7 @@ async def _process_message_internal(
                         file_key=file_key,
                         file_name=file_name,
                         file_type=msg_type,
-                        user_id=open_id,
+                        user_id=employee_no,  # 使用工号作为目录名
                     ))
             elif msg_type in ["media", "sticker"]:
                 # 暂不支持视频和贴纸类型，记录日志
@@ -162,13 +203,14 @@ async def _process_message_internal(
                 logger.info("Session is processing, will merge with current batch",
                            event_id=event_id)
         
-        await card_status.start_session(
-            open_id=open_id,
-            chat_id=chat_id,
-            receive_id=receive_id,
-            app_id=app_id,
-            receive_id_type=receive_id_type,
-        )
+        if msg_type in ["text"]:
+            await card_status.start_session(
+                open_id=open_id,
+                chat_id=chat_id,
+                receive_id=receive_id,
+                app_id=app_id,
+                receive_id_type=receive_id_type,
+            )
 
         # 5. 检查是否应该flush（Debounced消息）
         should_flush, flushed_messages = await debounce_manager.should_flush(open_id, chat_id)
@@ -203,83 +245,7 @@ async def _process_message_internal(
                        original_count=merged_message.get("merged_count", 1),
                        media_count=len(media_paths))
         
-        # 6. 用户身份解析（使用消息中的 app_id 支持多机器人）
-        try:
-            # ← 新增：更新状态为校验中
-            await card_status.update_status(CardStatus.VALIDATING)
-            user_resolver = get_user_resolver()
-            user, employee_no, error = await user_resolver.resolve_user(
-                db, open_id, app_id
-            )
-            
-            if error:
-                # 用户解析失败
-                log_entry.status = "failed"
-                log_entry.error_type = "user_resolution"
-                log_entry.error_message = error
-                await db.commit()
-                
-                # 发送错误提示（使用消息中的 app_id 支持多机器人）
-                feishu_client = await get_feishu_client(app_id, db)
-                await feishu_client.send_text_message(
-                    receive_id=open_id,
-                    text=f"❌ {error}"
-                )
-                
-                return {"status": "failed", "error": error}
-        except FeishuError as e:
-            # 飞书客户端配置错误
-            error_msg = str(e)
-            log_entry.status = "failed"
-            log_entry.error_type = "feishu_config_error"
-            log_entry.error_message = error_msg
-            await db.commit()
-            
-            logger.error("Feishu configuration error", 
-                        error=error_msg,
-                        app_id=app_id,
-                        event_id=event_id)
-            
-            # 给用户发送友好的配置错误提示
-            user_friendly_msg = (
-                "⚠️ 机器人配置异常\n"
-                "\n"
-                "抱歉，暂时无法为您服务。可能的原因：\n"
-                "• 机器人应用未正确配置\n"
-                "• 应用凭证缺失或过期\n"
-                "\n"
-                "请联系管理员检查：\n"
-                f"• App ID: {app_id or '未设置'}\n"
-                "• 应用配置是否正确入库\n"
-                "\n"
-                "调试信息: " + error_msg[:100]
-            )
-            
-            # 尝试发送错误提示给用户
-            # 由于配置错误，尝试使用默认配置创建客户端发送错误提示
-            try:
-                # 尝试使用默认应用配置
-                default_client = FeishuClient(
-                    app_id=settings.FEISHU_APP_ID,
-                    app_secret=settings.FEISHU_APP_SECRET
-                )
-                await default_client.send_text_message(
-                    receive_id=open_id,
-                    text=user_friendly_msg
-                )
-                logger.info("Sent error message to user using default config")
-            except Exception as send_error:
-                logger.error("Failed to send error message to user",
-                           error=str(send_error),
-                           note="Default config may also be invalid")
-            
-            return {"status": "failed", "error": error_msg}
-        
-        # 更新日志用户信息
-        log_entry.employee_no = employee_no
-        log_entry.user_id = user.id if user else None
-        
-        # 7. 访问控制检查
+        # 6. 访问控制检查
         access_controller = get_access_controller()
         
         if chat_type == "p2p":
@@ -292,7 +258,7 @@ async def _process_message_internal(
                 db, app_id, chat_id, employee_no, has_mention
             )
         
-        if not allowed:
+        if not allowed and msg_type in ["text"]:
             log_entry.status = "rejected"
             log_entry.error_type = "access_denied"
             log_entry.error_message = reason
@@ -317,10 +283,10 @@ async def _process_message_internal(
             
             return {"status": "rejected", "reason": reason}
         
-        # 8. 获取会话映射
+        # 7. 获取会话映射
         session_id = await _get_or_create_session(db, open_id, chat_id, chat_type, user.id if user else None)
         
-        # 9. 媒体文件下载
+        # 8. 媒体文件下载
         media_paths = []
         download_error_msg = None
         
@@ -347,8 +313,8 @@ async def _process_message_internal(
                     message_id=message_id,
                     file_name=file_name,
                     file_type=msg_type,
-                    user_id=user.id if user else open_id,  # 使用系统用户ID（UUID）
-                    open_id=open_id,  # 保留open_id用于记录
+                    user_id=user.usernumb if user else employee_no,  # 使用工号（usernumb）
+                    open_id=open_id,  # 保留 open_id 用于记录
                     chat_id=chat_id,
                     app_id=app_id,  # 用于上下文隔离
                 )
@@ -388,6 +354,17 @@ async def _process_message_internal(
             log_entry.reply_content = "未检测到有效内容"
             await db.commit()
             return {"status": "completed", "message": "No content"}
+        
+        # ← 新增：只有媒体文件但没有文本内容，静默处理不回复
+        # 等待用户后续文字消息，Debounce 机制会合并历史媒体文件
+        if media_paths and not text_content:
+            log_entry.status = "completed"
+            log_entry.reply_content = "媒体文件已接收，等待后续提问"
+            await db.commit()
+            logger.info("Media files received without text, waiting for user question",
+                       media_count=len(media_paths),
+                       message_id=message_id)
+            return {"status": "completed", "message": "Media received, waiting for question"}
         
         # 11. AI处理 + BlockStreaming回复
         # 获取 BlockStreaming 配置
@@ -434,9 +411,11 @@ async def _process_message_internal(
                 file_name = media.get("file_name", "unknown")
                 file_type = media.get("file_type", "file")
                 path_exists = media.get("path_exists", False)
+                file_path = media.get("local_path", "")
                 
                 if path_exists:
-                    context_lines.append(f"- {file_type}: {file_name}")
+                    file_path = Path(file_path)
+                    context_lines.append(f"- {file_type}: {file_path.name}")
                 else:
                     context_lines.append(f"- {file_type}: {file_name} [文件已过期]")
             

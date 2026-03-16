@@ -34,7 +34,7 @@ class CardStatus(Enum):
 
 # 状态对应的显示文本
 STATUS_TEXTS = {
-    CardStatus.THINKING: "⏳ 思考中...",
+    CardStatus.THINKING: "⏳ 处理中...",
     CardStatus.VALIDATING: "🔍 校验中...",
     CardStatus.GENERATING: "🤖 生成答案中...",
     CardStatus.COMPLETED: "✅ 已完成",
