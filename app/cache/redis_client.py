@@ -100,15 +100,6 @@ class RateLimitRedisKeys:
         """
         return f"rl:freq:{app_id}:{user_id}:{timestamp}"
 
-    # ── 重试计数 ──
-    @staticmethod
-    def retry(app_id: str, user_id: str, message_id: str) -> str:
-        """
-        限流重试次数（Redis String + INCR）
-        TTL: 60 秒
-        """
-        return f"rl:retry:{app_id}:{user_id}:{message_id}"
-
 
 class FeishuRedisKeys:
     """

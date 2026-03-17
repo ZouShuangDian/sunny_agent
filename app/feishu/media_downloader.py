@@ -9,8 +9,11 @@ import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from app.db.models.user import User
 
 import structlog
 from sqlalchemy import select
@@ -21,6 +24,8 @@ from app.config import get_settings
 from app.feishu.client import FeishuClient, get_feishu_client
 from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuMediaFiles, MediaType
+from app.db.models.file import File as DBFile
+from app.feishu.project_manager import get_or_create_feishu_project, increment_project_file_count
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -128,6 +133,8 @@ class MediaDownloader:
         mime_type: Optional[str] = None,
         app_id: Optional[str] = None,  # 应用ID，用于上下文隔离
         skip_db_record: bool = False,  # 是否跳过数据库记录（预下载使用）
+        user: Optional["User"] = None,  # type: ignore  # 用户对象（用于私聊文件落盘）
+        chat_type: Optional[str] = None,  # 聊天类型：p2p/group
     ) -> Optional[FeishuMediaFiles]:
         """
         下载媒体文件
@@ -230,6 +237,67 @@ class MediaDownloader:
                 )
             else:
                 # 主下载模式：创建数据库记录
+                # 如果是私聊，同时创建 File 记录并关联到 Project
+                file_record_id = None
+                if chat_type == "p2p" and user and app_id:
+                    try:
+                        # 1. 获取/创建项目
+                        project = await get_or_create_feishu_project(
+                            db=db,
+                            app_id=app_id,
+                            user_id=user.id,
+                            company=user.company if hasattr(user, 'company') else None,
+                        )
+                        
+                        # 2. 计算文件 hash
+                        file_hash = None
+                        try:
+                            sha256 = hashlib.sha256()
+                            sha256.update(file_data)
+                            file_hash = sha256.hexdigest()
+                        except Exception as hash_err:
+                            logger.warning("Failed to calculate file hash",
+                                          file_path=str(local_path),
+                                          error=str(hash_err))
+                        
+                        # 3. 创建 File 记录（session_id 暂时为 None，AI 管线后更新）
+                        file_record = DBFile(
+                            id=uuid7(),
+                            file_name=file_name,
+                            file_path=str(local_path),
+                            file_size=file_size,
+                            mime_type=mime_type or "application/octet-stream",
+                            file_extension=Path(file_name).suffix.lower(),
+                            storage_filename=local_path.name,
+                            file_hash=file_hash,
+                            session_id=None,  # 稍后由 AI 管线更新
+                            project_id=project.id,
+                            file_context="feishu_private",
+                            feishu_app_id=app_id,
+                            feishu_message_id=message_id,
+                            feishu_file_key=file_key,
+                            feishu_chat_type="p2p",
+                            uploaded_by=user.id,
+                        )
+                        db.add(file_record)
+                        await db.flush()  # 获取 file_record.id
+                        file_record_id = file_record.id
+                        
+                        # 4. 更新项目文件计数
+                        await increment_project_file_count(db, project.id)
+                        
+                        logger.info("Created File record for Feishu media",
+                                   file_id=file_record_id,
+                                   message_id=message_id,
+                                   project_id=project.id)
+                    except Exception as file_err:
+                        logger.error("Failed to create File record",
+                                    message_id=message_id,
+                                    error=str(file_err),
+                                    exc_info=True)
+                        # 继续创建 FeishuMediaFiles 记录，不中断流程
+                
+                # 5. 创建 FeishuMediaFiles 记录
                 media_file = FeishuMediaFiles(
                     id=uuid7(),
                     file_key=file_key,
@@ -242,6 +310,7 @@ class MediaDownloader:
                     local_path=str(local_path),
                     file_size=file_size,
                     download_status="completed",
+                    file_id=file_record_id,  # 关联 File 记录（私聊时）
                 )
                 db.add(media_file)
                 await db.commit()
@@ -337,6 +406,55 @@ class MediaDownloader:
         return None
 
 
+    async def update_file_session_id(
+        self,
+        db: AsyncSession,
+        message_id: str,
+        session_id: str,
+    ) -> None:
+        """
+        更新私聊媒体文件的 session_id
+        在 AI 管线返回 session_id 后调用
+        
+        Args:
+            db: 数据库会话
+            message_id: 飞书消息 ID
+            session_id: AI 管线返回的 session ID
+        """
+        try:
+            # 查询此消息的所有 FeishuMediaFiles 记录
+            result = await db.execute(
+                select(FeishuMediaFiles).where(
+                    FeishuMediaFiles.message_id == message_id,
+                )
+            )
+            media_records = result.scalars().all()
+            
+            # 更新关联的 File 记录的 session_id
+            for media in media_records:
+                if media.file_id:
+                    file_result = await db.execute(
+                        select(DBFile).where(DBFile.id == media.file_id)
+                    )
+                    file_record = file_result.scalar_one_or_none()
+                    
+                    if file_record and not file_record.session_id:
+                        file_record.session_id = session_id
+                        logger.info("Updated File session_id",
+                                   file_id=media.file_id,
+                                   message_id=message_id,
+                                   session_id=session_id)
+            
+            await db.commit()
+            
+        except Exception as e:
+            logger.error("Failed to update File session_id",
+                        message_id=message_id,
+                        session_id=session_id,
+                        error=str(e))
+            await db.rollback()
+
+
 # 全局下载器实例（按 app_id 缓存）
 # 格式：{app_id: MediaDownloader}
 _media_downloaders: dict[str, MediaDownloader] = {}
@@ -360,169 +478,3 @@ def get_media_downloader(app_id: str = None) -> MediaDownloader:
         if None not in _media_downloaders:
             _media_downloaders[None] = MediaDownloader()
         return _media_downloaders[None]
-
-
-# ==================== 预下载和 Redis 缓存（多实例兼容）====================
-
-from app.cache.redis_client import redis_client, FeishuRedisKeys
-
-MEDIA_CACHE_TTL = 600  # 10分钟缓存
-
-
-async def pre_download_media_async(
-    app_id: str,
-    open_id: str,
-    chat_id: str,
-    message_id: str,
-    file_key: str,
-    file_name: str,
-    file_type: str,
-    user_id: str | UUID,
-) -> None:
-    """
-    异步预下载媒体文件并缓存到 Redis（多实例兼容方案）
-    
-    用于 Debounce 缓冲期间提前下载媒体文件，下载结果存储在 Redis 中，
-    供后续任何 Worker 实例使用。
-    
-    Args:
-        app_id: 应用ID
-        open_id: 用户open_id
-        chat_id: 聊天ID
-        message_id: 消息ID
-        file_key: 飞书文件key
-        file_name: 文件名
-        file_type: 文件类型
-        user_id: 用户ID
-    """
-    cache_key = FeishuRedisKeys.media_cache(app_id, message_id)
-    
-    try:
-        # 检查是否已缓存
-        cached = await redis_client.hgetall(cache_key)
-        if cached and cached.get("status") == "completed":
-            logger.debug("Media already cached", 
-                        message_id=message_id, 
-                        file_name=file_name)
-            return
-        
-        # 设置下载中状态
-        await redis_client.hset(cache_key, mapping={
-            "status": "downloading",
-            "file_name": file_name,
-            "file_type": file_type,
-        })
-        await redis_client.expire(cache_key, MEDIA_CACHE_TTL)
-        
-        # 执行下载（传入 app_id 以获取正确的 FeishuClient）
-        downloader = get_media_downloader(app_id=app_id)
-        
-        # 预下载不创建数据库记录，只获取本地路径
-        # 使用独立的 session
-        from app.db.engine import async_session
-        async with async_session() as db:
-            media_file = await downloader.download_media(
-                db=db,
-                file_key=file_key,
-                message_id=message_id,
-                file_name=file_name,
-                file_type=file_type,
-                user_id=user_id,
-                open_id=open_id,
-                chat_id=chat_id,
-                app_id=app_id,
-                skip_db_record=True,  # 预下载不创建数据库记录
-            )
-        
-        if media_file:
-            # 下载成功，缓存结果
-            await redis_client.hset(cache_key, mapping={
-                "status": "completed",
-                "local_path": media_file.local_path,
-                "file_name": media_file.file_name,
-                "file_type": media_file.file_type,
-                "file_size": str(media_file.file_size),
-            })
-            await redis_client.expire(cache_key, MEDIA_CACHE_TTL)
-            
-            logger.info("Media pre-downloaded and cached",
-                       message_id=message_id,
-                       file_name=file_name,
-                       local_path=media_file.local_path)
-        else:
-            # 下载失败
-            await redis_client.hset(cache_key, mapping={
-                "status": "failed",
-                "error": "Download returned None",
-            })
-            await redis_client.expire(cache_key, MEDIA_CACHE_TTL)
-            
-            logger.warning("Media pre-download failed",
-                          message_id=message_id,
-                          file_name=file_name)
-            
-    except Exception as e:
-        # 异常处理
-        try:
-            await redis_client.hset(cache_key, mapping={
-                "status": "failed",
-                "error": str(e),
-            })
-            await redis_client.expire(cache_key, MEDIA_CACHE_TTL)
-        except:
-            pass
-        
-        logger.error("Media pre-download error",
-                    message_id=message_id,
-                    file_name=file_name,
-                    error=str(e))
-
-
-async def get_cached_media(message_id: str, app_id: str) -> Optional[dict]:
-    """
-    从 Redis 缓存获取媒体下载结果
-    
-    Args:
-        message_id: 消息ID
-        app_id: 应用ID
-        
-    Returns:
-        媒体信息字典或 None
-    """
-    cache_key = FeishuRedisKeys.media_cache(app_id, message_id)
-    
-    try:
-        cached = await redis_client.hgetall(cache_key)
-        
-        if not cached:
-            return None
-        
-        if cached.get("status") == "completed":
-            return {
-                "local_path": cached.get("local_path"),
-                "file_name": cached.get("file_name"),
-                "file_type": cached.get("file_type"),
-                "file_size": int(cached.get("file_size", 0)),
-            }
-        
-        return None
-        
-    except Exception as e:
-        logger.error("Failed to get cached media",
-                    message_id=message_id,
-                    error=str(e))
-        return None
-
-
-async def clear_media_cache(message_id: str, app_id: str) -> None:
-    """清理媒体缓存（处理完成后调用）"""
-    cache_key = FeishuRedisKeys.media_cache(app_id, message_id)
-    
-    try:
-        await redis_client.delete(cache_key)
-        logger.debug("Media cache cleared",
-                    message_id=message_id)
-    except Exception as e:
-        logger.warning("Failed to clear media cache",
-                      message_id=message_id,
-                      error=str(e))

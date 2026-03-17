@@ -6,8 +6,6 @@ Feishu ARQ 任务
 import asyncio
 import json
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List
 from uuid import UUID
 
 import structlog
@@ -36,8 +34,6 @@ from app.security.rate_limiter import rate_limiter
 
 settings = get_settings()
 logger = structlog.get_logger()
-
-# ARQ 队列名
 
 
 async def _send_rejected_card(
@@ -235,16 +231,10 @@ async def _process_message_internal(
             await asyncio.sleep(0.5)  # 短暂显示校验状态
             
             # 发送拒绝提示
-            # feishu_client = await get_feishu_client(app_id, db)
             rejection_msg = access_controller.get_rejection_message(reason)
             await card_status.update_status(custom_text=rejection_msg)
-            # await feishu_client.send_text_message(
-            #     receive_id=chat_id if chat_type == "group" else open_id,
-            #     text=rejection_msg,
-            #     receive_id_type="chat_id" if chat_type == "group" else "open_id"
-            # )
             
-            # ← 清理状态管理器
+            # 清理状态管理器
             await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
             
             return {"status": "rejected", "reason": reason}
@@ -283,6 +273,8 @@ async def _process_message_internal(
                     open_id=open_id,  # 保留 open_id 用于记录
                     chat_id=chat_id,
                     app_id=app_id,  # 用于上下文隔离
+                    user=user if user else None,  # 用户对象（私聊文件落盘用）
+                    chat_type=chat_type,  # 聊天类型（p2p/group）
                 )
                 
                 if media_file:
@@ -410,29 +402,23 @@ async def _process_message_internal(
             feishu_chat_type=chat_type,
         )
         
-        # 12. 人机延迟 - 模拟人类回复节奏
-        # 默认配置（写死在代码中）
-        DEFAULT_HUMAN_LIKE_DELAY = {
-            "enabled": True,
-            "min_ms": 500,
-            "max_ms": 1500
-        }
+        # 私聊文件落盘：在 media_downloader.py 中完成
+        # File 记录创建和 FeishuMediaFiles 关联已在下载时完成
+        # 更新 File 记录的 session_id（AI 管线返回）
+        if chat_type == "p2p" and media_paths and session_id:
+            try:
+                await media_downloader.update_file_session_id(
+                    db=db,
+                    message_id=message_id,
+                    session_id=session_id,
+                )
+            except Exception as update_err:
+                logger.error("Failed to update File session_id",
+                            message_id=message_id,
+                            session_id=session_id,
+                            error=str(update_err))
         
-        # 优先使用数据库配置，如无则使用默认配置
-        human_delay_config = DEFAULT_HUMAN_LIKE_DELAY
-        if access_config and access_config.human_like_delay:
-            # 数据库配置可以覆盖默认配置
-            human_delay_config = {**DEFAULT_HUMAN_LIKE_DELAY, **access_config.human_like_delay}
-        
-        # if human_delay_config.get("enabled", True):
-        #     import random
-        #     min_ms = human_delay_config.get("min_ms", 500)
-        #     max_ms = human_delay_config.get("max_ms", 1500)
-        #     delay_ms = random.randint(min_ms, max_ms)
-        #     logger.info("Applying human-like delay", delay_ms=delay_ms)
-        #     await asyncio.sleep(delay_ms / 1000)
-        
-        # 13. BlockStreaming 流式累积和发送
+        # BlockStreaming 流式累积和发送
         # ← 修改：使用 CardStatusManager 统一更新卡片内容
         import re
         
@@ -573,20 +559,12 @@ async def _get_or_create_session(
     mapping = result.scalar_one_or_none()
     
     if mapping:
-        # 更新活跃时间
         mapping.last_active_at = datetime.utcnow()
         mapping.message_count += 1
         await db.commit()
         return mapping.session_id
     
     # 创建新会话
-    # session_id = str(uuid7())
-    # new_mapping = FeishuChatSessionMapping(
-    #     id=uuid7(),
-    #     chat_id=chat_id,
-    #     open_id=open_id,
-    #     session_id=session_id,
-    #     chat_type=chat_type,
     #     user_id=user_id,
     #     message_count=1,
     # )
@@ -634,13 +612,6 @@ async def _startup(ctx):
     ctx["message_transfer_task"] = asyncio.create_task(
         message_transfer_loop()
     )
-    
-    # 启动防抖扫描器
-    from app.feishu.debounce import get_debounce_scanner
-    scanner = get_debounce_scanner()
-    ctx["debounce_scanner_task"] = asyncio.create_task(
-        scanner.start()
-    )
 
 
 async def _shutdown(ctx):
@@ -650,11 +621,6 @@ async def _shutdown(ctx):
     # 取消任务
     if "message_transfer_task" in ctx:
         ctx["message_transfer_task"].cancel()
-    
-    if "debounce_scanner_task" in ctx:
-        from app.feishu.debounce import get_debounce_scanner
-        scanner = get_debounce_scanner()
-        await scanner.stop()
     
     # 关闭所有 FeishuClient 实例（多应用支持）
     from app.feishu.client import close_all_feishu_clients

@@ -64,7 +64,12 @@ class FeishuAccessConfig(Base):
     __tablename__ = "feishu_access_config"
     
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid7)
-    app_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="飞书应用ID")
+    app_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="飞书应用 ID")
+    app_name: Mapped[str | None] = mapped_column(
+        String(128), 
+        nullable=True,
+        comment="飞书应用名称（机器人名称）"
+    )
     
     # 访问控制策略
     dm_policy: Mapped[str] = mapped_column(
@@ -381,6 +386,21 @@ class FeishuMediaFiles(Base):
         UUID(as_uuid=True),
         ForeignKey(f"{Base.__table_args__['schema']}.feishu_media_files.id"),
         nullable=True,
+        comment="指向原始文件 ID"
+    )
+    
+    # 关联 File 表
+    file_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{Base.__table_args__['schema']}.files.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="关联的 File 表 ID"
+    )
+    duplicate_of: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{Base.__table_args__['schema']}.feishu_media_files.id"),
+        nullable=True,
         comment="指向原始文件ID"
     )
     
@@ -400,6 +420,11 @@ class FeishuMediaFiles(Base):
         remote_side="FeishuMediaFiles.id",
         foreign_keys=[duplicate_of]
     )
+    file_record: Mapped["File"] = relationship(
+        "File",
+        back_populates="feishu_media",
+        foreign_keys=[file_id]
+    )
     
     # 索引
     __table_args__ = (
@@ -407,6 +432,7 @@ class FeishuMediaFiles(Base):
         Index("ix_feishu_media_files_message_id", "message_id"),
         Index("ix_feishu_media_files_sha256", "sha256_hash"),
         Index("ix_feishu_media_files_open_id", "open_id"),
+        Index("ix_feishu_media_files_file", "file_id"),
         {"schema": Base.__table_args__["schema"]},
     )
 
