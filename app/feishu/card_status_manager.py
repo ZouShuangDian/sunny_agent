@@ -356,6 +356,41 @@ class CardStatusManager:
             self.session.accumulated_content  # ← 使用累积的全部内容
         )
     
+    async def set_card_content(self, content: str):
+        """
+        直接设置卡片内容（非累积模式）
+        
+        与 update_card_content 的区别：
+        - update_card_content: 将新内容追加到已有内容后面（累积模式）
+        - set_card_content: 直接替换全部内容（设置模式）
+        
+        Args:
+            content: 要显示的完整内容（直接替换，不追加）
+        """
+        if not self.session:
+            logger.warning("Cannot set card content: no active session")
+            return
+        
+        if not self.session.card_id:
+            logger.warning("Cannot set card content: no card_id in session")
+            return
+        
+        # ← 直接赋值，不是追加
+        self.session.accumulated_content = content
+        
+        state = self._get_state()
+        state.card_id = self.session.card_id
+        state.element_id = self.session.element_id
+        
+        logger.debug("Setting card content",
+                    card_id=self.session.card_id,
+                    content_length=len(content))
+        
+        await self.block_streaming_manager.update_card_content(
+            state, 
+            self.session.accumulated_content
+        )
+    
     def get_session(self) -> Optional[CardSession]:
         """获取当前会话"""
         return self.session

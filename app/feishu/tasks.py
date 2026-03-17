@@ -5,6 +5,7 @@ Feishu ARQ 任务
 
 import asyncio
 import json
+import time
 from datetime import datetime
 from uuid import UUID
 
@@ -31,9 +32,18 @@ from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuChatSessionMapping, FeishuMessageLogs
 from app.feishu.user_resolver import get_user_resolver
 from app.security.rate_limiter import rate_limiter
+from app.execution.pipeline import (
+    run_agent_pipeline_streaming,
+    PipelineStreamEvent,
+)
 
 settings = get_settings()
 logger = structlog.get_logger()
+
+# 流式输出配置
+BATCH_SIZE = 50          # 每累积 50 个字符刷新一次
+BATCH_INTERVAL = 0.3     # 或每 300ms 刷新一次
+MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
 
 
 async def _send_rejected_card(
@@ -151,10 +161,9 @@ async def _process_message_internal(
             db, event_id, message_id, open_id, chat_id, chat_type, msg_type, content
         )
         
-        # 3. 更新状态为处理中
+        # 3. 更新状态为处理中（不提交，最后统一提交）
         log_entry.status = "processing"
         log_entry.processing_started_at = datetime.utcnow()
-        await db.commit()
         
         # 4. 用户身份解析（提前到 Debounce 之前，以便获取工号用于预下载）
         try:
@@ -168,7 +177,7 @@ async def _process_message_internal(
                 log_entry.status = "failed"
                 log_entry.error_type = "user_resolution"
                 log_entry.error_message = error
-                await db.commit()
+                await db.commit()  # 错误时需要提交
                 
                 # 发送错误提示
                 feishu_client = await get_feishu_client(app_id, db)
@@ -184,7 +193,7 @@ async def _process_message_internal(
             log_entry.status = "failed"
             log_entry.error_type = "feishu_config_error"
             log_entry.error_message = error_msg
-            await db.commit()
+            await db.commit()  # 错误时需要提交
             
             logger.error("Feishu configuration error", 
                         error=error_msg,
@@ -224,7 +233,7 @@ async def _process_message_internal(
             log_entry.status = "rejected"
             log_entry.error_type = "access_denied"
             log_entry.error_message = reason
-            await db.commit()
+            await db.commit()  # 拒绝时需要提交
             
             # ← 新增：拒绝时也显示状态
             await card_status.update_status(CardStatus.VALIDATING)
@@ -310,14 +319,14 @@ async def _process_message_internal(
         if not text_content and not media_paths:
             log_entry.status = "completed"
             log_entry.reply_content = "未检测到有效内容"
-            await db.commit()
+            await db.commit()  # 提前返回时需要提交
             return {"status": "completed", "message": "No content"}
         
         # 只有媒体文件但没有文本内容，静默处理不回复
         if media_paths and not text_content:
             log_entry.status = "completed"
             log_entry.reply_content = "媒体文件已接收，等待后续提问"
-            await db.commit()
+            await db.commit()  # 提前返回时需要提交
             logger.info("Media files received without text, waiting for user question",
                        media_count=len(media_paths),
                        message_id=message_id)
@@ -350,8 +359,6 @@ async def _process_message_internal(
         await card_status.update_status(CardStatus.GENERATING)
         
         # 11. AI处理 - 使用流式版本（支持媒体文件）
-        from app.execution.pipeline import run_agent_pipeline_streaming
-        
         # 加载最近媒体上下文（支持历史引用）
         context_manager = get_media_context_manager()
         recent_media = await context_manager.get_recent_media(
@@ -390,17 +397,133 @@ async def _process_message_internal(
         else:
             full_input_text = text_content
         
-        reply_text, session_id = await run_agent_pipeline_streaming(
-            usernumb=employee_no,
-            user_id=str(user.id) if user else "",
-            input_text=full_input_text,
-            session_id=session_id,
-            source="feishu",
-            media_paths=media_paths if media_paths else None,
-            feishu_chat_id=chat_id,
-            feishu_open_id=open_id,
-            feishu_chat_type=chat_type,
-        )
+        # 流式执行状态追踪
+        steps_history: list[str] = []
+        final_answer: str = ""
+        last_update_time = time.time()
+        buffered_length = 0
+        is_answering = False
+        current_session_id: str | None = None
+        
+        try:
+            async for event in run_agent_pipeline_streaming(
+                usernumb=employee_no,
+                user_id=str(user.id) if user else "",
+                input_text=full_input_text,
+                session_id=session_id,
+                source="feishu",
+                media_paths=media_paths if media_paths else None,
+                feishu_chat_id=chat_id,
+                feishu_open_id=open_id,
+                feishu_chat_type=chat_type,
+            ):
+                evt_type = event["event"]
+                evt_data = event["data"]
+                
+                # ── 步骤完成 ──
+                if evt_type == PipelineStreamEvent.STEP_COMPLETE:
+                    step_info = evt_data["info"]
+                    steps_history.append(f"步骤 {evt_data['step']}: {step_info}")
+                    
+                    # 更新卡片显示
+                    display_text = _build_card_content(
+                        steps_history, 
+                        final_answer,
+                        is_answering
+                    )
+                    await card_status.set_card_content(display_text)
+                
+                # ── 答案片段 ──
+                elif evt_type == PipelineStreamEvent.DELTA:
+                    if not is_answering:
+                        is_answering = True
+                    
+                    content = evt_data.get("content", "")
+                    final_answer += content
+                    buffered_length += len(content)
+                    
+                    # 批量刷新检查
+                    current_time = time.time()
+                    should_update = (
+                        buffered_length >= BATCH_SIZE or 
+                        current_time - last_update_time >= BATCH_INTERVAL
+                    )
+                    
+                    if should_update:
+                        display_text = _build_card_content(
+                            steps_history,
+                            final_answer,
+                            is_answering
+                        )
+                        await card_status.set_card_content(display_text)
+                        buffered_length = 0
+                        last_update_time = current_time
+                
+                # ── 执行完成 ──
+                elif evt_type == PipelineStreamEvent.FINISH:
+                    current_session_id = evt_data["finish_meta"].get("session_id")
+                    session_id = current_session_id or session_id
+                    
+                    # 最终更新
+                    display_text = _build_card_content(
+                        steps_history,
+                        final_answer,
+                        is_answering=True
+                    )
+                    await card_status.set_card_content(display_text)
+                
+                # ── 执行错误 ──
+                elif evt_type == PipelineStreamEvent.ERROR:
+                    error_msg = evt_data.get("error", "未知错误")
+                    logger.error("Pipeline streaming error", error=error_msg)
+                    await card_status.set_error(f"执行出错: {error_msg}")
+                    raise Exception(error_msg)
+            
+        except asyncio.TimeoutError:
+            # AI 处理超时
+            logger.warning("AI processing timeout",
+                          event_id=event_id,
+                          message_id=message_id,
+                          duration_ms=int((datetime.utcnow() - log_entry.processing_started_at).total_seconds() * 1000))
+            
+            # 更新日志状态
+            log_entry.status = "failed"
+            log_entry.error_type = "timeout"
+            log_entry.error_message = "AI 处理超时"
+            await db.commit()
+            
+            # 发送友好提示给用户
+            timeout_message = (
+                "⏱️ 处理超时\n\n"
+                "您的请求处理时间过长，可能是由于：\n"
+                "• 当前问题较为复杂\n"
+                "• 网络连接不稳定\n"
+                "• 系统负载较高\n\n"
+                "💡 建议：\n"
+                "• 简化问题后重试\n"
+                "• 稍后再次尝试\n"
+                "• 如果问题持续，请联系管理员"
+            )
+            
+            try:
+                await card_status.set_error("处理超时，请简化问题后重试")
+                await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
+                
+                # 发送超时提示消息
+                feishu_client = await get_feishu_client(app_id, db)
+                await feishu_client.send_text_message(
+                    receive_id=chat_id if chat_type == "group" else open_id,
+                    text=timeout_message,
+                    receive_id_type="chat_id" if chat_type == "group" else "open_id"
+                )
+            except Exception as send_err:
+                logger.error("Failed to send timeout message", error=str(send_err))
+            
+            return {"status": "failed", "error": "timeout", "message": "AI 处理超时"}
+        except Exception as e:
+            # 其他异常已在上面处理
+            logger.error("Error in pipeline streaming", error=str(e))
+            return {"status": "failed", "error": "processing_error", "message": str(e)}
         
         # 私聊文件落盘：在 media_downloader.py 中完成
         # File 记录创建和 FeishuMediaFiles 关联已在下载时完成
@@ -418,23 +541,10 @@ async def _process_message_internal(
                             session_id=session_id,
                             error=str(update_err))
         
-        # BlockStreaming 流式累积和发送
-        # ← 修改：使用 CardStatusManager 统一更新卡片内容
-        import re
-        
-        # 先按段落分割
-        paragraphs = re.split(r'(?<=\n\n)|(?<=\n)', reply_text)
-        
-        for para in paragraphs:
-            if not para.strip():
-                continue
-            
-            # ← 使用 CardStatusManager 更新卡片内容（显示生成的文本）
-            await card_status.update_card_content(para)
-        
-        # 关闭流式卡片，发送剩余内容并清除状态
+        # 关闭流式卡片并发送最终答案
+        # 卡片内容已在流式过程中实时更新，这里只是关闭流式状态
         await card_status.complete(
-            final_answer=reply_text,
+            final_answer=final_answer,
             send_as_message=False,  # 更新到同一张卡片，不另发消息
         )
         
@@ -452,7 +562,7 @@ async def _process_message_internal(
         log_entry.processing_duration_ms = int(
             (processing_end - log_entry.processing_started_at).total_seconds() * 1000
         )
-        log_entry.reply_content = reply_text
+        log_entry.reply_content = final_answer
         await db.commit()
         
         logger.info("Message processing completed",
@@ -462,7 +572,7 @@ async def _process_message_internal(
         return {
             "status": "completed",
             "message_id": message_id,
-            "reply_length": len(reply_text),
+            "reply_length": len(final_answer),
         }
         
     except Exception as e:
@@ -819,3 +929,64 @@ def _convert_feishu_event_to_message(feishu_event: dict) -> dict:
         # 保留原始事件，便于调试
         "_raw_event": feishu_event,
     }
+
+
+def _build_card_content(
+    steps: list[str], 
+    answer: str, 
+    is_answering: bool
+) -> str:
+    """构建卡片显示内容
+    
+    显示逻辑：
+    - 最多显示最近 MAX_VISIBLE_STEPS 个步骤
+    - 旧步骤折叠显示 "[还有 X 个步骤...]"
+    - 不显示工具结果，只显示操作描述
+    
+    Args:
+        steps: 步骤列表，每个元素是格式化后的步骤字符串
+        answer: 当前累积的最终答案
+        is_answering: 是否正在生成最终答案
+    
+    Returns:
+        格式化后的卡片内容文本
+    """
+    lines = ["🤖 Agent 正在工作", ""]
+    
+    # 步骤区域（最多显示最近 MAX_VISIBLE_STEPS 步）
+    if steps:
+        visible_steps, hidden_count = _get_visible_steps(steps, MAX_VISIBLE_STEPS)
+        
+        if hidden_count > 0:
+            lines.append(f"*[还有 {hidden_count} 个步骤...]*")
+            lines.append("")
+        
+        for step in visible_steps:
+            lines.append(step)
+        
+        lines.append("")  # 空行分隔
+    
+    # 答案区域
+    if is_answering:
+        # lines.append("📖 **最终答案：**")
+        lines.append(answer)
+    elif steps:
+        lines.append("⏳ 生成答案中...")
+    
+    return "\n".join(lines)
+
+
+def _get_visible_steps(steps: list[str], max_visible: int) -> tuple[list[str], int]:
+    """获取可见步骤和隐藏步骤数
+    
+    Args:
+        steps: 完整步骤列表
+        max_visible: 最大可见步骤数
+    
+    Returns:
+        (可见步骤列表, 隐藏步骤数)
+    """
+    if len(steps) <= max_visible:
+        return steps, 0
+    
+    return steps[-max_visible:], len(steps) - max_visible

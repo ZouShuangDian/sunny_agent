@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ logger = structlog.get_logger()
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cache.redis_client import redis_client
 from app.db.models.feishu import (
     DMPolicy,
     FeishuAccessConfig,
@@ -22,12 +24,13 @@ from app.db.models.feishu import (
 
 
 class AccessController:
-    """访问控制器"""
+    """访问控制器（使用 Redis 缓存）"""
+    
+    CACHE_KEY_PREFIX = "feishu:access_config"
+    CACHE_TTL = 300  # 5分钟缓存
     
     def __init__(self):
-        self._config_cache: Dict[str, dict] = {}
-        self._cache_ttl = 300  # 5分钟缓存
-        self._cache_timestamp: Dict[str, datetime] = {}
+        self._redis = redis_client
     
     async def _load_config(
         self, 
@@ -43,21 +46,34 @@ class AccessController:
         )
         return result.scalar_one_or_none()
     
+    def _get_cache_key(self, app_id: str) -> str:
+        """生成 Redis 缓存 key"""
+        return f"{self.CACHE_KEY_PREFIX}:{app_id}"
+    
     async def _get_cached_config(
         self, 
         db: AsyncSession, 
         app_id: str
     ) -> Optional[dict]:
-        """获取缓存的配置"""
-        now = datetime.utcnow()
+        """获取缓存的配置（使用 Redis）"""
+        cache_key = self._get_cache_key(app_id)
         
-        # 检查缓存是否有效
-        if app_id in self._config_cache:
-            cache_time = self._cache_timestamp.get(app_id)
-            if cache_time and (now - cache_time).seconds < self._cache_ttl:
-                return self._config_cache[app_id]
+        # 先尝试从 Redis 获取
+        try:
+            cached_data = await self._redis.get(cache_key)
+            if cached_data:
+                # 检查缓存是否过期（TTL 由 Redis 自动管理）
+                config_dict = json.loads(cached_data)
+                logger.debug("Access config loaded from Redis cache",
+                            app_id=app_id,
+                            dm_policy=config_dict.get("dm_policy"))
+                return config_dict
+        except Exception as e:
+            logger.warning("Failed to get config from Redis cache",
+                          app_id=app_id,
+                          error=str(e))
         
-        # 重新加载配置
+        # 缓存未命中，从数据库加载
         config = await self._load_config(db, app_id)
         if not config:
             return None
@@ -73,8 +89,20 @@ class AccessController:
             "human_like_delay": config.human_like_delay,
         }
         
-        self._config_cache[app_id] = config_dict
-        self._cache_timestamp[app_id] = now
+        # 写入 Redis 缓存
+        try:
+            await self._redis.setex(
+                cache_key,
+                self.CACHE_TTL,
+                json.dumps(config_dict, default=str)  # 处理 datetime 等不可序列化类型
+            )
+            logger.info("Access config cached to Redis",
+                       app_id=app_id,
+                       ttl=self.CACHE_TTL)
+        except Exception as e:
+            logger.error("Failed to cache config to Redis",
+                        app_id=app_id,
+                        error=str(e))
         
         return config_dict
     
@@ -201,13 +229,14 @@ class AccessController:
         
         return effective_config
     
-    def invalidate_cache(self, app_id: str):
-        """使配置缓存失效"""
-        if app_id in self._config_cache:
-            del self._config_cache[app_id]
-        if app_id in self._cache_timestamp:
-            del self._cache_timestamp[app_id]
-        logger.info(f"已清除访问配置缓存: {app_id}")
+    async def invalidate_cache(self, app_id: str):
+        """使配置缓存失效（Redis）"""
+        cache_key = self._get_cache_key(app_id)
+        try:
+            await self._redis.delete(cache_key)
+            logger.info(f"已清除访问配置缓存: {app_id}")
+        except Exception as e:
+            logger.error(f"清除访问配置缓存失败: {app_id}", error=str(e))
     
     def get_rejection_message(self, reason: str) -> str:
         """获取拒绝消息的友好提示"""

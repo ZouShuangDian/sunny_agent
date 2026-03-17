@@ -363,9 +363,15 @@ class MediaDownloader:
         mime_type: Optional[str] = None,
         app_id: Optional[str] = None,
         max_retries: int = 3,
+        user: Optional["User"] = None,
+        chat_type: Optional[str] = None,
     ) -> Optional[FeishuMediaFiles]:
         """
         带重试的媒体下载
+        
+        Args:
+            user: 用户对象（私聊文件落盘用）
+            chat_type: 聊天类型（p2p/group）
         
         Returns:
             FeishuMediaFiles 记录（成功），None（最终失败）
@@ -384,6 +390,8 @@ class MediaDownloader:
                 chat_id=chat_id,
                 mime_type=mime_type,
                 app_id=app_id,
+                user=user,
+                chat_type=chat_type,
             )
             
             # 成功，返回记录

@@ -13,6 +13,7 @@ Phase 1 仅 Worker 使用；chat.py 保持现状，后续重构时再统一。
 
 import time
 import uuid as _uuid
+from collections.abc import AsyncIterator
 
 import structlog
 
@@ -29,6 +30,7 @@ from app.llm.client import LLMClient
 from app.memory.chat_persistence import ChatPersistence
 from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
+from app.streaming.events import SSEEvent
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -44,6 +46,42 @@ _SOURCE_SUB_INTENT_MAP = {
     "cron": "cron_execution",
     "async_task": "async_task_execution",
 }
+
+
+# 流式事件类型
+class PipelineStreamEvent:
+    """Pipeline 流式事件类型"""
+    STEP_COMPLETE = "step_complete"  # 步骤完成
+    DELTA = "delta"                   # 答案片段
+    FINISH = "finish"                 # 执行完成
+    ERROR = "error"                   # 执行错误
+
+
+# 工具展示配置: tool_name -> (图标, 格式化函数)
+_TOOL_DISPLAY_CONFIG = {
+    "web_search": ("🔍", lambda args: f"搜索: {args.get('query', '')}"),
+    "web_fetch": ("🌐", lambda args: f"获取网页: {args.get('url', '')[:50]}..."),
+    "bash_tool": ("⚡", lambda args: "执行命令"),
+    "read_file": ("📄", lambda args: f"读取: {args.get('path', '').split('/')[-1]}"),
+    "write_file": ("✏️", lambda args: f"写入: {args.get('path', '').split('/')[-1]}"),
+    "str_replace_file": ("📝", lambda args: f"编辑: {args.get('path', '').split('/')[-1]}"),
+    "ask_user": ("❓", lambda args: "询问用户"),
+    "todo_read": ("✅", lambda args: "查看待办"),
+    "todo_write": ("✅", lambda args: "更新待办"),
+    "cron_create": ("⏰", lambda args: "创建定时任务"),
+    "cron_manage": ("⏰", lambda args: "管理定时任务"),
+    "create_task": ("📋", lambda args: "创建异步任务"),
+    "present_files": ("📁", lambda args: "展示文件"),
+    "skill_call": ("🛠️", lambda args: f"调用技能: {args.get('skill_name', 'unknown')}"),
+    "subagent_call": ("🤖", lambda args: f"调用子代理: {args.get('agent_name', 'unknown')}"),
+}
+
+
+def _format_step_info(tool_name: str, args: dict) -> str:
+    """格式化步骤信息，只显示操作描述，不显示结果"""
+    config = _TOOL_DISPLAY_CONFIG.get(tool_name, ("🔧", lambda a: tool_name))
+    icon, formatter = config
+    return f"{icon} {formatter(args)}"
 
 
 async def run_agent_pipeline(
@@ -178,15 +216,23 @@ async def run_agent_pipeline_streaming(
     feishu_chat_id: str | None = None,
     feishu_open_id: str | None = None,
     feishu_chat_type: str | None = None,
-) -> tuple[str, str]:
+) -> AsyncIterator[dict]:
     """完整的 Agent 执行管线（流式版本）
     
-    与 run_agent_pipeline 业务逻辑完全一致，支持媒体文件处理。
+    与 run_agent_pipeline 业务逻辑完全一致，但改为流式输出。
+    每完成一个步骤会推送步骤信息，最后流式输出答案。
     
     区别：
+    - 返回 AsyncIterator[dict]，调用方需使用 async for 消费
     - 支持 media_paths 参数（媒体文件提示）
     - 支持飞书会话映射（feishu_chat_id, feishu_open_id）
-    - 可用于飞书等需要媒体处理的场景
+    - 每个步骤完成后推送 PipelineStreamEvent.STEP_COMPLETE 事件
+    - 答案内容通过 PipelineStreamEvent.DELTA 事件流式推送
+    
+    事件格式：
+    - {"event": "step_complete", "data": {"step": 1, "info": "🔍 搜索: xxx", "total_steps": 1}}
+    - {"event": "delta", "data": {"content": "文本片段"}}
+    - {"event": "finish", "data": {"reply": "完整答案", "steps": [...], "finish_meta": {...}}}
     
     Args:
         usernumb: 用户工号
@@ -200,8 +246,8 @@ async def run_agent_pipeline_streaming(
         feishu_open_id: 飞书用户 ID（可选，用于飞书会话映射）
         feishu_chat_type: 飞书会话类型（可选，'p2p' | 'group'）
     
-    Returns:
-        (reply_text, session_id) 二元组
+    Yields:
+        流式事件字典
     """
     sid = session_id or str(_uuid.uuid4())
     tid = trace_id or str(_uuid.uuid4())
@@ -234,6 +280,11 @@ async def run_agent_pipeline_streaming(
             full_input = f"{media_hint}\n\n{full_input}"
         else:
             full_input = media_hint
+    
+    # 状态追踪
+    current_step: dict | None = None
+    steps_history: list[dict] = []
+    reply_chunks: list[str] = []
     
     try:
         memory = WorkingMemory(redis_client)
@@ -282,20 +333,74 @@ async def run_agent_pipeline_streaming(
         if settings.CHAT_PERSIST_ENABLED:
             await _chat_persistence.save_message(sid, user_msg)
         
-        # -- Step 4: agent_scope + 执行（与 run_agent_pipeline 完全一致） --
+        # -- Step 4: agent_scope + 流式执行 --
         async with agent_scope(sid, _chat_persistence) as scope:
-            exec_result = await _execution_router.execute(intent_result, sid)
+            # 使用 execute_stream 替代 execute
+            async for event in _execution_router.execute_stream(intent_result, sid):
+                evt_type = event["event"]
+                evt_data = event["data"]
+                
+                # ── 步骤追踪 ──
+                if evt_type == SSEEvent.TOOL_CALL:
+                    current_step = {
+                        "step": evt_data["step"],
+                        "tool_name": evt_data["name"],
+                        "args": evt_data["args"],
+                    }
+                
+                elif evt_type == SSEEvent.TOOL_RESULT and current_step:
+                    # 步骤完成，生成描述（不包含结果）
+                    step_info = _format_step_info(
+                        current_step["tool_name"], 
+                        current_step["args"]
+                    )
+                    
+                    steps_history.append({
+                        "step": current_step["step"],
+                        "info": step_info,
+                    })
+                    
+                    yield {
+                        "event": PipelineStreamEvent.STEP_COMPLETE,
+                        "data": {
+                            "step": current_step["step"],
+                            "info": step_info,
+                            "total_steps": len(steps_history),
+                        }
+                    }
+                    current_step = None
+                
+                # ── 答案流式输出 ──
+                elif evt_type == SSEEvent.DELTA:
+                    content = evt_data.get("content", "")
+                    reply_chunks.append(content)
+                    yield {
+                        "event": PipelineStreamEvent.DELTA,
+                        "data": {"content": content}
+                    }
+                
+                # ── 执行完成 ──
+                elif evt_type == SSEEvent.FINISH:
+                    yield {
+                        "event": PipelineStreamEvent.FINISH,
+                        "data": {
+                            "reply": "".join(reply_chunks),
+                            "steps": steps_history,
+                            "finish_meta": evt_data,
+                        }
+                    }
             
-            # -- Step 5: 记录 assistant 消息（与 run_agent_pipeline 完全一致） --
+            # -- Step 5: 记录 assistant 消息（流式执行完成后） --
+            reply_text = "".join(reply_chunks)
             assistant_msg_id = str(_uuid.uuid4())
             assistant_msg = Message(
                 role="assistant",
-                content=exec_result.reply,
+                content=reply_text,
                 timestamp=time.time(),
                 message_id=assistant_msg_id,
                 intent_primary="general",
                 route="deep_l3",
-                tool_calls=exec_result.tool_calls if exec_result.tool_calls else None,
+                tool_calls=None,  # 从 steps_history 提取（如有需要）
             )
             await memory.append_message(sid, assistant_msg)
             await memory.increment_turn(sid)
@@ -303,12 +408,17 @@ async def run_agent_pipeline_streaming(
             scope.set_result(
                 message_id=assistant_msg_id,
                 msg=assistant_msg,
-                reasoning_trace=exec_result.reasoning_trace,
-                l3_steps=exec_result.l3_steps,
+                reasoning_trace=None,
+                l3_steps=[s["info"] for s in steps_history],
             )
         
-        return exec_result.reply, sid
-        
+    except Exception as e:
+        log.error("Pipeline streaming error", error=str(e), exc_info=True)
+        yield {
+            "event": PipelineStreamEvent.ERROR,
+            "data": {"error": str(e), "session_id": sid}
+        }
+        raise
     finally:
         reset_session_id(session_token)
         reset_user_id(user_token)
