@@ -27,7 +27,7 @@ from app.feishu.card_status_manager import (
     cleanup_card_status_manager,
 )
 from app.feishu.client import FeishuClient, FeishuError, get_feishu_client
-from app.feishu.debounce import get_debounce_manager
+
 from app.feishu.media_downloader import get_media_downloader
 from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuChatSessionMapping, FeishuMessageLogs
@@ -148,61 +148,7 @@ async def _process_message_internal(
         log_entry.employee_no = employee_no
         log_entry.user_id = user.id if user else None
         
-        # 5. Debounce处理
-        debounce_manager = get_debounce_manager()
-        should_debounce = await debounce_manager.check_should_debounce(message)
-        
-        if should_debounce:
-            # ← 预下载媒体文件（多实例兼容）：如果是支持的媒体类型，异步触发下载
-            # 支持的类型：image, file, audio
-            # 跳过的类型：media(视频), sticker(贴纸) - 暂不支持
-            if msg_type in ["image", "file", "audio"]:
-                # 根据消息类型提取对应的 key
-                if msg_type == "image":
-                    file_key = content.get("image_key")
-                    default_name = "image.jpg"
-                else:  # file, audio
-                    file_key = content.get("file_key")
-                    default_name = f"{msg_type}.bin"
-                
-                file_name = content.get("file_name") or default_name
-                
-                if file_key:
-                    from app.feishu.media_downloader import pre_download_media_async
-                    # 异步触发预下载，不等待结果（使用工号 employee_no）
-                    asyncio.create_task(pre_download_media_async(
-                        app_id=app_id,
-                        open_id=open_id,
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        file_key=file_key,
-                        file_name=file_name,
-                        file_type=msg_type,
-                        user_id=employee_no,  # 使用工号作为目录名
-                    ))
-            elif msg_type in ["media", "sticker"]:
-                # 暂不支持视频和贴纸类型，记录日志
-                logger.info(f"Media type '{msg_type}' not supported yet, skipping download",
-                           message_id=message_id,
-                           msg_type=msg_type)
-            
-            result, messages = await debounce_manager.add_message(open_id, chat_id, message)
-            
-            if result == "buffered":
-                # 消息已缓冲，稍后处理
-                log_entry.status = "buffering"
-                await db.commit()
-                logger.info("Message buffered",
-                           event_id=event_id,
-                           session=f"{open_id}:{chat_id}")
-                return {"status": "buffered", "message_id": message_id}
-            
-            elif result == "processing":
-                # 正在处理中，这条消息会被合并到当前处理批次
-                # 继续执行，让 should_flush 获取合并后的消息
-                logger.info("Session is processing, will merge with current batch",
-                           event_id=event_id)
-        
+        # 5. 启动卡片会话
         if msg_type in ["text"]:
             await card_status.start_session(
                 open_id=open_id,
@@ -211,39 +157,6 @@ async def _process_message_internal(
                 app_id=app_id,
                 receive_id_type=receive_id_type,
             )
-
-        # 5. 检查是否应该flush（Debounced消息）
-        should_flush, flushed_messages = await debounce_manager.should_flush(open_id, chat_id)
-        
-        if should_flush and flushed_messages:
-            # 使用合并后的消息（支持多实例媒体下载）
-            merged_message = flushed_messages[0]
-            content = merged_message.get("content", content)
-            
-            # ← 提取合并的媒体文件（从 Redis 缓存读取的下载结果）
-            merged_media = merged_message.get("_media_files", [])
-            for media in merged_media:
-                local_path = media.get("local_path")
-                if local_path:
-                    # 验证路径是否存在（NAS 共享盘）
-                    if Path(local_path).exists():
-                        media_paths.append(local_path)
-                        logger.debug("Media from merged message",
-                                    file_name=media.get("file_name"),
-                                    local_path=local_path)
-                    else:
-                        logger.warning("Media path not found in NAS",
-                                      file_name=media.get("file_name"),
-                                      local_path=local_path)
-                else:
-                    # 下载失败或未下载
-                    logger.warning("Media not downloaded",
-                                  file_name=media.get("file_name"),
-                                  message_id=media.get("message_id"))
-            
-            logger.info("Using merged message",
-                       original_count=merged_message.get("merged_count", 1),
-                       media_count=len(media_paths))
         
         # 6. 访问控制检查
         access_controller = get_access_controller()
@@ -355,8 +268,7 @@ async def _process_message_internal(
             await db.commit()
             return {"status": "completed", "message": "No content"}
         
-        # ← 新增：只有媒体文件但没有文本内容，静默处理不回复
-        # 等待用户后续文字消息，Debounce 机制会合并历史媒体文件
+        # 只有媒体文件但没有文本内容，静默处理不回复
         if media_paths and not text_content:
             log_entry.status = "completed"
             log_entry.reply_content = "媒体文件已接收，等待后续提问"
