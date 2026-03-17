@@ -40,41 +40,6 @@ logger = structlog.get_logger()
 # ARQ 队列名
 
 
-async def _send_rate_limit_card(
-    app_id: str,
-    user_id: str,
-    message_id: str,
-    retry_count: int,
-    reason: str,
-) -> None:
-    """发送排队卡片：显示排队位置、预计等待时间、限流原因、建议"""
-    feishu_client = await get_feishu_client(app_id)
-    
-    # 计算排队位置和预计等待时间
-    queue_position = retry_count + 1
-    estimated_wait = queue_position * 3  # 每次重试延迟 3 秒
-    
-    # 根据原因生成友好的提示
-    reason_text = {
-        "rpm_limit": "当前请求过于频繁",
-        "concurrent_limit": "当前并发数已达上限",
-    }.get(reason, "系统繁忙")
-    
-    text = (
-        f"⏳ 请求排队中\n\n"
-        f"📊 排队位置：第 {queue_position} 位\n"
-        f"⏱️ 预计等待：{estimated_wait} 秒\n"
-        f"⚠️ 限流原因：{reason_text}\n\n"
-        f"💡 建议：请稍作等待，系统将自动重试"
-    )
-    
-    await feishu_client.send_text_message(
-        receive_id=user_id,
-        text=text,
-        receive_id_type="open_id",
-    )
-
-
 async def _send_rejected_card(
     app_id: str,
     user_id: str,
@@ -87,7 +52,7 @@ async def _send_rejected_card(
     # 根据原因生成友好的提示
     reason_text = {
         "rpm_limit": "当前请求过于频繁，已达到每分钟上限",
-        "concurrent_limit": "当前并发数已达上限",
+        "concurrent_limit": "当前有请求正在处理，请稍后再试",
     }.get(reason, "系统繁忙")
     
     text = (
@@ -168,45 +133,13 @@ async def _process_message_internal(
         allowed, reason = True, "ok"  # 限流检查失败时放行
     
     if not allowed:
-        # 限流触发，检查重试次数
+        # 限流触发，直接发送拒绝卡片
         try:
-            retry_count = await rate_limiter.get_retry_count(app_id, open_id, message_id)
+            await _send_rejected_card(app_id, open_id, message_id, reason)
         except Exception as e:
-            logger.error("Failed to get retry count", error=str(e))
-            retry_count = 0
+            logger.warning("Failed to send rejected card", error=str(e))
         
-        if retry_count < rate_limiter.max_delay_attempts:
-            # < 3 次：发送排队卡片 + 延迟 3 秒重新入队
-            retry_count = await rate_limiter.increment_retry(app_id, open_id, message_id)
-            
-            # 发送排队卡片
-            try:
-                await _send_rate_limit_card(app_id, open_id, message_id, retry_count, reason)
-            except Exception as e:
-                logger.warning("Failed to send rate limit card", error=str(e))
-            
-            # 延迟 3 秒重新入队
-            try:
-                arq_pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
-                await arq_pool.enqueue_job(
-                    "process_feishu_message",
-                    message,
-                    _queue_name=FeishuRedisKeys.ARQ_QUEUE,
-                    _defer_by=rate_limiter.delay_seconds,
-                )
-                await arq_pool.close()
-            except Exception as e:
-                logger.error("Failed to re-queue message", error=str(e))
-            
-            return {"status": "delayed", "retry_count": retry_count, "reason": reason}
-        else:
-            # >= 3 次：发送拒绝卡片 + 返回错误
-            try:
-                await _send_rejected_card(app_id, open_id, message_id, reason)
-            except Exception as e:
-                logger.warning("Failed to send rejected card", error=str(e))
-            
-            return {"status": "rejected", "error": "rate_limit_exceeded", "reason": reason}
+        return {"status": "rejected", "error": "rate_limit_exceeded", "reason": reason}
     
     # 通过限流，增加 RPM 计数
     try:
