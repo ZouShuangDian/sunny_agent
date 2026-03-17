@@ -81,13 +81,14 @@ class RateLimitRedisKeys:
 
     # ── 并发计数 ──
     @staticmethod
-    def concurrent(app_id: str, user_id: str) -> str:
+    def concurrent(app_id: str, user_id: str, chat_id: str) -> str:
         """
         并发请求计数（Redis Set）
         成员：message_id 列表
         TTL: 300 秒（5 分钟兜底）
+        Key 格式：rl:concurrent:{app_id}:{user_id}:{chat_id}
         """
-        return f"rl:concurrent:{app_id}:{user_id}"
+        return f"rl:concurrent:{app_id}:{user_id}:{chat_id}"
 
     # ── 频率计数（滑动窗口） ──
     @staticmethod

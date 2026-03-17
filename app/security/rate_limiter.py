@@ -38,9 +38,9 @@ class RateLimiter:
         self.max_delay_attempts = max_delay_attempts
         self.redis_client = redis_client
 
-    def _get_concurrent_key(self, app_id: str, user_id: str) -> str:
+    def _get_concurrent_key(self, app_id: str, user_id: str, chat_id: str) -> str:
         """生成并发计数 Key"""
-        return RateLimitRedisKeys.concurrent(app_id, user_id)
+        return RateLimitRedisKeys.concurrent(app_id, user_id, chat_id)
 
     def _get_rpm_key(self, app_id: str, user_id: str) -> str:
         """生成 RPM Key（使用时间戳窗口）"""
@@ -55,7 +55,9 @@ class RateLimiter:
         self,
         app_id: str,
         user_id: str,
-        message_id: str
+        message_id: str,
+        chat_id: str,
+        msg_type: str = "text"
     ) -> tuple[bool, str]:
         """
         Check rate limit for a message.
@@ -64,6 +66,8 @@ class RateLimiter:
             app_id: Application ID for isolation
             user_id: User ID (open_id)
             message_id: Message ID for tracking
+            chat_id: Chat ID for isolation
+            msg_type: Message type (text/image/file/audio/media)
         
         Returns:
             (allowed, reason): 
@@ -73,11 +77,14 @@ class RateLimiter:
         
         Example:
             >>> limiter = RateLimiter()
-            >>> allowed, reason = await limiter.check_rate_limit("app1", "user1", "msg1")
+            >>> allowed, reason = await limiter.check_rate_limit("app1", "user1", "msg1", "chat1")
             >>> if not allowed:
             ...     logger.warning(f"Rate limited: {reason}")
         """
-        concurrent_key = self._get_concurrent_key(app_id, user_id)
+        if msg_type in ["image", "file", "audio", "media"]:
+            return (True, "ok")
+        
+        concurrent_key = self._get_concurrent_key(app_id, user_id, chat_id)
         rpm_key = self._get_rpm_key(app_id, user_id)
 
         try:
@@ -99,10 +106,11 @@ class RateLimiter:
         self,
         app_id: str,
         user_id: str,
-        message_id: str
+        message_id: str,
+        chat_id: str
     ) -> None:
         """开始处理，增加并发计数"""
-        concurrent_key = self._get_concurrent_key(app_id, user_id)
+        concurrent_key = self._get_concurrent_key(app_id, user_id, chat_id)
         try:
             await self.redis_client.sadd(concurrent_key, message_id)
             await self.redis_client.expire(concurrent_key, CONCURRENT_TTL)
@@ -114,10 +122,11 @@ class RateLimiter:
         self,
         app_id: str,
         user_id: str,
-        message_id: str
+        message_id: str,
+        chat_id: str
     ) -> None:
         """处理完成，减少并发计数"""
-        concurrent_key = self._get_concurrent_key(app_id, user_id)
+        concurrent_key = self._get_concurrent_key(app_id, user_id, chat_id)
         try:
             await self.redis_client.srem(concurrent_key, message_id)
         except Exception as e:

@@ -58,7 +58,6 @@ async def _send_rejected_card(
     text = (
         f"❌ 请求被拒绝\n\n"
         f"⚠️ 原因：{reason_text}\n"
-        f"⏱️ 建议等待：60 秒\n\n"
         f"💡 建议：请稍后再试，或减少请求频率"
     )
     
@@ -127,7 +126,7 @@ async def _process_message_internal(
     
     # ← 新增：限流检查
     try:
-        allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id)
+        allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id, chat_id, msg_type)
     except Exception as e:
         logger.error("Rate limiter check failed", error=str(e), app_id=app_id, open_id=open_id)
         allowed, reason = True, "ok"  # 限流检查失败时放行
@@ -149,7 +148,7 @@ async def _process_message_internal(
     
     try:
         # 开始处理
-        await rate_limiter.start_processing(app_id, open_id, message_id)
+        await rate_limiter.start_processing(app_id, open_id, message_id, chat_id)
         
         # 2. 创建/更新审计日志
         log_entry = await _create_or_update_log(
@@ -505,7 +504,7 @@ async def _process_message_internal(
     finally:
         # ← 新增：清理限流状态
         try:
-            await rate_limiter.end_processing(app_id, open_id, message_id)
+            await rate_limiter.end_processing(app_id, open_id, message_id, chat_id)
         except Exception as e:
             logger.error("Failed to end processing", error=str(e))
 
