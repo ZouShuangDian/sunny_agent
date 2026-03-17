@@ -22,11 +22,11 @@
 
 **Purpose**: Project dependencies, test framework, and shared tooling
 
-- [ ] T001 Add `langfuse` and `cryptography` dependencies via `poetry add langfuse cryptography` in pyproject.toml
-- [ ] T002 Add `pytest`, `pytest-asyncio`, `pytest-cov`, `httpx` (test client) dev dependencies via `poetry add --group dev pytest pytest-asyncio pytest-cov httpx` in pyproject.toml
-- [ ] T003 [P] Create pytest configuration in pyproject.toml (`[tool.pytest.ini_options]` with asyncio_mode="auto", testpaths=["tests"])
-- [ ] T004 [P] Create test fixtures base file with async DB session and test client in tests/conftest.py
-- [ ] T005 [P] Create Langfuse Docker Compose configuration with ClickHouse, Redis, MinIO, PostgreSQL, Langfuse services and `LANGFUSE_INIT_*` env vars in infra/langfuse-compose.yml
+- [x] T001 Add `langfuse` and `cryptography` dependencies via `poetry add langfuse cryptography` in pyproject.toml
+- [x] T002 Add `pytest`, `pytest-asyncio`, `pytest-cov`, `httpx` (test client) dev dependencies via `poetry add --group dev pytest pytest-asyncio pytest-cov httpx` in pyproject.toml
+- [x] T003 [P] Create pytest configuration in pyproject.toml (`[tool.pytest.ini_options]` with asyncio_mode="auto", testpaths=["tests"])
+- [x] T004 [P] Create test fixtures base file with async DB session and test client in tests/conftest.py
+- [x] T005 [P] Create Langfuse Docker Compose configuration with ClickHouse, Redis, MinIO, PostgreSQL, Langfuse services and `LANGFUSE_INIT_*` env vars in infra/langfuse-compose.yml
 
 **Checkpoint**: Dependencies installed, test infrastructure ready, Langfuse compose file exists
 
@@ -40,21 +40,21 @@
 
 ### Tests for Foundational Phase
 
-- [ ] T006 [P] Write unit tests for Fernet encrypt/decrypt/generate_key functions in tests/unit/test_crypto.py
-- [ ] T007 [P] Write unit tests for Langfuse settings fields (LANGFUSE_ENABLED, LANGFUSE_HOST, etc.) presence and defaults in tests/unit/test_config_langfuse.py
-- [ ] T008 [P] Write unit tests for LangfuseConfig model CRUD and singleton constraint (id=1) in tests/unit/test_langfuse_config_model.py
-- [ ] T009 Write integration tests for config loader logic (DB priority over .env, first-boot seed, ENCRYPTION_KEY auto-gen) in tests/integration/test_langfuse_config_loader.py
+- [x] T006 [P] Write unit tests for Fernet encrypt/decrypt/generate_key functions in tests/unit/test_crypto.py
+- [x] T007 [P] Write unit tests for Langfuse settings fields (LANGFUSE_ENABLED, LANGFUSE_HOST, etc.) presence and defaults in tests/unit/test_config_langfuse.py
+- [x] T008 [P] Write unit tests for LangfuseConfig model CRUD and singleton constraint (id=1) in tests/unit/test_langfuse_config_model.py
+- [x] T009 Write integration tests for config loader logic (DB priority over .env, first-boot seed, ENCRYPTION_KEY auto-gen) in tests/integration/test_langfuse_config_loader.py
 
 ### Implementation for Foundational Phase
 
-- [ ] T010 [P] Add LANGFUSE_*, ENCRYPTION_KEY, LANGFUSE_PII_PATTERNS settings fields to app/config.py
-- [ ] T011 [P] Create Fernet encryption utility module (encrypt_secret, decrypt_secret, generate_encryption_key) in app/utils/crypto.py
-- [ ] T012 Create LangfuseConfig SQLAlchemy model with singleton constraint per data-model.md in app/db/models/langfuse_config.py
-- [ ] T013 Register LangfuseConfig import in app/db/models/__init__.py
+- [x] T010 [P] Add LANGFUSE_*, ENCRYPTION_KEY, LANGFUSE_PII_PATTERNS settings fields to app/config.py
+- [x] T011 [P] Create Fernet encryption utility module (encrypt_secret, decrypt_secret, generate_encryption_key) in app/utils/crypto.py
+- [x] T012 Create LangfuseConfig SQLAlchemy model with singleton constraint per data-model.md in app/db/models/langfuse_config.py
+- [x] T013 Register LangfuseConfig import in app/db/models/__init__.py
 - [ ] T014 Generate Alembic migration for langfuse_config table via `alembic revision --autogenerate -m "add langfuse_config table"`
-- [ ] T015 Implement config loader service (DB-first, .env fallback, auto-generate ENCRYPTION_KEY, encrypt secret_key before DB write) in app/services/langfuse_config_loader.py
-- [ ] T016 Wire config loader into application lifespan startup in app/main.py
-- [ ] T017 Run all foundational tests — verify T006–T009 pass (Green)
+- [x] T015 Implement config loader service (DB-first, .env fallback, auto-generate ENCRYPTION_KEY, encrypt secret_key before DB write) in app/services/langfuse_config_loader.py
+- [x] T016 Wire config loader into application lifespan startup in app/main.py
+- [x] T017 Run all foundational tests — verify T006–T009 pass (Green)
 
 **Checkpoint**: Config model, encryption, config loader all working. `alembic upgrade head` creates table. Tests pass.
 
@@ -64,9 +64,9 @@
 
 **Purpose**: Validate 3 key technical assumptions before proceeding. Output: spike verification report.
 
-- [ ] T018 Spike 1 — Verify LiteLLM Langfuse Callback with `acompletion(stream=True)` + async generator: configure `litellm.success_callback=["langfuse"]`, call `acompletion`, check Langfuse for complete Generation record in scripts/spikes/spike_litellm_callback.py
-- [ ] T019 Spike 2 — Verify `LANGFUSE_INIT_*` env var idempotency: first start creates org/project/key, restart with volume preserves state, restart without volume recreates in scripts/spikes/spike_langfuse_init.py
-- [ ] T020 Spike 3 — Verify Langfuse v3 `/api/public/metrics/daily` and `/api/public/metrics/usage` endpoint availability; if unavailable, confirm `/api/public/traces` returns token/cost fields for fallback aggregation in scripts/spikes/spike_langfuse_api.py
+- [x] T018 Spike 1 — Verify LiteLLM Langfuse Callback with `acompletion(stream=True)` + async generator: configure `litellm.success_callback=["langfuse"]`, call `acompletion`, check Langfuse for complete Generation record in scripts/spikes/spike_litellm_callback.py
+- [x] T019 Spike 2 — Verify `LANGFUSE_INIT_*` env var idempotency: first start creates org/project/key, restart with volume preserves state, restart without volume recreates in scripts/spikes/spike_langfuse_init.py
+- [x] T020 Spike 3 — Verify Langfuse v3 `/api/public/metrics/daily` and `/api/public/metrics/usage` endpoint availability; if unavailable, confirm `/api/public/traces` returns token/cost fields for fallback aggregation in scripts/spikes/spike_langfuse_api.py
 - [ ] T021 Write spike verification report summarizing results and any Phase 3+ plan adjustments in openspec/changes/longfuse-integration/spike-report.md
 
 **Checkpoint**: All 3 spikes verified. Implementation approach for Phases 3–4 confirmed.
@@ -81,24 +81,24 @@
 
 ### Tests for US6
 
-- [ ] T022 [P] [US6] Write unit tests for Langfuse client singleton (get_langfuse returns None when disabled, returns Langfuse when enabled, shutdown flushes) in tests/unit/test_langfuse_client.py
-- [ ] T023 [P] [US6] Write unit tests for PII scrubber (phone, ID card, email, credential patterns replaced; custom patterns via config) in tests/unit/test_pii_filter.py
-- [ ] T024 [P] [US6] Write unit tests for langfuse_trace_var ContextVar propagation (set in chat handler, retrievable in downstream) in tests/unit/test_langfuse_context.py
-- [ ] T025 [US6] Write integration test verifying chat request creates Trace with correct user_id, session_id, and nested spans in tests/integration/test_trace_creation.py
+- [x] T022 [P] [US6] Write unit tests for Langfuse client singleton (get_langfuse returns None when disabled, returns Langfuse when enabled, shutdown flushes) in tests/unit/test_langfuse_client.py
+- [x] T023 [P] [US6] Write unit tests for PII scrubber (phone, ID card, email, credential patterns replaced; custom patterns via config) in tests/unit/test_pii_filter.py
+- [x] T024 [P] [US6] Write unit tests for langfuse_trace_var ContextVar propagation (set in chat handler, retrievable in downstream) in tests/unit/test_langfuse_context.py
+- [x] T025 [US6] Write integration test verifying chat request creates Trace with correct user_id, session_id, and nested spans in tests/integration/test_trace_creation.py
 
 ### Implementation for US6
 
-- [ ] T026 [P] [US6] Create Langfuse client singleton module (get_langfuse, shutdown_langfuse) in app/observability/langfuse_client.py
-- [ ] T027 [P] [US6] Create PII filter module with builtin patterns + LANGFUSE_PII_PATTERNS support in app/observability/pii_filter.py
-- [ ] T028 [US6] Add `langfuse_trace_var` ContextVar to app/observability/context.py
-- [ ] T029 [US6] Configure LiteLLM Langfuse callback (success_callback + failure_callback) in app/main.py lifespan startup; add shutdown_langfuse to lifespan shutdown
-- [ ] T030 [US6] Create top-level Trace in chat request handler with user_id and session_id, set langfuse_trace_var, in app/api/chat.py
-- [ ] T031 [US6] Add `react_loop` Span to ReAct engine run() method, reading trace from langfuse_trace_var in app/execution/l3/react_engine.py
-- [ ] T032 [US6] Add `think` Span to thinker think_stream() method in app/execution/l3/thinker.py
-- [ ] T033 [US6] Add `tool:{name}` Span per tool_call in actor act() method in app/execution/l3/actor.py
-- [ ] T034 [US6] Add error recording to Trace/Span in exception handlers (trace.update with level="ERROR") in app/api/chat.py and app/execution/l3/react_engine.py
-- [ ] T035 [US6] Register PII filter hook on Langfuse client initialization in app/observability/langfuse_client.py
-- [ ] T036 [US6] Run all US6 tests — verify T022–T025 pass (Green)
+- [x] T026 [P] [US6] Create Langfuse client singleton module (get_langfuse, shutdown_langfuse) in app/observability/langfuse_client.py
+- [x] T027 [P] [US6] Create PII filter module with builtin patterns + LANGFUSE_PII_PATTERNS support in app/observability/pii_filter.py
+- [x] T028 [US6] Add `langfuse_trace_var` ContextVar to app/observability/context.py
+- [x] T029 [US6] Configure LiteLLM Langfuse callback (success_callback + failure_callback) in app/main.py lifespan startup; add shutdown_langfuse to lifespan shutdown
+- [x] T030 [US6] Create top-level Trace in chat request handler with user_id and session_id, set langfuse_trace_var, in app/api/chat.py
+- [x] T031 [US6] Add `react_loop` Span to ReAct engine run() method, reading trace from langfuse_trace_var in app/execution/l3/react_engine.py
+- [x] T032 [US6] Add `think` Span to thinker think_stream() method in app/execution/l3/thinker.py
+- [x] T033 [US6] Add `tool:{name}` Span per tool_call in actor act() method in app/execution/l3/actor.py
+- [x] T034 [US6] Add error recording to Trace/Span in exception handlers (trace.update with level="ERROR") in app/api/chat.py and app/execution/l3/react_engine.py
+- [x] T035 [US6] Register PII filter hook on Langfuse client initialization in app/observability/langfuse_client.py
+- [x] T036 [US6] Run all US6 tests — verify T022–T025 pass (Green)
 
 **Checkpoint**: Chat messages produce complete Langfuse Traces with nested Spans. PII scrubbed. Graceful degradation when Langfuse unavailable.
 
@@ -112,16 +112,16 @@
 
 ### Tests for US4
 
-- [ ] T037 [P] [US4] Write unit tests for LangfuseManager (start_builtin, stop_builtin, get_builtin_status mock subprocess calls) in tests/unit/test_langfuse_manager.py
-- [ ] T038 [P] [US4] Write contract tests for 7 service management API endpoints (config CRUD, builtin start/stop/status, validate, initialize) in tests/contract/test_observability_config_api.py
-- [ ] T039 [US4] Write integration test for builtin service lifecycle (start → health check → stop) in tests/integration/test_builtin_service.py
+- [x] T037 [P] [US4] Write unit tests for LangfuseManager (start_builtin, stop_builtin, get_builtin_status mock subprocess calls) in tests/unit/test_langfuse_manager.py
+- [x] T038 [P] [US4] Write contract tests for 7 service management API endpoints (config CRUD, builtin start/stop/status, validate, initialize) in tests/contract/test_observability_config_api.py
+- [x] T039 [US4] Write integration test for builtin service lifecycle (start → health check → stop) in tests/integration/test_builtin_service.py
 
 ### Implementation for US4
 
-- [ ] T040 [P] [US4] Create Langfuse service manager (start_builtin, stop_builtin, get_builtin_status via asyncio.create_subprocess_exec; validate_connection via httpx; update_config writes DB only) in app/services/langfuse_manager.py
-- [ ] T041 [US4] Create Observability API router with 7 management endpoints per api-spec.md 1.3–1.9 (all admin-only) in app/api/observability.py
-- [ ] T042 [US4] Register observability router in app/main.py with prefix `/api/v1/observability` and tags=["observability"]
-- [ ] T043 [US4] Run all US4 tests — verify T037–T039 pass (Green)
+- [x] T040 [P] [US4] Create Langfuse service manager (start_builtin, stop_builtin, get_builtin_status via asyncio.create_subprocess_exec; validate_connection via httpx; update_config writes DB only) in app/services/langfuse_manager.py
+- [x] T041 [US4] Create Observability API router with 7 management endpoints per api-spec.md 1.3–1.9 (all admin-only) in app/api/observability.py
+- [x] T042 [US4] Register observability router in app/main.py with prefix `/api/v1/observability` and tags=["observability"]
+- [x] T043 [US4] Run all US4 tests — verify T037–T039 pass (Green)
 
 **Checkpoint**: Admin can manage Langfuse services via API. Config persisted to DB. Non-admin gets 403.
 
@@ -135,16 +135,16 @@
 
 ### Tests for US5
 
-- [ ] T044 [P] [US5] Write unit tests for ObservabilityService (get_status, get_console_url, get_usage_summary, get_usage_daily, get_usage_by_user, refresh_usage) with mocked Langfuse API responses in tests/unit/test_observability_service.py
-- [ ] T045 [P] [US5] Write contract tests for 6 observability API endpoints (status, console-url, usage/summary, usage/daily, usage/by-user, usage/refresh) per api-spec.md 1.1–1.2, 1.10–1.13 in tests/contract/test_observability_usage_api.py
-- [ ] T046 [US5] Write integration test verifying Redis caching of usage data (first call hits Langfuse, second call within TTL reads cache) in tests/integration/test_usage_cache.py
+- [x] T044 [P] [US5] Write unit tests for ObservabilityService (get_status, get_console_url, get_usage_summary, get_usage_daily, get_usage_by_user, refresh_usage) with mocked Langfuse API responses in tests/unit/test_observability_service.py
+- [x] T045 [P] [US5] Write contract tests for 6 observability API endpoints (status, console-url, usage/summary, usage/daily, usage/by-user, usage/refresh) per api-spec.md 1.1–1.2, 1.10–1.13 in tests/contract/test_observability_usage_api.py
+- [x] T046 [US5] Write integration test verifying Redis caching of usage data (first call hits Langfuse, second call within TTL reads cache) in tests/integration/test_usage_cache.py
 
 ### Implementation for US5
 
-- [ ] T047 [US5] Create ObservabilityService with Langfuse API calls via httpx.AsyncClient + Redis caching (5min TTL per data-model.md key patterns) in app/services/observability.py
-- [ ] T048 [US5] Add 6 usage/status endpoints to observability router (status: any auth user; console-url: admin only per FR-035; usage summary/daily: permission-controlled; by-user: admin only; refresh: admin only) in app/api/observability.py
-- [ ] T049 [US5] Add Redis cache key patterns for Langfuse health, usage by date/user, and usage summary in app/cache/redis_client.py
-- [ ] T050 [US5] Run all US5 tests — verify T044–T046 pass (Green)
+- [x] T047 [US5] Create ObservabilityService with Langfuse API calls via httpx.AsyncClient + Redis caching (5min TTL per data-model.md key patterns) in app/services/observability.py
+- [x] T048 [US5] Add 6 usage/status endpoints to observability router (status: any auth user; console-url: admin only per FR-035; usage summary/daily: permission-controlled; by-user: admin only; refresh: admin only) in app/api/observability.py
+- [x] T049 [US5] Add Redis cache key patterns for Langfuse health, usage by date/user, and usage summary in app/cache/redis_client.py
+- [x] T050 [US5] Run all US5 tests — verify T044–T046 pass (Green)
 
 **Checkpoint**: Frontend can display Langfuse status, usage stats, and trends. Admin console jump works. Redis caching reduces Langfuse API load.
 
@@ -179,14 +179,14 @@
 
 ### Tests for US7
 
-- [ ] T054 [P] [US7] Write unit tests for export_traces logic (JSON format output, CSV format output, 10000 limit enforcement, user permission filtering) in tests/unit/test_trace_export.py
-- [ ] T055 [US7] Write contract test for `GET /api/v1/observability/traces/export` endpoint (json/csv format, auth, admin vs user scope) in tests/contract/test_trace_export_api.py
+- [x] T054 [P] [US7] Write unit tests for export_traces logic (JSON format output, CSV format output, 10000 limit enforcement, user permission filtering) in tests/unit/test_trace_export.py
+- [x] T055 [US7] Write contract test for `GET /api/v1/observability/traces/export` endpoint (json/csv format, auth, admin vs user scope) in tests/contract/test_trace_export_api.py
 
 ### Implementation for US7
 
-- [ ] T056 [US7] Add export_traces method to ObservabilityService (paginated Langfuse API fetch, JSON/CSV formatting, 10000 cap) in app/services/observability.py
-- [ ] T057 [US7] Add `GET /traces/export` endpoint with StreamingResponse and Content-Disposition header to observability router in app/api/observability.py
-- [ ] T058 [US7] Run all US7 tests — verify T054–T055 pass (Green)
+- [x] T056 [US7] Add export_traces method to ObservabilityService (paginated Langfuse API fetch, JSON/CSV formatting, 10000 cap) in app/services/observability.py
+- [x] T057 [US7] Add `GET /traces/export` endpoint with StreamingResponse and Content-Disposition header to observability router in app/api/observability.py
+- [x] T058 [US7] Run all US7 tests — verify T054–T055 pass (Green)
 
 **Checkpoint**: Trace data exportable as JSON and CSV. Admin exports all users. Regular user exports own data only.
 
@@ -202,12 +202,12 @@
 
 ### Tests for US3
 
-- [ ] T059 [US3] Write smoke test verifying eval script can import required modules and construct Langfuse client in tests/unit/test_eval_script.py
+- [x] T059 [US3] Write smoke test verifying eval script can import required modules and construct Langfuse client in tests/unit/test_eval_script.py
 
 ### Implementation for US3
 
-- [ ] T060 [US3] Create evaluation script template (Dataset read → call /api/chat → LLM-as-a-Judge scoring → Experiment record) in scripts/langfuse_eval.py
-- [ ] T061 [US3] Run US3 test — verify T059 passes (Green)
+- [x] T060 [US3] Create evaluation script template (Dataset read → call /api/chat → LLM-as-a-Judge scoring → Experiment record) in scripts/langfuse_eval.py
+- [x] T061 [US3] Run US3 test — verify T059 passes (Green)
 
 **Checkpoint**: Evaluation script runnable. Langfuse shows Experiment results.
 
@@ -230,14 +230,14 @@
 
 ### Implementation for US5-FE
 
-- [ ] T069 [P] [US5] Create observability API TypeScript types (LangfuseStatus, UsageSummary, DailyUsage, UserUsage, TraceExportItem, LangfuseConfig) in sunny-agent-web/src/api/observability/types.ts
-- [ ] T070 [P] [US5] Create observability API module with all 14 endpoint calls (getStatus, getConsoleUrl, getConfig, updateConfig, validateConnection, initializeProject, startBuiltinService, stopBuiltinService, getBuiltinStatus, getUsageSummary, getUsageDaily, getUsageByUser, refreshUsage, exportTraces) in sunny-agent-web/src/api/observability/index.ts
-- [ ] T071 [US5] Add OBSERVABILITY tab to admin sidebar navigation (icon: Activity from lucide-vue-next, admin-only visibility) in sunny-agent-web/src/components/admin-manage/admin-sidebar/index.vue
-- [ ] T072 [US5] Route OBSERVABILITY tab to observability component in sunny-agent-web/src/components/admin-manage/index.vue
-- [ ] T073 [US5] Create observability page main layout with 3 sections (status card, service management, usage stats) in sunny-agent-web/src/components/admin-manage/observability/index.vue
-- [ ] T074 [US5] Implement Langfuse status card component (health indicator dot, version display, "打开控制台" button for admin calling getConsoleUrl and window.open) in sunny-agent-web/src/components/admin-manage/observability/langfuse-status.vue
-- [ ] T075 [US5] Implement service management component (service mode selector builtin/external, start/stop buttons for builtin, URL input + validate button for external, API key config form, initialize button) in sunny-agent-web/src/components/admin-manage/observability/service-manage.vue
-- [ ] T076 [US5] Implement usage statistics component (el-date-picker daterange default today, summary cards for totalCalls/totalTokens/inputTokens/outputTokens/estimatedCost, daily trend bar chart, admin user filter dropdown + user distribution el-table, refresh button, export button with format selector triggering file download) in sunny-agent-web/src/components/admin-manage/observability/usage-stats.vue
+- [x] T069 [P] [US5] Create observability API TypeScript types (LangfuseStatus, UsageSummary, DailyUsage, UserUsage, TraceExportItem, LangfuseConfig) in sunny-agent-web/src/api/observability/types.ts
+- [x] T070 [P] [US5] Create observability API module with all 14 endpoint calls (getStatus, getConsoleUrl, getConfig, updateConfig, validateConnection, initializeProject, startBuiltinService, stopBuiltinService, getBuiltinStatus, getUsageSummary, getUsageDaily, getUsageByUser, refreshUsage, exportTraces) in sunny-agent-web/src/api/observability/index.ts
+- [x] T071 [US5] Add OBSERVABILITY tab to admin sidebar navigation (icon: Activity from lucide-vue-next, admin-only visibility) in sunny-agent-web/src/components/admin-manage/admin-sidebar/index.vue
+- [x] T072 [US5] Route OBSERVABILITY tab to observability component in sunny-agent-web/src/components/admin-manage/index.vue
+- [x] T073 [US5] Create observability page main layout with 3 sections (status card, service management, usage stats) in sunny-agent-web/src/components/admin-manage/observability/index.vue
+- [x] T074 [US5] Implement Langfuse status card component (health indicator dot, version display, "打开控制台" button for admin calling getConsoleUrl and window.open) in sunny-agent-web/src/components/admin-manage/observability/langfuse-status.vue
+- [x] T075 [US5] Implement service management component (service mode selector builtin/external, start/stop buttons for builtin, URL input + validate button for external, API key config form, initialize button) in sunny-agent-web/src/components/admin-manage/observability/service-manage.vue
+- [x] T076 [US5] Implement usage statistics component (el-date-picker daterange default today, summary cards for totalCalls/totalTokens/inputTokens/outputTokens/estimatedCost, daily trend bar chart, admin user filter dropdown + user distribution el-table, refresh button, export button with format selector triggering file download) in sunny-agent-web/src/components/admin-manage/observability/usage-stats.vue
 - [ ] T077 [US5] Run all US5-FE tests — verify T067–T068 pass (Green)
 
 **Checkpoint**: Admin panel has working Observability tab. Status, service management, usage stats, and export all functional.
@@ -250,15 +250,15 @@
 
 ### 后端 (sunny_agent)
 
-- [ ] T078 [P] Run `ruff check` and `ruff format --check` on all new files, fix any violations
-- [ ] T079 [P] Run full test suite `pytest tests/ --cov=app --cov-report=term-missing` — verify 80%+ coverage on new code
+- [x] T078 [P] Run `ruff check` and `ruff format --check` on all new files, fix any violations
+- [x] T079 [P] Run full test suite `pytest tests/ --cov=app --cov-report=term-missing` — verify 80%+ coverage on new code
 - [ ] T080 Validate quickstart.md end-to-end: follow all 5 steps on clean environment, verify Trace appears in Langfuse
-- [ ] T081 [P] Review all new files for hardcoded secrets, ensure ENCRYPTION_KEY and LANGFUSE_SECRET_KEY are only read from env/DB
-- [ ] T082 Verify graceful degradation: stop Langfuse → send chat → confirm Agent responds normally and no crash
+- [x] T081 [P] Review all new files for hardcoded secrets, ensure ENCRYPTION_KEY and LANGFUSE_SECRET_KEY are only read from env/DB
+- [x] T082 Verify graceful degradation: stop Langfuse → send chat → confirm Agent responds normally and no crash
 
 ### 前端 (sunny-agent-web)
 
-- [ ] T083 [P] Run `npm run lint` on all new files in sunny-agent-web, fix any violations
+- [x] T083 [P] Run `npm run lint` on all new files in sunny-agent-web, fix any violations
 - [ ] T084 E2E smoke test: start backend + frontend dev servers → login as admin → open Observability tab → verify status loads → select date range → verify usage data → click export → verify file downloads
 
 ---

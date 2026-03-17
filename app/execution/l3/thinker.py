@@ -48,6 +48,13 @@ class Thinker:
         Returns:
             ThinkResult: 包含 thought、tool_calls、usage、is_done
         """
+        # ── Langfuse: think span ──
+        from app.observability.context import langfuse_trace_var
+        trace = langfuse_trace_var.get()
+        think_span = None
+        if trace:
+            think_span = trace.start_span(name="think", metadata={"step": "think"})
+
         if tool_schemas:
             response = await self.llm.chat_with_tools(
                 messages=messages,
@@ -68,6 +75,9 @@ class Thinker:
         thought = response.content or ""
         parsed_calls = self._parse_tool_calls(raw_tool_calls)
         is_done = parsed_calls is None or len(parsed_calls) == 0
+
+        if think_span:
+            think_span.end()
 
         return ThinkResult(
             thought=thought,

@@ -109,6 +109,20 @@ class Settings(BaseSettings):
     NOTIFICATION_RETENTION_DAYS: int = 30  # 已读通知保留天数（清理策略）
     SSE_HEARTBEAT_SECONDS: int = 30        # SSE 心跳间隔（秒）
 
+    # ── Langfuse 可观测性 ──
+    # host/public_key/secret_key 已改为通过管理后台 UI 配置并存储在 DB 中，
+    # 以下字段保留为可选，仅供 docker-compose INIT 等场景引用
+    LANGFUSE_ENABLED: bool = False
+    LANGFUSE_HOST: str = ""
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_ADMIN_EMAIL: str = ""
+    LANGFUSE_ADMIN_PASSWORD: str = ""
+    LANGFUSE_SAMPLE_RATE: float = 1.0
+    LANGFUSE_FLUSH_INTERVAL: int = 5
+    ENCRYPTION_KEY: str = ""
+    LANGFUSE_PII_PATTERNS: str = ""
+
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表
 
