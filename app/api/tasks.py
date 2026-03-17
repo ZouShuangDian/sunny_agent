@@ -16,12 +16,13 @@ import uuid
 from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.response import ok
+from app.api.notifications import _verify_sse_token
 from app.cache.redis_client import RedisKeys, redis_client
 from app.config import get_settings
 from app.db.engine import async_session, get_db
@@ -108,14 +109,18 @@ async def get_task(
 @router.get("/{task_id}/stream")
 async def task_stream(
     task_id: uuid.UUID,
+    request: Request,
     last_event_id: int = Query(0, description="上次收到的最后一个 event_id，断线续传用"),
-    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """SSE 推送异步任务进度，支持断线续传
+
+    鉴权方式：query param ?token={jwt_token}（EventSource 不支持自定义 Header）
+    前端示例：new EventSource('/api/tasks/{id}/stream?token=' + accessToken)
 
     混合模式：先从 Redis List 补发历史事件，再监听 Pub/Sub 实时推送。
     使用独立 Redis 连接（不占共享连接池），与通知 SSE 架构一致。
     """
+    usernumb = await _verify_sse_token(request)
 
     async def generator():
         event_key = RedisKeys.task_events(str(task_id))
@@ -127,7 +132,7 @@ async def task_stream(
             socket_connect_timeout=5, socket_keepalive=True,
         )
         pubsub = dedicated_conn.pubsub()
-        await pubsub.subscribe(RedisKeys.notify_channel(user.usernumb))
+        await pubsub.subscribe(RedisKeys.notify_channel(usernumb))
 
         try:
             # 1. 补发历史事件（Redis List，断线续传）
