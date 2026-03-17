@@ -140,5 +140,7 @@ class CreateTaskTool(BaseTool):
 
         return ToolResult.success(
             task_id=str(task_id),
+            task_type=params.task_type,
+            task_description=params.task_description[:100],
             message=f"后台任务已创建（ID: {str(task_id)[:8]}...），预计需要几分钟完成，届时会通知您。",
         )

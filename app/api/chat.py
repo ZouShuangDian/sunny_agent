@@ -42,11 +42,12 @@ from app.execution.plugin_context import (
     set_plugin_context,
 )
 from app.execution.mode_context import (
-    BUILTIN_MODES,
     ModeContext,
+    get_mode_context,
     reset_mode_context,
     set_mode_context,
 )
+from app.modes import BUILTIN_MODES
 from app.chat_ops import agent_scope, set_session_running, finalize_execution, cleanup_session
 from app.plugins.service import plugin_service
 from app.security.audit import audit_logger
@@ -163,6 +164,7 @@ async def _record_assistant_message(
         role="assistant", content=reply_text,
         timestamp=time.time(), message_id=str(uuid.uuid4()),
         intent_primary=intent_primary, route=route,
+        model=settings.LLM_DEFAULT_MODEL,
         tool_calls=exec_result.tool_calls if exec_result and exec_result.tool_calls else None,
     )
     await memory.append_message(session_id, assistant_msg)
@@ -269,18 +271,20 @@ async def _build_mode_intent(
 
     返回 (IntentResult, mode_context_token)。
     """
-    prompt_block = BUILTIN_MODES[mode_name]
+    mode_config = BUILTIN_MODES[mode_name]
 
     # 提取 /mode:xxx 之后的用户输入
     _, _, user_input = message.partition(" ")
     user_input = user_input.strip()
     raw_input = user_input if user_input else f"进入{mode_name}模式"
 
-    # 设置 ModeContext ContextVar
+    # 设置 ModeContext ContextVar（从 ModeConfig 透传 allowed_tools）
     mode_ctx = ModeContext(
         mode_name=mode_name,
         user_input=user_input,
-        system_prompt_block=prompt_block,
+        system_prompt_block=mode_config.system_prompt_block,
+        allowed_tools=mode_config.allowed_tools,
+        override_system_prompt=mode_config.override_system_prompt,
     )
     mode_token = set_mode_context(mode_ctx)
 
@@ -435,9 +439,11 @@ async def chat(
                 reply_text = exec_result.reply
 
             # assistant 消息 → Redis WorkingMemory（PG 由 scope finalize 顺序写入）
+            # intent_primary 优先用 sub_intent（更精确，如 "mode:deep-research"），兜底用 primary
+            _intent = final_result.intent.sub_intent or final_result.intent.primary
             assistant_msg = await _record_assistant_message(
                 session_id, memory, reply_text,
-                final_result.intent.primary, final_result.route, exec_result,
+                _intent, final_result.route, exec_result,
                 persist=False,
             )
 
@@ -530,6 +536,11 @@ async def chat_stream(
                     title = body.message[:50] + "..." if len(body.message) > 50 else body.message
                     status_data["is_new_session"] = True
                     status_data["title"] = title
+                # 模式标记：前端据此切换 UI（如深度研究模式）
+                if mode_token is not None:
+                    _mode = get_mode_context()
+                    if _mode:
+                        status_data["mode"] = _mode.mode_name
                 yield _sse_event(SSEEvent.STATUS, status_data)
                 log.info(
                     "SSE STATUS 已推送",
@@ -575,9 +586,10 @@ async def chat_stream(
                         # 正常完成：persist=False，PG 由 finalize_execution 顺序写入
                         # 已知限制：流式路径未传 exec_result，assistant_msg.tool_calls 为 None
                         # （tool_calls 通过 SSE tool_call 事件实时推送，PG 侧由 l3_steps 覆盖）
+                        _intent_stream = final_result.intent.sub_intent or final_result.intent.primary
                         assistant_msg = await _record_assistant_message(
                             session_id, memory, reply_text,
-                            final_result.intent.primary, final_result.route,
+                            _intent_stream, final_result.route,
                             persist=not stream_completed,
                         )
                     if not stream_completed:

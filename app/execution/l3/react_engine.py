@@ -351,13 +351,20 @@ class L3ReActEngine:
 
         user_goal = getattr(intent_result.intent, "user_goal", None) or None
 
+        # 工具过滤：mode 配置了 allowed_tools 则仅暴露白名单
+        mode_ctx = get_mode_context()
+        if mode_ctx and mode_ctx.allowed_tools is not None:
+            tool_schemas = self.tool_registry.get_schemas(mode_ctx.allowed_tools)
+        else:
+            tool_schemas = self.tool_registry.get_all_schemas(
+                include_mode_only=mode_ctx is not None,
+            )
+
         return LoopContext(
             messages=self._build_initial_messages(intent_result),
             observer=observer,
             config=self.config,
-            tool_schemas=self.tool_registry.get_all_schemas(
-                include_mode_only=get_mode_context() is not None,
-            ),
+            tool_schemas=tool_schemas,
             user_goal=user_goal,
             event_emitter=event_emitter,
         )
@@ -544,29 +551,33 @@ class L3ReActEngine:
         历史消息注入：使用 token 动态边界（替代旧的 [-10:] 硬截断）。
         """
         user_goal = getattr(intent_result.intent, "user_goal", None)
+        mode_ctx = get_mode_context()
 
-        system_prompt = build_l3_system_prompt(
-            user_input=intent_result.raw_input,
-            user_goal=user_goal,
-            max_iterations=self.config.max_iterations,
-            user_id=get_user_id() or "",
-            session_id=get_session_id() or "",
-        )
-
-        plugin_ctx = get_plugin_context()
-        if plugin_ctx:
-            system_prompt += _build_plugin_context_block(plugin_ctx)
-            log.info(
-                "Plugin 上下文已注入 system prompt",
-                plugin=plugin_ctx.plugin_name,
-                command=plugin_ctx.command_name,
-                content_len=len(plugin_ctx.command_md_content),
-                skills_count=len(plugin_ctx.plugin_skills),
+        # 模式可选择完全替换 L3 基础 prompt（如深度研究只需 ask_user + create_task，不需要 L3 工具链指引）
+        if mode_ctx and mode_ctx.override_system_prompt:
+            system_prompt = mode_ctx.system_prompt_block
+        else:
+            system_prompt = build_l3_system_prompt(
+                user_input=intent_result.raw_input,
+                user_goal=user_goal,
+                max_iterations=self.config.max_iterations,
+                user_id=get_user_id() or "",
+                session_id=get_session_id() or "",
             )
 
-        mode_ctx = get_mode_context()
-        if mode_ctx:
-            system_prompt += mode_ctx.system_prompt_block
+            plugin_ctx = get_plugin_context()
+            if plugin_ctx:
+                system_prompt += _build_plugin_context_block(plugin_ctx)
+                log.info(
+                    "Plugin 上下文已注入 system prompt",
+                    plugin=plugin_ctx.plugin_name,
+                    command=plugin_ctx.command_name,
+                    content_len=len(plugin_ctx.command_md_content),
+                    skills_count=len(plugin_ctx.plugin_skills),
+                )
+
+            if mode_ctx:
+                system_prompt += mode_ctx.system_prompt_block
 
         history_messages = intent_result.history_messages or []
         selected_history = self._select_history_by_token(history_messages)

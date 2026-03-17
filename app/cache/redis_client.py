@@ -66,6 +66,12 @@ class RedisKeys:
         """用户存在且激活的缓存标记（TTL 10min）"""
         return f"ua:{user_id}"
 
+    # ── 异步任务进度事件 ──
+    @staticmethod
+    def task_events(task_id: str) -> str:
+        """异步任务事件日志 List（断线续传缓冲，TTL=1h）"""
+        return f"task_events:{task_id}"
+
     # ── 通知 Pub/Sub ──
     @staticmethod
     def notify_channel(usernumb: str) -> str:
