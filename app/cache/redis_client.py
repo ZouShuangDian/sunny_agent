@@ -25,7 +25,7 @@ class RedisKeys:
         """会话级工作记忆 Hash Key (TTL 30min)"""
         return f"wm:{session_id}"
 
-    # ── 限流计数器 ──
+    # ── 限流计数器（通用） ──
     @staticmethod
     def rate_limit(user_id: str, window: str) -> str:
         """滑动窗口限流计数器 (TTL 1min)"""
@@ -42,7 +42,6 @@ class RedisKeys:
     def todo(session_id: str) -> str:
         """会话级 Todo 任务列表 (TTL 7天)"""
         return f"todo:{session_id}"
-
 
     @staticmethod
     def sso_ticket_result(ticket: str) -> str:
@@ -71,6 +70,43 @@ class RedisKeys:
     def notify_channel(usernumb: str) -> str:
         """用户级通知 Pub/Sub channel（SSE 订阅用）"""
         return f"notify:{usernumb}"
+
+
+class RateLimitRedisKeys:
+    """
+    限流器 Redis Key 统一管理
+    命名规范：rl:{功能类型}:{app_id}:{user_id}:{标识}
+    所有 Key 都按 app_id 隔离，确保不同机器人独立限流
+    """
+
+    # ── 并发计数 ──
+    @staticmethod
+    def concurrent(app_id: str, user_id: str) -> str:
+        """
+        并发请求计数（Redis Set）
+        成员：message_id 列表
+        TTL: 300 秒（5 分钟兜底）
+        """
+        return f"rl:concurrent:{app_id}:{user_id}"
+
+    # ── 频率计数（滑动窗口） ──
+    @staticmethod
+    def rpm(app_id: str, user_id: str, timestamp: int) -> str:
+        """
+        每分钟请求数（Redis String + INCR）
+        窗口：基于时间戳的 1 分钟窗口
+        TTL: 60 秒
+        """
+        return f"rl:freq:{app_id}:{user_id}:{timestamp}"
+
+    # ── 重试计数 ──
+    @staticmethod
+    def retry(app_id: str, user_id: str, message_id: str) -> str:
+        """
+        限流重试次数（Redis String + INCR）
+        TTL: 60 秒
+        """
+        return f"rl:retry:{app_id}:{user_id}:{message_id}"
 
 
 class FeishuRedisKeys:

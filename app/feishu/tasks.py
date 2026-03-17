@@ -32,12 +32,76 @@ from app.feishu.media_downloader import get_media_downloader
 from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuChatSessionMapping, FeishuMessageLogs
 from app.feishu.user_resolver import get_user_resolver
+from app.security.rate_limiter import rate_limiter
 
 settings = get_settings()
 logger = structlog.get_logger()
 
 # ARQ 队列名
 
+
+async def _send_rate_limit_card(
+    app_id: str,
+    user_id: str,
+    message_id: str,
+    retry_count: int,
+    reason: str,
+) -> None:
+    """发送排队卡片：显示排队位置、预计等待时间、限流原因、建议"""
+    feishu_client = await get_feishu_client(app_id)
+    
+    # 计算排队位置和预计等待时间
+    queue_position = retry_count + 1
+    estimated_wait = queue_position * 3  # 每次重试延迟 3 秒
+    
+    # 根据原因生成友好的提示
+    reason_text = {
+        "rpm_limit": "当前请求过于频繁",
+        "concurrent_limit": "当前并发数已达上限",
+    }.get(reason, "系统繁忙")
+    
+    text = (
+        f"⏳ 请求排队中\n\n"
+        f"📊 排队位置：第 {queue_position} 位\n"
+        f"⏱️ 预计等待：{estimated_wait} 秒\n"
+        f"⚠️ 限流原因：{reason_text}\n\n"
+        f"💡 建议：请稍作等待，系统将自动重试"
+    )
+    
+    await feishu_client.send_text_message(
+        receive_id=user_id,
+        text=text,
+        receive_id_type="open_id",
+    )
+
+
+async def _send_rejected_card(
+    app_id: str,
+    user_id: str,
+    message_id: str,
+    reason: str,
+) -> None:
+    """发送拒绝卡片：显示拒绝原因、建议等待时间"""
+    feishu_client = await get_feishu_client(app_id)
+    
+    # 根据原因生成友好的提示
+    reason_text = {
+        "rpm_limit": "当前请求过于频繁，已达到每分钟上限",
+        "concurrent_limit": "当前并发数已达上限",
+    }.get(reason, "系统繁忙")
+    
+    text = (
+        f"❌ 请求被拒绝\n\n"
+        f"⚠️ 原因：{reason_text}\n"
+        f"⏱️ 建议等待：60 秒\n\n"
+        f"💡 建议：请稍后再试，或减少请求频率"
+    )
+    
+    await feishu_client.send_text_message(
+        receive_id=user_id,
+        text=text,
+        receive_id_type="open_id",
+    )
 
 
 async def process_feishu_message(ctx: dict, message: dict) -> dict:
@@ -96,7 +160,64 @@ async def _process_message_internal(
     receive_id = chat_id if chat_type == "group" else open_id
     receive_id_type = "chat_id" if chat_type == "group" else "open_id"
     
+    # ← 新增：限流检查
     try:
+        allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id)
+    except Exception as e:
+        logger.error("Rate limiter check failed", error=str(e), app_id=app_id, open_id=open_id)
+        allowed, reason = True, "ok"  # 限流检查失败时放行
+    
+    if not allowed:
+        # 限流触发，检查重试次数
+        try:
+            retry_count = await rate_limiter.get_retry_count(app_id, open_id, message_id)
+        except Exception as e:
+            logger.error("Failed to get retry count", error=str(e))
+            retry_count = 0
+        
+        if retry_count < rate_limiter.max_delay_attempts:
+            # < 3 次：发送排队卡片 + 延迟 3 秒重新入队
+            retry_count = await rate_limiter.increment_retry(app_id, open_id, message_id)
+            
+            # 发送排队卡片
+            try:
+                await _send_rate_limit_card(app_id, open_id, message_id, retry_count, reason)
+            except Exception as e:
+                logger.warning("Failed to send rate limit card", error=str(e))
+            
+            # 延迟 3 秒重新入队
+            try:
+                arq_pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+                await arq_pool.enqueue_job(
+                    "process_feishu_message",
+                    message,
+                    _queue_name=FeishuRedisKeys.ARQ_QUEUE,
+                    _defer_by=rate_limiter.delay_seconds,
+                )
+                await arq_pool.close()
+            except Exception as e:
+                logger.error("Failed to re-queue message", error=str(e))
+            
+            return {"status": "delayed", "retry_count": retry_count, "reason": reason}
+        else:
+            # >= 3 次：发送拒绝卡片 + 返回错误
+            try:
+                await _send_rejected_card(app_id, open_id, message_id, reason)
+            except Exception as e:
+                logger.warning("Failed to send rejected card", error=str(e))
+            
+            return {"status": "rejected", "error": "rate_limit_exceeded", "reason": reason}
+    
+    # 通过限流，增加 RPM 计数
+    try:
+        await rate_limiter.increment_rpm(app_id, open_id)
+    except Exception as e:
+        logger.error("Failed to increment RPM", error=str(e))
+    
+    try:
+        # 开始处理
+        await rate_limiter.start_processing(app_id, open_id, message_id)
+        
         # 2. 创建/更新审计日志
         log_entry = await _create_or_update_log(
             db, event_id, message_id, open_id, chat_id, chat_type, msg_type, content
@@ -416,9 +537,6 @@ async def _process_message_internal(
         log_entry.reply_content = reply_text
         await db.commit()
         
-        # 14. 完成Debounce处理
-        await debounce_manager.complete_processing(open_id, chat_id)
-        
         logger.info("Message processing completed",
                    event_id=event_id,
                    duration_ms=log_entry.processing_duration_ms)
@@ -450,6 +568,13 @@ async def _process_message_internal(
         await db.commit()
         
         raise
+    
+    finally:
+        # ← 新增：清理限流状态
+        try:
+            await rate_limiter.end_processing(app_id, open_id, message_id)
+        except Exception as e:
+            logger.error("Failed to end processing", error=str(e))
 
 
 async def _create_or_update_log(
@@ -692,7 +817,7 @@ async def message_transfer_loop():
                     continue
                 
                 # 标记为已处理（24小时TTL）
-                await redis_client.setex(processed_key, 86400, "1")
+                await redis_client.setex(processed_key, 7200, "1")
                 
                 # 入队到 ARQ
                 arq_pool = await create_pool(WorkerSettings.redis_settings)
