@@ -28,7 +28,23 @@ dependencies = [
     "prompt-toolkit (>=3.0.52,<4.0.0)",
     "croniter (>=2.0,<3.0)",
     "google-genai (>=1.67.0,<2.0.0)",
+    "greenlet (>=3.0,<4.0)",
+    "langfuse (>=3.0.0,<4.0.0) ; python_version >= \"3.11\" and python_version < \"4.0\"",
+    "cryptography (>=44.0.0,<45.0.0)",
 ]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0,<9.0"
+pytest-asyncio = ">=0.24,<1.0"
+pytest-cov = ">=6.0,<7.0"
+ruff = "^0.15.6"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
 # ⚠️ arq>=0.26（Worker 进程依赖）未列入上方 dependencies：
 # arq 0.27 要求 redis<6，与本项目 redis>=7.1 存在声明冲突（运行时兼容）。
 # 安装方式：pip install arq --no-deps（Dockerfile / CI 脚本中执行）

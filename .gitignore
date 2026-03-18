@@ -3,6 +3,7 @@ poetry.lock
 .env
 *.pyc
 *.drawio
+.specify/
 __pycache__/
 .DS_Store
 tests/

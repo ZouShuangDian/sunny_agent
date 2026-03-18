@@ -166,6 +166,13 @@ class L3ReActEngine:
         think_strategy = think_strategy or BatchThinkStrategy()
         think_result: ThinkResult | None = None
 
+        # ── Langfuse: react_loop span ──
+        from app.observability.context import langfuse_trace_var
+        trace = langfuse_trace_var.get()
+        react_span = None
+        if trace:
+            react_span = trace.start_span(name="react_loop", metadata={"max_iterations": ctx.config.max_iterations})
+
         for step in range(ctx.config.max_iterations):
             ctx.step = step
 
@@ -207,6 +214,9 @@ class L3ReActEngine:
             # ── 追加消息 + Level 1 剪枝（核心循环固有逻辑）──
             ctx.messages.extend(act_result.messages)
             ctx.messages = self._compress_stale_tool_results(ctx.messages)
+
+        if react_span:
+            react_span.end()
 
         return self._build_loop_result(ctx, think_result)
 

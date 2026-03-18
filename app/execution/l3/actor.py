@@ -98,9 +98,20 @@ class Actor:
 
     async def _execute_one(self, tc: ToolCallRequest) -> tuple[str, int]:
         """执行单个工具调用，返回 (result_str, duration_ms)。"""
+        # ── Langfuse: tool span ──
+        from app.observability.context import langfuse_trace_var
+        trace = langfuse_trace_var.get()
+        tool_span = None
+        if trace:
+            tool_span = trace.start_span(name=f"tool:{tc.name}", metadata={"tool": tc.name})
+
         start = time.monotonic()
         result_str = await self.tool_registry.execute(tc.name, tc.arguments)
         duration = int((time.monotonic() - start) * 1000)
+
+        if tool_span:
+            tool_span.end()
+
         return result_str, duration
 
     @staticmethod

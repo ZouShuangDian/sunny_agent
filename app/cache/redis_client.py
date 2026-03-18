@@ -83,6 +83,32 @@ class RedisKeys:
         """用户级通知 Pub/Sub channel（SSE 订阅用）"""
         return f"notify:{usernumb}"
 
+    # ── Langfuse 可观测性缓存 ──
+    @staticmethod
+    def langfuse_health() -> str:
+        """Langfuse 健康状态缓存 (TTL 5min)"""
+        return "sunny:langfuse:health"
+
+    @staticmethod
+    def langfuse_usage(date: str, user_id: str = "all") -> str:
+        """Langfuse 用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:{date}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_summary(start: str, end: str, user_id: str = "all") -> str:
+        """Langfuse 用量汇总缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:summary:{start}:{end}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_daily(start: str, end: str, user_id: str = "all") -> str:
+        """Langfuse 每日用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:daily:{start}:{end}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_by_user(start: str, end: str) -> str:
+        """Langfuse 按用户用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:by_user:{start}:{end}"
+
 settings = get_settings()
 
 redis_pool = aioredis.ConnectionPool.from_url(

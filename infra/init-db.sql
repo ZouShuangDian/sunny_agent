@@ -1,0 +1,7 @@
+-- 创建 sunny_agent schema
+CREATE SCHEMA IF NOT EXISTS sunny_agent;
+
+-- 授权
+GRANT ALL ON SCHEMA sunny_agent TO root;
+ALTER DEFAULT PRIVILEGES IN SCHEMA sunny_agent GRANT ALL ON TABLES TO root;
+ALTER DEFAULT PRIVILEGES IN SCHEMA sunny_agent GRANT ALL ON SEQUENCES TO root;
