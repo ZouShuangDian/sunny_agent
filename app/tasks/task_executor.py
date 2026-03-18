@@ -23,7 +23,9 @@ from app.memory.chat_persistence import ChatPersistence
 from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.notify import NotificationType, notify_user
-from app.tasks.deep_research_perplexity import DeepResearchExecutor
+# 开发调试用 mock 模式，回放录制事件，不消耗 token
+# 上线时切回：from app.tasks.deep_research_perplexity import DeepResearchExecutor
+from app.tasks.deep_research_mock import DeepResearchExecutor
 
 log = structlog.get_logger()
 
@@ -182,39 +184,11 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
         await redis_client.rpush(event_key, payload)
         await redis_client.publish(RedisKeys.task_channel(task_id), payload)
 
-    async def _on_raw_event(raw: dict) -> None:
-        """Perplexity 原生事件 → 标准化 stage + detail 格式
-
-        前端只需按 stage 字段渲染 UI，不感知底层 API 提供商。
-        切换 API（Google / Perplexity / 自研）只需调整此映射。
-        """
-        evt_type = raw.get("type", "")
-
-        if evt_type == "response.created":
-            await push_event({"stage": "started", "detail": {"message": "正在启动深度研究..."}})
-
-        elif evt_type == "response.reasoning.search_queries":
-            queries = raw.get("queries", [])
-            await push_event({"stage": "searching", "detail": {"queries": queries[:5]}})
-
-        elif evt_type == "response.reasoning.search_results":
-            results = raw.get("results", [])
-            await push_event({"stage": "analyzing", "detail": {"sources_count": len(results)}})
-
-        elif evt_type == "response.output_text.delta":
-            delta = raw.get("delta", "")
-            if delta:
-                await push_event({"stage": "writing", "detail": {"content": delta}})
-
-        elif evt_type == "response.failed":
-            error = raw.get("error", {})
-            await push_event({"stage": "error", "detail": {"message": error.get("message", "研究失败")}})
-
-        # response.completed / reasoning.started / reasoning.stopped 等静默忽略
-
     try:
+        # executor 内部负责将原生 API 事件转换为标准格式（stage + detail）
+        # push_event 只管推送，不做格式转换
         executor = DeepResearchExecutor()
-        result = await executor.execute(query=query, on_progress=_on_raw_event)
+        result = await executor.execute(query=query, on_progress=push_event)
 
         # 写入 messages 表 + WorkingMemory（确保后续对话 LLM 可见）
         msg = Message(

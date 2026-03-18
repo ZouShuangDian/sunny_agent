@@ -130,12 +130,14 @@ class DeepResearchExecutor:
 
                             evt_type = event.get("type", "")
 
-                            # 直接透传 Perplexity 原生事件
-                            await _notify(event)
-
-                            # 同时提取需要的数据
+                            # Perplexity 原生事件 → 标准格式（stage + detail）
                             if evt_type == "response.created":
                                 response_id = event.get("response", {}).get("id")
+                                await _notify({"stage": "started", "detail": {"message": "正在启动深度研究..."}})
+
+                            elif evt_type == "response.reasoning.search_queries":
+                                queries = event.get("queries", [])
+                                await _notify({"stage": "searching", "detail": {"queries": queries[:5]}})
 
                             elif evt_type == "response.reasoning.search_results":
                                 results = event.get("results", [])
@@ -143,17 +145,22 @@ class DeepResearchExecutor:
                                     {"url": r.get("url", ""), "title": r.get("title", "")}
                                     for r in results
                                 ])
+                                await _notify({"stage": "analyzing", "detail": {"sources_count": len(results)}})
 
                             elif evt_type == "response.output_text.delta":
                                 delta = event.get("delta", "")
                                 if delta:
                                     text_chunks.append(delta)
+                                    await _notify({"stage": "writing", "detail": {"content": delta}})
 
                             elif evt_type == "response.failed":
                                 error = event.get("error", {})
+                                await _notify({"stage": "error", "detail": {"message": error.get("message", "研究失败")}})
                                 raise RuntimeError(
                                     f"Perplexity 研究失败: {error.get('message', '未知错误')}"
                                 )
+
+                            # response.completed / reasoning.started / reasoning.stopped 等静默忽略
 
                 break  # stream 正常结束
 
