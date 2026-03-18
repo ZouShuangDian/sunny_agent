@@ -3,7 +3,7 @@
 
 被 create_task 工具入队后由 Worker 消费。
 默认复用 run_agent_pipeline() 共享执行链路；
-deep_research 类型通过 DeepResearchExecutor 调用 Google Deep Research API。
+deep_research 类型通过 DeepResearchExecutor 执行（当前 import Mock/Perplexity，可切换）。
 """
 
 import asyncio
@@ -69,7 +69,7 @@ async def execute_async_task(
     try:
         # Step 2: 按 task_type 分发执行策略
         if task_type == "deep_research":
-            reply = await _execute_deep_research(
+            _blocks_json, reply = await _execute_deep_research(
                 task_id=task_id, session_id=session_id, query=input_text,
             )
             actual_sid = session_id
@@ -159,24 +159,30 @@ async def _update_task_status(
 
 # ── 深度研究执行逻辑 ──
 
-async def _execute_deep_research(task_id: str, session_id: str, query: str) -> str:
+async def _execute_deep_research(task_id: str, session_id: str, query: str) -> tuple[str, str]:
     """
     通过 DeepResearchExecutor 执行深度研究，处理进度推送和结果持久化。
 
-    职责分离：
-    - DeepResearchExecutor：封装 Google API 调用 + 事件解析（可替换）
-    - 本函数：进度双写（Redis List + Pub/Sub）+ 结果写 DB/WorkingMemory
+    职责：
+    - 接收 executor 输出的标准化事件（stage + detail）
+    - push_event 推送给前端 + 从事件中累积 sources 等数据
+    - 研究完成后组装 blocks JSON 存入 Message.content
+    - 返回 (blocks_json, plain_text) 二元组
+
+    Returns:
+        (blocks_json, plain_text)：blocks_json 已写入 DB，plain_text 供外层做 summary 和通知
     """
     event_key = RedisKeys.task_events(task_id)
     event_counter = 0
     usernumb = structlog.contextvars.get_contextvars().get("usernumb", "")
 
-    async def push_event(data: dict) -> None:
-        """标准化事件推送：Redis List（断线补偿）+ Pub/Sub（实时推送）双写
+    # 研究过程累积数据（从 _on_raw_event 收集，用于最终组装 blocks）
+    all_sources: list[dict] = []
+    search_round_count = 0
+    urls_fetched_count = 0
 
-        事件格式：{"event_id": N, "stage": "xxx", "detail": {...}}
-        Pub/Sub 使用 task 专用频道，不走通知频道。
-        """
+    async def push_event(data: dict) -> None:
+        """Redis List（断线补偿）+ Pub/Sub（实时推送）双写"""
         nonlocal event_counter
         event_counter += 1
         event = {"event_id": event_counter, **data}
@@ -184,16 +190,64 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
         await redis_client.rpush(event_key, payload)
         await redis_client.publish(RedisKeys.task_channel(task_id), payload)
 
-    try:
-        # executor 内部负责将原生 API 事件转换为标准格式（stage + detail）
-        # push_event 只管推送，不做格式转换
-        executor = DeepResearchExecutor()
-        result = await executor.execute(query=query, on_progress=push_event)
+    async def _on_raw_event(event: dict) -> None:
+        """推送标准化事件给前端 + 累积研究过程数据用于 blocks 组装"""
+        nonlocal search_round_count, urls_fetched_count
+        stage = event.get("stage", "")
+        detail = event.get("detail", {})
 
-        # 写入 messages 表 + WorkingMemory（确保后续对话 LLM 可见）
+        # 从事件中累积数据
+        if stage == "searching":
+            search_round_count = detail.get("round", search_round_count)
+        elif stage == "search_done":
+            all_sources.extend(detail.get("results", []))
+        elif stage == "read_done":
+            urls_fetched_count += detail.get("count", 0)
+            all_sources.extend(detail.get("contents", []))
+
+        # 推送给前端
+        await push_event(event)
+
+    try:
+        executor = DeepResearchExecutor()
+        result = await executor.execute(query=query, on_progress=_on_raw_event)
+
+        # 组装 blocks JSON（一条 message 存多个 block）
+        blocks = [
+            {
+                "type": "text",
+                "content": "即将开始研究，预计需要 5-10 分钟，完成后会通知您。",
+            },
+            {
+                "type": "research_process",
+                "title": "已搜集和分析资料",
+                "search_rounds": search_round_count,
+                "sources_count": len(all_sources),
+                "urls_fetched": urls_fetched_count,
+                "status": "completed",
+            },
+        ]
+        # 来源列表（最多 20 个，避免存储过大）
+        if all_sources:
+            blocks.append({
+                "type": "research_sources",
+                "sources": all_sources[:20],
+            })
+        # 研究报告正文
+        blocks.append({
+            "type": "research_report",
+            "title": query[:100],
+            "content": result.content,
+            "char_count": len(result.content),
+        })
+
+        blocks_json = json.dumps(blocks, ensure_ascii=False)
+        plain_text = result.content  # 纯文本，供 summary 和通知使用
+
+        # 写入 messages 表 + WorkingMemory
         msg = Message(
             role="assistant",
-            content=result.content,
+            content=blocks_json,
             timestamp=time.time(),
             message_id=str(_uuid.uuid4()),
             intent_primary="deep_research",
@@ -211,7 +265,7 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
             },
         })
 
-        return result.content
+        return blocks_json, plain_text
 
     except TimeoutError as e:
         # error → 任务 SSE 关闭进度卡片；外层 notify_user → 通知中心推送 Toast，两者互补
@@ -223,5 +277,4 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
         await push_event({"stage": "error", "detail": {"message": error_msg, "retryable": retryable}})
         raise
     finally:
-        # 事件列表 1 小时后自动过期
         await redis_client.expire(event_key, 3600)

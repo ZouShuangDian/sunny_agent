@@ -1,18 +1,18 @@
 """
 深度研究执行器 — Perplexity Agent API（preset="deep-research"）
 
-使用 Perplexity 新版 Agent API（/v1/agent），直接透传原生流式事件：
-- response.created             研究创建
-- response.reasoning.started   开始推理
-- response.reasoning.search_queries   搜索关键词
-- response.reasoning.search_results   搜索结果
-- response.reasoning.stopped   推理完成
-- response.output_text.delta   正文增量
-- response.output_text.done    正文结束
-- response.completed           研究完成
-- response.failed              研究失败
+使用 Perplexity 新版 Agent API（/v1/agent），将原生事件转换为标准 stage 格式输出。
 
-接口签名与 deep_research.py 完全一致，切换只需改 task_executor.py 的 import。
+标准 stage：
+- started       研究创建
+- searching     正在搜索（含 thought、queries、round）
+- search_done   搜索完成（含 results 详情、count、round）
+- reading       正在阅读 URL（含 thought、urls）
+- read_done     阅读完成（含 contents 详情、count）
+- writing       正文增量
+- error         研究失败
+
+executor 负责原生事件 → 标准格式转换，task_executor 只管推送。
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ class DeepResearchExecutor:
     """
     Perplexity Agent API 执行器（preset="deep-research"，流式模式）。
 
-    事件透传：Perplexity 原生事件直接回调给调用方。
-    标准化映射由 task_executor._execute_deep_research 中的 _on_raw_event 负责。
+    内部完成 Perplexity 原生事件 → 标准 stage + detail 格式的转换，
+    通过 on_progress 回调输出标准化事件。
     """
 
     def __init__(
@@ -63,7 +63,7 @@ class DeepResearchExecutor:
         query: str,
         on_progress: ProgressCallback | None = None,
     ) -> DeepResearchResult:
-        """执行深度研究，流式返回结果。"""
+        """执行深度研究，流式返回标准化事件。"""
         from app.config import get_settings
         api_key = get_settings().PERPLEXITY_API_KEY
         if not api_key:
@@ -97,6 +97,7 @@ class DeepResearchExecutor:
         text_chunks: list[str] = []
         sources: list[dict] = []
         response_id: str | None = None
+        search_round = 0
         max_retries = 3
 
         for attempt in range(1, max_retries + 1):
@@ -130,37 +131,99 @@ class DeepResearchExecutor:
 
                             evt_type = event.get("type", "")
 
-                            # Perplexity 原生事件 → 标准格式（stage + detail）
+                            # ── Perplexity 原生事件 → 标准 stage + detail ──
+
                             if evt_type == "response.created":
                                 response_id = event.get("response", {}).get("id")
-                                await _notify({"stage": "started", "detail": {"message": "正在启动深度研究..."}})
+                                model = event.get("response", {}).get("model")
+                                await _notify({
+                                    "stage": "started",
+                                    "detail": {
+                                        "message": "正在启动深度研究...",
+                                        "response_id": response_id,
+                                        "model": model,
+                                    },
+                                })
 
                             elif evt_type == "response.reasoning.search_queries":
-                                queries = event.get("queries", [])
-                                await _notify({"stage": "searching", "detail": {"queries": queries[:5]}})
+                                search_round += 1
+                                await _notify({
+                                    "stage": "searching",
+                                    "detail": {
+                                        "thought": event.get("thought", ""),
+                                        "queries": event.get("queries", []),
+                                        "round": search_round,
+                                    },
+                                })
 
                             elif evt_type == "response.reasoning.search_results":
                                 results = event.get("results", [])
-                                sources.extend([
-                                    {"url": r.get("url", ""), "title": r.get("title", "")}
+                                result_items = [
+                                    {
+                                        "url": r.get("url", ""),
+                                        "title": r.get("title", ""),
+                                        "snippet": r.get("snippet", "")[:200],
+                                    }
                                     for r in results
-                                ])
-                                await _notify({"stage": "analyzing", "detail": {"sources_count": len(results)}})
+                                ]
+                                sources.extend(result_items)
+                                await _notify({
+                                    "stage": "search_done",
+                                    "detail": {
+                                        "results": result_items,
+                                        "count": len(results),
+                                        "round": search_round,
+                                    },
+                                })
+
+                            elif evt_type == "response.reasoning.fetch_url_queries":
+                                await _notify({
+                                    "stage": "reading",
+                                    "detail": {
+                                        "thought": event.get("thought", ""),
+                                        "urls": event.get("urls", []),
+                                    },
+                                })
+
+                            elif evt_type == "response.reasoning.fetch_url_results":
+                                contents = event.get("contents", [])
+                                content_items = [
+                                    {
+                                        "url": c.get("url", ""),
+                                        "title": c.get("title", ""),
+                                        "snippet": c.get("snippet", "")[:200],
+                                    }
+                                    for c in contents
+                                ]
+                                await _notify({
+                                    "stage": "read_done",
+                                    "detail": {
+                                        "contents": content_items,
+                                        "count": len(contents),
+                                    },
+                                })
 
                             elif evt_type == "response.output_text.delta":
                                 delta = event.get("delta", "")
                                 if delta:
                                     text_chunks.append(delta)
-                                    await _notify({"stage": "writing", "detail": {"content": delta}})
+                                    await _notify({
+                                        "stage": "writing",
+                                        "detail": {"content": delta},
+                                    })
 
                             elif evt_type == "response.failed":
                                 error = event.get("error", {})
-                                await _notify({"stage": "error", "detail": {"message": error.get("message", "研究失败")}})
+                                await _notify({
+                                    "stage": "error",
+                                    "detail": {"message": error.get("message", "研究失败")},
+                                })
                                 raise RuntimeError(
                                     f"Perplexity 研究失败: {error.get('message', '未知错误')}"
                                 )
 
-                            # response.completed / reasoning.started / reasoning.stopped 等静默忽略
+                            # response.in_progress / output_item.added / output_item.done
+                            # / output_text.done / response.completed 等不需要推送给前端
 
                 break  # stream 正常结束
 
@@ -180,6 +243,7 @@ class DeepResearchExecutor:
                     await asyncio.sleep(2 ** attempt)
                     text_chunks.clear()
                     sources.clear()
+                    search_round = 0
                     continue
 
                 log.error("Perplexity Deep Research 失败", error=str(e), exc_info=True)
@@ -191,7 +255,8 @@ class DeepResearchExecutor:
             final_text = "深度研究已完成，但未能获取到报告内容。"
 
         log.info("Perplexity Deep Research 完成",
-                 content_len=len(final_text), sources=len(sources))
+                 content_len=len(final_text), sources=len(sources),
+                 search_rounds=search_round)
 
         return DeepResearchResult(
             content=final_text,
