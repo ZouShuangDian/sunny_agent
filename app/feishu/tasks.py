@@ -32,17 +32,12 @@ from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuChatSessionMapping, FeishuMessageLogs
 from app.feishu.user_resolver import get_user_resolver
 from app.security.rate_limiter import rate_limiter
-from app.execution.pipeline import (
-    run_agent_pipeline_streaming,
-    PipelineStreamEvent,
-)
+from app.execution.pipeline import run_agent_pipeline_stream
 
 settings = get_settings()
 logger = structlog.get_logger()
 
-# 流式输出配置
-BATCH_SIZE = 50          # 每累积 50 个字符刷新一次
-BATCH_INTERVAL = 0.3    # 或每 50ms 刷新一次（从 300ms 减少，提升响应速度）
+# 卡片显示配置
 MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
 
 
@@ -397,106 +392,88 @@ async def _process_message_internal(
         else:
             full_input_text = text_content
         
-        # 流式执行状态追踪
-        steps_history: list[str] = []
-        final_answer: str = ""
-        last_update_time = time.time()
-        buffered_length = 0
-        is_answering = False
-        has_first_token = False  # ← 新增：追踪是否已收到第一个token
-        current_session_id: str | None = None
+        # 显示处理中状态
+        await card_status.set_card_content("AI正在处理中...", force=True)
         
-        # ← 新增：在 LLM 调用前显示"正在输入..."状态（强制刷新，绕过防抖）
-        await card_status.set_card_content("正在思考中...", force=True)
+        # 流式处理相关状态
+        reply_chunks: list[str] = []
+        current_step: str | None = None
+        final_answer = ""
+        current_session_id = session_id
+        stream_completed = False
         
         try:
-            async for event in run_agent_pipeline_streaming(
+            # 使用流式管线执行
+            async for event in run_agent_pipeline_stream(
                 usernumb=employee_no,
                 user_id=str(user.id) if user else "",
                 input_text=full_input_text,
                 session_id=session_id,
                 source="feishu",
-                media_paths=media_paths if media_paths else None,
+                sub_intent="feishu",
                 feishu_chat_id=chat_id,
                 feishu_open_id=open_id,
                 feishu_chat_type=chat_type,
             ):
-                evt_type = event["event"]
-                evt_data = event["data"]
-                logger.debug("Pipeline event", event=event)
-                # ── 步骤完成 ──
-                if evt_type == PipelineStreamEvent.STEP_COMPLETE:
-                    step_info = evt_data["info"]
-                    steps_history.append(f"步骤 {evt_data['step']}: {step_info}")
-                    
-                    # 更新卡片显示（步骤完成强制刷新，绕过防抖）
-                    display_text = _build_card_content(
-                        steps_history, 
-                        final_answer,
-                        is_answering
-                    )
-                    await card_status.set_card_content(display_text, force=True)
+                evt_type = event.get("event")
+                evt_data = event.get("data", {})
                 
-                # ── 答案片段 ──
-                elif evt_type == PipelineStreamEvent.DELTA:
-                    if not is_answering:
-                        is_answering = True
-                    
+                if evt_type == "delta":
+                    # 流式文本片段 - 只累积，不更新卡片
                     content = evt_data.get("content", "")
-                    final_answer += content
-                    buffered_length += len(content)
-                    
-                    # ← 新增：第一个token立即刷新，不等待批处理
-                    if not has_first_token and content:
-                        has_first_token = True
-                        display_text = _build_card_content(
-                            steps_history,
-                            final_answer,
-                            is_answering
-                        )
-                        # ← 第一个token立即刷新，绕过防抖
-                        await card_status.set_card_content(display_text, force=True)
-                        buffered_length = 0
-                        last_update_time = time.time()
-                        continue  # 跳过下面的批处理检查
-                    
-                    # 批量刷新检查
-                    current_time = time.time()
-                    should_update = (
-                        buffered_length >= BATCH_SIZE or 
-                        current_time - last_update_time >= BATCH_INTERVAL
-                    )
-                    
-                    if should_update:
-                        display_text = _build_card_content(
-                            steps_history,
-                            final_answer,
-                            is_answering
-                        )
-                        await card_status.set_card_content(display_text)
-                        buffered_length = 0
-                        last_update_time = current_time
+                    if content:
+                        reply_chunks.append(content)
+                        final_answer = "".join(reply_chunks)
                 
-                # ── 执行完成 ──
-                elif evt_type == PipelineStreamEvent.FINISH:
-                    current_session_id = evt_data["finish_meta"].get("session_id")
-                    session_id = current_session_id or session_id
-                    
-                    # 最终更新
-                    display_text = _build_card_content(
-                        steps_history,
-                        final_answer,
-                        is_answering=True
-                    )
-                    # ← 新增：FINISH时强制刷新，绕过防抖
-                    await card_status.set_card_content(display_text, force=True)
+                elif evt_type == "tool_call":
+                    # 工具调用 - 覆盖式显示步骤
+                    tool_name = evt_data.get("name", "unknown")
+                    current_step = f"🔧 正在调用工具: {tool_name}..."
+                    # 立即更新卡片显示当前步骤
+                    card_content = _build_streaming_card_content(current_step, final_answer, is_generating=True)
+                    await card_status.set_card_content(card_content, force=True)
                 
-                # ── 执行错误 ──
-                elif evt_type == PipelineStreamEvent.ERROR:
-                    error_msg = evt_data.get("error", "未知错误")
-                    logger.error("Pipeline streaming error", error=error_msg)
-                    await card_status.set_error(f"执行出错: {error_msg}")
-                    raise Exception(error_msg)
+                elif evt_type == "tool_result":
+                    # 工具返回 - 覆盖式显示步骤
+                    tool_name = evt_data.get("name", "unknown")
+                    result = evt_data.get("result", {})
+                    if isinstance(result, dict) and "error" in result:
+                        current_step = f"❌ 工具 {tool_name} 执行失败"
+                    else:
+                        current_step = f"✅ 工具 {tool_name} 执行完成"
+                    # 立即更新卡片显示当前步骤
+                    card_content = _build_streaming_card_content(current_step, final_answer, is_generating=True)
+                    await card_status.set_card_content(card_content, force=True)
+                
+                elif evt_type == "finish":
+                    # 执行完成
+                    stream_completed = True
+                    finish_meta = evt_data if isinstance(evt_data, dict) else {}
+                    iterations = finish_meta.get("iterations", 0)
+                    if iterations > 0:
+                        current_step = f"📝 已完成 {iterations} 轮思考"
+                        card_content = _build_streaming_card_content(current_step, final_answer, is_generating=True)
+                        await card_status.set_card_content(card_content, force=True)
+                
+                elif evt_type == "done":
+                    # 最终完成事件
+                    current_session_id = evt_data.get("session_id", session_id)
+                    final_answer = evt_data.get("reply", final_answer)
+                    message_id = evt_data.get("message_id")
+                
+                elif evt_type == "error":
+                    # 执行错误
+                    error_msg = evt_data.get("message", "未知错误")
+                    current_step = f"❌ 执行出错: {error_msg}"
+                    card_content = _build_streaming_card_content(current_step, final_answer, is_generating=True)
+                    await card_status.set_card_content(card_content, force=True)
+            
+            # 流式处理完成，更新 session_id
+            if current_session_id:
+                session_id = current_session_id
+            
+            # 最终卡片更新 - 只显示最终答案，步骤完全清除
+            await card_status.set_card_content(final_answer, force=True)
             
         except asyncio.TimeoutError:
             # AI 处理超时
@@ -541,7 +518,8 @@ async def _process_message_internal(
             return {"status": "failed", "error": "timeout", "message": "AI 处理超时"}
         except Exception as e:
             # 其他异常已在上面处理
-            logger.error("Error in pipeline streaming", error=str(e))
+            logger.error("Error in pipeline processing", exception=str(e))
+            await card_status.set_error(f"处理出错: {str(e)}")
             return {"status": "failed", "error": "processing_error", "message": str(e)}
         
         # 私聊文件落盘：在 media_downloader.py 中完成
@@ -1009,3 +987,43 @@ def _get_visible_steps(steps: list[str], max_visible: int) -> tuple[list[str], i
         return steps, 0
     
     return steps[-max_visible:], len(steps) - max_visible
+
+
+def _build_streaming_card_content(
+    current_step: str | None, 
+    answer: str, 
+    is_generating: bool
+) -> str:
+    """构建流式处理卡片内容
+    
+    显示逻辑：
+    - 生成中：只显示当前步骤（覆盖式），不累积所有步骤
+    - 完成后：只显示最终答案，步骤完全清除
+    
+    Args:
+        current_step: 当前执行的步骤（只显示最后一条）
+        answer: 当前累积的答案
+        is_generating: 是否正在生成中
+    
+    Returns:
+        格式化后的卡片内容文本
+    """
+    lines = []
+    
+    if is_generating:
+        # 生成中：只显示当前步骤（覆盖式）
+        if current_step:
+            lines.append(current_step)
+        elif not answer:
+            lines.append("⏳ AI 正在思考...")
+        
+        # 答案区域（生成中不显示，减少干扰）
+        # 注释掉：生成中不显示答案片段
+        # if answer:
+        #     lines.append("")
+        #     lines.append(answer[:200] + "..." if len(answer) > 200 else answer)
+    else:
+        # 已完成：只显示最终答案，步骤完全清除
+        lines.append(answer)
+    
+    return "\n".join(lines)
