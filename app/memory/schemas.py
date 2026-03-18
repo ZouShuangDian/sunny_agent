@@ -189,20 +189,25 @@ class ConversationHistory(BaseModel):
             # deep_research 消息的 content 是 blocks JSON，需提取纯文本供 LLM 使用
             content = _extract_text_for_llm(m) if m.intent_primary == "deep_research" else m.content
             entry: dict = {"role": m.role, "content": content}
-            if m.role == "assistant" and m.tool_calls:
-                entry["tool_calls"] = [
-                    {
-                        "id": tc.tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.tool_name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in m.tool_calls
-                ]
-            if m.role == "tool" and m.tool_call_id:
-                entry["tool_call_id"] = m.tool_call_id
+            # tool_calls 和 tool result 不注入 LLM 历史上下文：
+            # 完整工具调用记录在 l3_steps 表中，messages 只保留纯文本对话。
+            # 避免 LLM 看到 tool_call 但没有对应 tool result 导致上下文错位。
+            if m.role == "tool":
+                continue  # 跳过 tool result 消息
+            # if m.role == "assistant" and m.tool_calls:
+            #     entry["tool_calls"] = [
+            #         {
+            #             "id": tc.tool_call_id,
+            #             "type": "function",
+            #             "function": {
+            #                 "name": tc.tool_name,
+            #                 "arguments": json.dumps(tc.arguments),
+            #             },
+            #         }
+            #         for tc in m.tool_calls
+            #     ]
+            # if m.role == "tool" and m.tool_call_id:
+            #     entry["tool_call_id"] = m.tool_call_id
             result.append(entry)
         return result
 

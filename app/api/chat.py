@@ -166,7 +166,8 @@ async def _record_assistant_message(
         timestamp=time.time(), message_id=str(uuid.uuid4()),
         intent_primary=intent_primary, route=route,
         model=settings.LLM_DEFAULT_MODEL,
-        tool_calls=exec_result.tool_calls if exec_result and exec_result.tool_calls else None,
+        # tool_calls 不存入 messages 表：完整记录在 l3_steps 表中。
+        # 避免加载历史时 LLM 看到 tool_call 但没有对应 tool result，产生上下文错位。
     )
     await memory.append_message(session_id, assistant_msg)
     await memory.increment_turn(session_id)
