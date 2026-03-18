@@ -42,7 +42,7 @@ logger = structlog.get_logger()
 
 # 流式输出配置
 BATCH_SIZE = 50          # 每累积 50 个字符刷新一次
-BATCH_INTERVAL = 0.3     # 或每 300ms 刷新一次
+BATCH_INTERVAL = 0.3    # 或每 50ms 刷新一次（从 300ms 减少，提升响应速度）
 MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
 
 
@@ -403,7 +403,11 @@ async def _process_message_internal(
         last_update_time = time.time()
         buffered_length = 0
         is_answering = False
+        has_first_token = False  # ← 新增：追踪是否已收到第一个token
         current_session_id: str | None = None
+        
+        # ← 新增：在 LLM 调用前显示"正在输入..."状态（强制刷新，绕过防抖）
+        await card_status.set_card_content("正在思考中...", force=True)
         
         try:
             async for event in run_agent_pipeline_streaming(
@@ -419,19 +423,19 @@ async def _process_message_internal(
             ):
                 evt_type = event["event"]
                 evt_data = event["data"]
-                
+                logger.debug("Pipeline event", event=event)
                 # ── 步骤完成 ──
                 if evt_type == PipelineStreamEvent.STEP_COMPLETE:
                     step_info = evt_data["info"]
                     steps_history.append(f"步骤 {evt_data['step']}: {step_info}")
                     
-                    # 更新卡片显示
+                    # 更新卡片显示（步骤完成强制刷新，绕过防抖）
                     display_text = _build_card_content(
                         steps_history, 
                         final_answer,
                         is_answering
                     )
-                    await card_status.set_card_content(display_text)
+                    await card_status.set_card_content(display_text, force=True)
                 
                 # ── 答案片段 ──
                 elif evt_type == PipelineStreamEvent.DELTA:
@@ -441,6 +445,20 @@ async def _process_message_internal(
                     content = evt_data.get("content", "")
                     final_answer += content
                     buffered_length += len(content)
+                    
+                    # ← 新增：第一个token立即刷新，不等待批处理
+                    if not has_first_token and content:
+                        has_first_token = True
+                        display_text = _build_card_content(
+                            steps_history,
+                            final_answer,
+                            is_answering
+                        )
+                        # ← 第一个token立即刷新，绕过防抖
+                        await card_status.set_card_content(display_text, force=True)
+                        buffered_length = 0
+                        last_update_time = time.time()
+                        continue  # 跳过下面的批处理检查
                     
                     # 批量刷新检查
                     current_time = time.time()
@@ -470,7 +488,8 @@ async def _process_message_internal(
                         final_answer,
                         is_answering=True
                     )
-                    await card_status.set_card_content(display_text)
+                    # ← 新增：FINISH时强制刷新，绕过防抖
+                    await card_status.set_card_content(display_text, force=True)
                 
                 # ── 执行错误 ──
                 elif evt_type == PipelineStreamEvent.ERROR:

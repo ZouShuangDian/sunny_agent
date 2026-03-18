@@ -78,6 +78,11 @@ class CardSession:
         }
 
 
+# 防抖配置常量
+MIN_CONTENT_DIFF = 20          # 内容长度变化阈值：至少变化20字符才调用API
+MIN_API_INTERVAL = 0.2         # API调用间隔阈值：至少间隔200ms才调用API
+
+
 class CardStatusManager:
     """
     卡片状态管理器
@@ -114,6 +119,10 @@ class CardStatusManager:
         self.feishu_client = feishu_client
         self.session: Optional[CardSession] = None
         self._lock = asyncio.Lock()
+        
+        # 防抖状态追踪
+        self._last_sent_content: str = ""      # 上次发送到API的内容
+        self._last_api_call_time: float = 0    # 上次调用API的时间戳
     
     async def start_session(
         self,
@@ -356,16 +365,21 @@ class CardStatusManager:
             self.session.accumulated_content  # ← 使用累积的全部内容
         )
     
-    async def set_card_content(self, content: str):
+    async def set_card_content(self, content: str, force: bool = False):
         """
-        直接设置卡片内容（非累积模式）
+        直接设置卡片内容（非累积模式，带防抖）
         
         与 update_card_content 的区别：
         - update_card_content: 将新内容追加到已有内容后面（累积模式）
         - set_card_content: 直接替换全部内容（设置模式）
         
+        防抖逻辑（force=False时生效）：
+        - 内容长度变化 < MIN_CONTENT_DIFF (20字符) → 跳过
+        - 距离上次调用 < MIN_API_INTERVAL (200ms) → 跳过
+        
         Args:
             content: 要显示的完整内容（直接替换，不追加）
+            force: 是否强制刷新（绕过防抖），用于 FINISH 时
         """
         if not self.session:
             logger.warning("Cannot set card content: no active session")
@@ -375,6 +389,28 @@ class CardStatusManager:
             logger.warning("Cannot set card content: no card_id in session")
             return
         
+        current_time = time.time()
+        
+        # 防抖检查（非强制模式下）
+        if not force:
+            # 检查内容变化量
+            content_diff = len(content) - len(self._last_sent_content)
+            if abs(content_diff) < MIN_CONTENT_DIFF:
+                logger.debug("Debounced: content change too small",
+                            card_id=self.session.card_id,
+                            content_diff=content_diff,
+                            min_diff=MIN_CONTENT_DIFF)
+                return
+            
+            # 检查时间间隔
+            time_since_last_call = current_time - self._last_api_call_time
+            if time_since_last_call < MIN_API_INTERVAL:
+                logger.debug("Debounced: API call interval too short",
+                            card_id=self.session.card_id,
+                            interval_ms=round(time_since_last_call * 1000, 1),
+                            min_interval_ms=MIN_API_INTERVAL * 1000)
+                return
+        
         # ← 直接赋值，不是追加
         self.session.accumulated_content = content
         
@@ -382,9 +418,15 @@ class CardStatusManager:
         state.card_id = self.session.card_id
         state.element_id = self.session.element_id
         
+        # 更新防抖状态
+        self._last_sent_content = content
+        self._last_api_call_time = current_time
+        
         logger.debug("Setting card content",
                     card_id=self.session.card_id,
-                    content_length=len(content))
+                    content_length=len(content),
+                    force=force,
+                    skipped_count=getattr(self, '_debounce_skip_count', 0))
         
         await self.block_streaming_manager.update_card_content(
             state, 

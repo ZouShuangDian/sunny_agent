@@ -25,7 +25,7 @@ from app.feishu.client import FeishuClient, get_feishu_client
 from app.feishu.context_manager import get_media_context_manager
 from app.db.models.feishu import FeishuMediaFiles, MediaType
 from app.db.models.file import File as DBFile
-from app.feishu.project_manager import get_or_create_feishu_project, increment_project_file_count
+
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -237,19 +237,11 @@ class MediaDownloader:
                 )
             else:
                 # 主下载模式：创建数据库记录
-                # 如果是私聊，同时创建 File 记录并关联到 Project
+                # 如果是私聊，创建 File 记录（Project 在 _create_or_update_feishu_session_mapping 中创建）
                 file_record_id = None
                 if chat_type == "p2p" and user and app_id:
                     try:
-                        # 1. 获取/创建项目
-                        project = await get_or_create_feishu_project(
-                            db=db,
-                            app_id=app_id,
-                            user_id=user.id,
-                            company=user.company if hasattr(user, 'company') else None,
-                        )
-                        
-                        # 2. 计算文件 hash
+                        # 1. 计算文件 hash
                         file_hash = None
                         try:
                             sha256 = hashlib.sha256()
@@ -271,7 +263,7 @@ class MediaDownloader:
                             storage_filename=local_path.name,
                             file_hash=file_hash,
                             session_id=None,  # 稍后由 AI 管线更新
-                            project_id=project.id,
+                            project_id=None,
                             file_context="feishu_private",
                             feishu_app_id=app_id,
                             feishu_message_id=message_id,
@@ -283,13 +275,9 @@ class MediaDownloader:
                         await db.flush()  # 获取 file_record.id
                         file_record_id = file_record.id
                         
-                        # 4. 更新项目文件计数
-                        await increment_project_file_count(db, project.id)
-                        
                         logger.info("Created File record for Feishu media",
                                    file_id=file_record_id,
-                                   message_id=message_id,
-                                   project_id=project.id)
+                                   message_id=message_id)
                     except Exception as file_err:
                         logger.error("Failed to create File record",
                                     message_id=message_id,
