@@ -23,7 +23,7 @@ from app.memory.chat_persistence import ChatPersistence
 from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.notify import NotificationType, notify_user
-from app.tasks.deep_research import DeepResearchExecutor
+from app.tasks.deep_research_perplexity import DeepResearchExecutor
 
 log = structlog.get_logger()
 
@@ -169,26 +169,52 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
     event_counter = 0
     usernumb = structlog.contextvars.get_contextvars().get("usernumb", "")
 
-    async def push_event(event_type: str, data: dict) -> None:
-        """Redis List（断线补偿）+ Pub/Sub（实时推送）双写"""
+    async def push_event(data: dict) -> None:
+        """标准化事件推送：Redis List（断线补偿）+ Pub/Sub（实时推送）双写
+
+        事件格式：{"event_id": N, "stage": "xxx", "detail": {...}}
+        Pub/Sub 使用 task 专用频道，不走通知频道。
+        """
         nonlocal event_counter
         event_counter += 1
-        event = {"event_id": event_counter, "type": event_type, **data}
-        payload = json.dumps(event)
-        # Redis List：event_id == list_index + 1（断线续传用）
+        event = {"event_id": event_counter, **data}
+        payload = json.dumps(event, ensure_ascii=False)
         await redis_client.rpush(event_key, payload)
-        # Pub/Sub：实时推送到任务 SSE 端点
-        await redis_client.publish(
-            RedisKeys.notify_channel(usernumb),
-            json.dumps({"type": "task_progress", "task_id": task_id, **event}),
-        )
+        await redis_client.publish(RedisKeys.task_channel(task_id), payload)
+
+    async def _on_raw_event(raw: dict) -> None:
+        """Perplexity 原生事件 → 标准化 stage + detail 格式
+
+        前端只需按 stage 字段渲染 UI，不感知底层 API 提供商。
+        切换 API（Google / Perplexity / 自研）只需调整此映射。
+        """
+        evt_type = raw.get("type", "")
+
+        if evt_type == "response.created":
+            await push_event({"stage": "started", "detail": {"message": "正在启动深度研究..."}})
+
+        elif evt_type == "response.reasoning.search_queries":
+            queries = raw.get("queries", [])
+            await push_event({"stage": "searching", "detail": {"queries": queries[:5]}})
+
+        elif evt_type == "response.reasoning.search_results":
+            results = raw.get("results", [])
+            await push_event({"stage": "analyzing", "detail": {"sources_count": len(results)}})
+
+        elif evt_type == "response.output_text.delta":
+            delta = raw.get("delta", "")
+            if delta:
+                await push_event({"stage": "writing", "detail": {"content": delta}})
+
+        elif evt_type == "response.failed":
+            error = raw.get("error", {})
+            await push_event({"stage": "error", "detail": {"message": error.get("message", "研究失败")}})
+
+        # response.completed / reasoning.started / reasoning.stopped 等静默忽略
 
     try:
-        await push_event("started", {"message": "正在启动深度研究..."})
-
-        # DeepResearchExecutor 负责 Google API 调用，通过回调推送进度
         executor = DeepResearchExecutor()
-        result = await executor.execute(query=query, on_progress=push_event)
+        result = await executor.execute(query=query, on_progress=_on_raw_event)
 
         # 写入 messages 表 + WorkingMemory（确保后续对话 LLM 可见）
         msg = Message(
@@ -202,23 +228,25 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> s
         memory = WorkingMemory(redis_client)
         await memory.append_message(session_id, msg)
 
-        await push_event("done", {
-            "session_id": session_id,
-            "message_id": msg.message_id,
-            "title": query[:50],
+        await push_event({
+            "stage": "done",
+            "detail": {
+                "session_id": session_id,
+                "message_id": msg.message_id,
+                "title": query[:50],
+            },
         })
 
         return result.content
 
     except TimeoutError as e:
-        # error event → 任务 SSE 关闭进度卡片；外层 notify_user → 通知中心推送 Toast，两者互补
-        await push_event("error", {"message": f"请求超时: {e}", "retryable": True})
+        # error → 任务 SSE 关闭进度卡片；外层 notify_user → 通知中心推送 Toast，两者互补
+        await push_event({"stage": "error", "detail": {"message": f"请求超时: {e}", "retryable": True}})
         raise
     except Exception as e:
         error_msg = str(e)[:500]
         retryable = "timeout" in error_msg.lower() or "429" in error_msg
-        # error event → 任务 SSE 关闭进度卡片；外层 notify_user → 通知中心推送 Toast
-        await push_event("error", {"message": error_msg, "retryable": retryable})
+        await push_event({"stage": "error", "detail": {"message": error_msg, "retryable": retryable}})
         raise
     finally:
         # 事件列表 1 小时后自动过期

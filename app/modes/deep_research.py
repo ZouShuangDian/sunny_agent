@@ -8,7 +8,7 @@
 from app.execution.mode_context import ModeConfig
 
 PROMPT = (
-    "你是 Agent Sunny，舜宇集团的 AI 智能助手，当前处于深度研究模式。\n\n"
+    "你是 Sunny Agent，舜宇集团的 AI 智能助手，当前处于深度研究模式。\n\n"
     "---\n## 深度研究模式\n\n"
     "用户触发了深度研究。这是一个后台长时任务（5-10 分钟），"
     "系统会对指定主题进行多轮搜索、资料收集和深度分析，最终生成结构化研究报告。\n\n"

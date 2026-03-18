@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     RERANK_API_KEY: str = ""
     RERANK_MODEL: str = "Bge-reranker-v2-m3"
 
+    # ── Google Gemini Deep Research ──
+    GOOGLE_API_KEY: str = ""
+
+    # ── Perplexity Deep Research ──
+    PERPLEXITY_API_KEY: str = ""
+
     # ── Sandbox Service（沙箱代码执行） ──
     SANDBOX_SERVICE_URL: str = "http://localhost:8020"  # sandbox-service HTTP 地址
     SANDBOX_HOST_VOLUME: str = "/Users/zoushuangdian/docker/volumes/sunny_agent"  # 宿主机挂载根目录
@@ -97,7 +103,7 @@ class Settings(BaseSettings):
     # ── arq Worker ──
     ARQ_QUEUE_NAME: str = "sunny:queue"
     ARQ_MAX_JOBS: int = 10               # 单实例最大并发任务数
-    ARQ_JOB_TIMEOUT: int = 600           # 单任务超时（秒）
+    ARQ_JOB_TIMEOUT: int = 900           # 单任务超时（秒），15 分钟
     ARQ_MAX_TRIES: int = 1               # 不自动重试（失败直接标记 failed）
 
     # ── Cron 调度 ──

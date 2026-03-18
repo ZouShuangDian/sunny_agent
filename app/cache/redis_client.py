@@ -72,6 +72,11 @@ class RedisKeys:
         """异步任务事件日志 List（断线续传缓冲，TTL=1h）"""
         return f"task_events:{task_id}"
 
+    @staticmethod
+    def task_channel(task_id: str) -> str:
+        """异步任务进度 Pub/Sub channel（任务 SSE 端点订阅用）"""
+        return f"task_ch:{task_id}"
+
     # ── 通知 Pub/Sub ──
     @staticmethod
     def notify_channel(usernumb: str) -> str:

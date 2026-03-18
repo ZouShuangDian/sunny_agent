@@ -131,8 +131,10 @@ async def task_stream(
             settings.REDIS_URL, decode_responses=True,
             socket_connect_timeout=5, socket_keepalive=True,
         )
+        # 订阅 task 专用频道（不是通知频道，避免收到无关消息）
+        task_ch = RedisKeys.task_channel(str(task_id))
         pubsub = dedicated_conn.pubsub()
-        await pubsub.subscribe(RedisKeys.notify_channel(usernumb))
+        await pubsub.subscribe(task_ch)
 
         try:
             # 1. 补发历史事件（Redis List，断线续传）
@@ -142,19 +144,17 @@ async def task_stream(
             for raw in history:
                 event = json.loads(raw)
                 cursor += 1
-                yield format_sse(event["type"], event)
-                if event["type"] in ("done", "error"):
+                yield format_sse("message", event)
+                if event.get("stage") in ("done", "error"):
                     return
 
-            # 2. 实时监听 Pub/Sub 新事件
+            # 2. 实时监听 task 专用 Pub/Sub 频道
             async for msg in pubsub.listen():
                 if msg["type"] != "message":
                     continue
-                data = json.loads(msg["data"])
-                if data.get("type") != "task_progress" or data.get("task_id") != str(task_id):
-                    continue
-                yield format_sse(data["type"], data)
-                if data["type"] in ("done", "error"):
+                event = json.loads(msg["data"])
+                yield format_sse("message", event)
+                if event.get("stage") in ("done", "error"):
                     return
 
         finally:
@@ -198,7 +198,7 @@ async def task_status(
         if last_event:
             event = json.loads(last_event)
             return ok(data={
-                "status": event["type"],
+                "status": event.get("stage", "unknown"),
                 "last_event_id": event["event_id"],
             })
 
