@@ -131,7 +131,7 @@ class FeishuClient:
         # 尝试从Redis读取
         cached_token = await redis_client.get(cache_key)
         if cached_token:
-            logger.debug("Using cached Feishu token", app_id=self.app_id)
+            # logger.debug("Using cached Feishu token", app_id=self.app_id)
             return cached_token
         
         # 调用API获取新token
@@ -501,9 +501,10 @@ class FeishuClient:
                           card_id=card_id,
                           element_id=element_id,
                           sequence=sequence,
+                          json_data=json_data,
                           error=e.message,
                           response=e.response)
-            return {"code": e.code or -1, "msg": e.message}
+            raise
     
     async def close_streaming_card(
         self,

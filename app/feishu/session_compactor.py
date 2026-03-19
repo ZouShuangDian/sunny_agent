@@ -18,13 +18,16 @@ settings = get_settings()
 if TYPE_CHECKING:
     from app.llm.client import LLMClient
 
-COMPACTION_PROMPT = """??????????????????? 1500 ???????
-1. ????
-2. ?????
-3. ????????????????
-4. ???????
-5. ?????
-??????????????????????????????????????"""
+COMPACTION_PROMPT = """Summarize the conversation history into a compact context block under 1500 tokens.
+
+Structure the summary with these sections:
+1. User goal
+2. Confirmed facts
+3. Work already completed
+4. Open questions or pending work
+5. User preferences or constraints
+
+Keep concrete details that matter for follow-up turns. Avoid filler, repetition, and stylistic language."""
 
 
 @dataclass
@@ -52,8 +55,9 @@ class SessionCompactor:
         llm_messages = history.to_llm_messages()
         history_tokens = await estimate_history_tokens(llm_messages, model)
         snapshot = build_budget_snapshot(history_tokens)
+        should_compact = snapshot["would_compact"] or snapshot["must_compact"]
 
-        if not snapshot["would_compact"]:
+        if not should_compact:
             return CompactionResult(False, history_tokens, False)
 
         raw_messages = history.messages
@@ -98,7 +102,7 @@ class SessionCompactor:
         return CompactionResult(
             compacted=True,
             history_tokens=history_tokens,
-            would_compact=True,
+            would_compact=should_compact,
             summary_message_id=compaction_msg.message_id,
             kept_messages=len(protected),
             compacted_messages=len(compressible),

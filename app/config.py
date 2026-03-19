@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     MODEL_CONTEXT_LIMIT: int = 98_000        # 模型上下文 token 输入上限（实测精确值）
     COMPACTION_BUFFER: int = 20_000          # Level 2 触发阈值（剩余空间低于此值触发摘要）
     PRUNE_PROTECT_TOKENS: int = 20_000       # 保护区 token 数（最近步骤不被剪枝）
-    HISTORY_TOKEN_BUDGET: int = 60_000       # 历史消息加载预算（独立于保护区）
+    HISTORY_TOKEN_BUDGET: int = 30_000       # 历史消息加载预算（独立于保护区）
     COMPACTION_MAX_TOKENS: int = 2_000       # 摘要生成 max_tokens
 
     # ── 冷存储（聊天记录持久化） ──

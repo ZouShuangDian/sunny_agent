@@ -125,6 +125,29 @@ async def _process_message_internal(
         receive_id = chat_id if chat_type == "group" else open_id
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
 
+        progress_client = await get_feishu_client(app_id, db)
+        last_progress_text: str | None = None
+        last_progress_sent_at = 0.0
+
+        async def _send_progress_text(text_message: str, *, min_interval_seconds: float = 6.0) -> None:
+            nonlocal last_progress_text, last_progress_sent_at
+            now = time.monotonic()
+            if text_message == last_progress_text and (now - last_progress_sent_at) < min_interval_seconds:
+                return
+            await progress_client.send_text_message(
+                receive_id=receive_id,
+                text=text_message,
+                receive_id_type=receive_id_type,
+            )
+            last_progress_text = text_message
+            last_progress_sent_at = now
+
+        def _build_generation_preview(full_text: str, limit: int = 240) -> str:
+            compact = full_text.strip()
+            if len(compact) <= limit:
+                return compact
+            return compact[-limit:]
+
         # ← 新增：限流检查
         try:
             allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id, chat_id, msg_type)
@@ -198,16 +221,6 @@ async def _process_message_internal(
         # 更新日志用户信息
         log_entry.employee_no = employee_no
         log_entry.user_id = user.id if user else None
-        
-        # 5. 启动卡片会话
-        if msg_type in ["text"]:
-            await card_status.start_session(
-                open_id=open_id,
-                chat_id=chat_id,
-                receive_id=receive_id,
-                app_id=app_id,
-                receive_id_type=receive_id_type,
-            )
         
         # 6. 访问控制检查
         access_controller = get_access_controller()
@@ -349,7 +362,7 @@ async def _process_message_internal(
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
         
         # ← 更新状态为"生成答案中"
-        await card_status.update_status(CardStatus.GENERATING)
+        await _send_progress_text("生成答案中")
         
         # 11. AI处理 - 使用流式版本（支持媒体文件）
         # 加载最近媒体上下文（支持历史引用）
@@ -389,9 +402,7 @@ async def _process_message_internal(
                        chat_id=chat_id)
         else:
             full_input_text = text_content
-        
-        # 显示处理中状态
-        await card_status.set_card_content("AI正在处理中...", force=True)
+        await _send_progress_text("正在分析问题，请稍候。")
         
         # 流式处理相关状态
         reply_chunks: list[str] = []
@@ -401,10 +412,12 @@ async def _process_message_internal(
         stream_completed = False
         stream_activity_at = time.monotonic()
         stream_stop_event = asyncio.Event()
+        last_preview_sent_at = 0.0
+        last_preview_length = 0
         heartbeat_messages = [
-            "正在分析问题，请稍候...",
-            "正在整理上下文和答案结构...",
-            "仍在生成中，内容较长，请稍候...",
+            "正在分析问题，请稍候。",
+            "正在整理上下文和答案结构",
+            "历史对话较长，正在整理上下文。",
         ]
 
         async def _stream_status_heartbeat():
@@ -426,10 +439,7 @@ async def _process_message_internal(
                             heartbeat_index += 1
 
                     try:
-                        await card_status.set_card_content(
-                            _build_streaming_card_content(heartbeat_text, "", is_generating=True),
-                            force=True,
-                        )
+                        await _send_progress_text(heartbeat_text, min_interval_seconds=8.0)
                     except Exception as heartbeat_err:
                         logger.warning(
                             "Failed to refresh Feishu heartbeat status",
@@ -471,21 +481,43 @@ async def _process_message_internal(
                         reply_chunks.append(content)
                         final_answer = "".join(reply_chunks)
 
+                elif evt_type == "generating":
+                    preview = evt_data.get("preview", "")
+                    now = time.monotonic()
+                    preview_length = len(preview)
+                    if preview_length >= 160 and (preview_length - last_preview_length >= 360 or now - last_preview_sent_at >= 12.0):
+                        preview_text = _build_generation_preview(preview)
+                        if preview_text:
+                            await _send_progress_text(f"生成中预览：\n{preview_text}", min_interval_seconds=0.0)
+                            last_preview_sent_at = now
+                            last_preview_length = preview_length
+
+
+                elif evt_type == "thinking":
+                    current_step = evt_data.get("message", "正在分析问题，请稍候。")
+                    await _send_progress_text(current_step)
+
                 elif evt_type == "tool_call":
                     tool_name = evt_data.get("name", "unknown")
-                    current_step = f"正在调用工具: {tool_name}"
-                    card_content = _build_streaming_card_content(current_step, "", is_generating=True)
-                    await card_status.set_card_content(card_content, force=True)
+                    current_step = f"正在调用工具：{tool_name}"
+                    await _send_progress_text(current_step)
 
                 elif evt_type == "tool_result":
                     tool_name = evt_data.get("name", "unknown")
                     result = evt_data.get("result", {})
                     if isinstance(result, dict) and "error" in result:
-                        current_step = f"工具执行失败: {tool_name}"
+                        current_step = f"工具执行失败：{tool_name}"
                     else:
-                        current_step = f"工具执行完成: {tool_name}"
-                    card_content = _build_streaming_card_content(current_step, "", is_generating=True)
-                    await card_status.set_card_content(card_content, force=True)
+                        current_step = f"工具执行完成：{tool_name}"
+                    await _send_progress_text(current_step)
+
+                elif evt_type == "compaction_start":
+                    current_step = "历史对话较长，正在整理上下文。"
+                    await _send_progress_text(current_step)
+
+                elif evt_type == "compaction_done":
+                    current_step = "历史整理完成，继续生成答案。"
+                    await _send_progress_text(current_step)
 
                 elif evt_type == "finish":
                     stream_completed = True
@@ -500,9 +532,8 @@ async def _process_message_internal(
                         reply_length=len(final_answer),
                     )
                     if iterations > 0:
-                        current_step = f"已完成 {iterations} 轮处理"
-                        card_content = _build_streaming_card_content(current_step, "", is_generating=True)
-                        await card_status.set_card_content(card_content, force=True)
+                        current_step = f"已完成 {iterations} 轮处理。"
+                        await _send_progress_text(current_step)
 
                 elif evt_type == "done":
                     current_session_id = evt_data.get("session_id", session_id)
@@ -518,7 +549,7 @@ async def _process_message_internal(
 
                 elif evt_type == "error":
                     error_msg = evt_data.get("message", evt_data.get("error", "处理失败"))
-                    current_step = f"处理失败: {error_msg}"
+                    current_step = f"处理失败：{error_msg}"
                     logger.error(
                         "Feishu pipeline stream error event",
                         event_id=event_id,
@@ -526,8 +557,7 @@ async def _process_message_internal(
                         session_id=session_id,
                         error=error_msg,
                     )
-                    card_content = _build_streaming_card_content(current_step, "", is_generating=True)
-                    await card_status.set_card_content(card_content, force=True)
+                    await _send_progress_text(current_step)
 
             if current_session_id:
                 session_id = current_session_id
@@ -549,36 +579,18 @@ async def _process_message_internal(
             
             # 发送友好提示给用户
             timeout_message = (
-                "⏱️ 处理超时\n\n"
-                "您的请求处理时间过长，可能是由于：\n"
-                "• 当前问题较为复杂\n"
-                "• 网络连接不稳定\n"
-                "• 系统负载较高\n\n"
-                "💡 建议：\n"
-                "• 简化问题后重试\n"
-                "• 稍后再次尝试\n"
-                "• 如果问题持续，请联系管理员"
+                "处理超时。\n\n"
+                "当前请求的上下文较长，或者模型响应较慢。你可以稍后重试，或者缩小问题范围后再试。"
             )
-            
             try:
-                await card_status.set_error("处理超时，请简化问题后重试")
-                await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
-                
-                # 发送超时提示消息
-                feishu_client = await get_feishu_client(app_id, db)
-                await feishu_client.send_text_message(
-                    receive_id=chat_id if chat_type == "group" else open_id,
-                    text=timeout_message,
-                    receive_id_type="chat_id" if chat_type == "group" else "open_id"
-                )
+                await _send_progress_text(timeout_message, min_interval_seconds=0.0)
             except Exception as send_err:
                 logger.error("Failed to send timeout message", error=str(send_err))
             
             return {"status": "failed", "error": "timeout", "message": "AI 处理超时"}
         except Exception as e:
-            # 其他异常已在上面处理
             logger.error("Error in pipeline processing", exception=str(e))
-            await card_status.set_error(f"处理出错: {str(e)}")
+            await _send_progress_text(f"处理出错：{str(e)}", min_interval_seconds=0.0)
             return {"status": "failed", "error": "processing_error", "message": str(e)}
         finally:
             stream_stop_event.set()
@@ -605,14 +617,17 @@ async def _process_message_internal(
                             error=str(update_err))
         
         # 关闭流式卡片并发送最终答案
-        # 卡片内容已在流式过程中实时更新，这里只是关闭流式状态
+        # 最终答案通过卡片发送，过程消息继续使用普通文本
         complete_ok = await card_status.complete(
             final_answer=final_answer,
             send_as_message=True,
+            receive_id=receive_id,
+            receive_id_type=receive_id_type,
+            open_id=open_id,
+            chat_id=chat_id,
         )
         if not complete_ok:
             raise RuntimeError("Feishu final reply delivery failed")
-
         await cleanup_card_status_manager(
             open_id=open_id,
             chat_id=chat_id,
@@ -628,6 +643,7 @@ async def _process_message_internal(
         )
         log_entry.reply_content = final_answer
         await db.commit()
+        await _update_webhook_dedup_status(event_id, message_id, status="completed")
         
         logger.info("Message processing completed",
                    event_id=event_id,
@@ -644,21 +660,22 @@ async def _process_message_internal(
                     event_id=event_id,
                     error=str(e),
                     exc_info=True)
-        
-        # ← 新增：设置错误状态
         if card_status:
-            await card_status.set_error(str(e))
-            await cleanup_card_status_manager(
-                open_id=open_id,
-                chat_id=chat_id,
-                app_id=app_id,
-            )
+            try:
+                await _send_progress_text(f"处理失败：{str(e)}", min_interval_seconds=0.0)
+            finally:
+                await cleanup_card_status_manager(
+                    open_id=open_id,
+                    chat_id=chat_id,
+                    app_id=app_id,
+                )
 
         if log_entry is not None:
             log_entry.status = "failed"
             log_entry.error_type = "processing_error"
             log_entry.error_message = str(e)
             await db.commit()
+        await _update_webhook_dedup_status(event_id, message_id, status="failed")
         
         raise
     
@@ -715,6 +732,25 @@ async def _create_or_update_log(
     return log_entry
 
 
+async def _update_webhook_dedup_status(event_id: str, message_id: str, status: str) -> None:
+    """Keep the webhook ingress dedup state in sync with downstream processing result."""
+    if not event_id or not message_id:
+        return
+
+    dedup_key = f"msg:{event_id}:{message_id}"
+    ttl_seconds = 86400 if status == "completed" else 604800
+    try:
+        await redis_client.set(dedup_key, status, ex=ttl_seconds)
+    except Exception as e:
+        logger.warning(
+            "Failed to update webhook dedup status",
+            event_id=event_id,
+            message_id=message_id,
+            status=status,
+            error=str(e),
+        )
+
+
 async def _get_or_create_session(
     db: AsyncSession,
     open_id: str,
@@ -722,7 +758,7 @@ async def _get_or_create_session(
     chat_type: str,
     user_id: UUID = None,
 ) -> str:
-    """????? Feishu ?? session?"""
+    """获取或创建飞书会话 session"""
     return await get_or_rotate_feishu_session(
         db,
         open_id=open_id,

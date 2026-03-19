@@ -229,6 +229,10 @@ class CardStatusManager:
         self,
         final_answer: str,
         send_as_message: bool = True,
+        receive_id: str | None = None,
+        receive_id_type: str | None = None,
+        open_id: str | None = None,
+        chat_id: str | None = None,
     ) -> bool:
         """
         完成卡片会话，发送最终答案
@@ -241,10 +245,20 @@ class CardStatusManager:
             是否完成成功
         """
         async with self._lock:
-            if not self.session:
+            active_receive_id = receive_id
+            active_receive_id_type = receive_id_type
+            active_open_id = open_id
+            active_chat_id = chat_id
+
+            if self.session:
+                active_receive_id = self.session.receive_id
+                active_receive_id_type = self.session.receive_id_type
+                active_open_id = self.session.open_id
+                active_chat_id = self.session.chat_id
+            elif not (send_as_message and active_receive_id and active_receive_id_type):
                 logger.error("Cannot complete: no active session")
                 return False
-            
+
             try:
                 # 先发送最终答案，再关闭状态卡，避免出现“卡片已完成但答案尚未送达”的窗口
                 if send_as_message and final_answer:
@@ -253,37 +267,42 @@ class CardStatusManager:
                     for chunk_index, chunk in enumerate(chunks, start=1):
                         try:
                             await self.block_streaming_manager.send_message(
-                                receive_id=self.session.receive_id,
+                                receive_id=active_receive_id,
                                 content=chunk,
                                 msg_type="interactive_markdown",
-                                receive_id_type=self.session.receive_id_type,
+                                receive_id_type=active_receive_id_type,
                             )
                         except Exception as send_err:
                             logger.warning(
                                 "Failed to send markdown final reply chunk, falling back to text",
-                                card_id=self.session.card_id,
+                                card_id=self.session.card_id if self.session else None,
                                 chunk_index=chunk_index,
                                 error=str(send_err),
                             )
                             await self.block_streaming_manager.send_message(
-                                receive_id=self.session.receive_id,
+                                receive_id=active_receive_id,
                                 content=chunk,
                                 msg_type="text",
-                                receive_id_type=self.session.receive_id_type,
+                                receive_id_type=active_receive_id_type,
                             )
                         await asyncio.sleep(0.3)
 
                 # 关闭流式卡片
-                await self.block_streaming_manager.close_streaming(
-                    open_id=self.session.open_id,
-                    chat_id=self.session.chat_id,
-                    final_text=STATUS_TEXTS[CardStatus.COMPLETED],
-                )
-                self.session.update_status(CardStatus.COMPLETED)
-                
-                logger.info("Card session completed",
-                           card_id=self.session.card_id,
-                           answer_length=len(final_answer) if final_answer else 0)
+                if self.session:
+                    await self.block_streaming_manager.close_streaming(
+                        open_id=active_open_id,
+                        chat_id=active_chat_id,
+                        final_text=STATUS_TEXTS[CardStatus.COMPLETED],
+                    )
+                    self.session.update_status(CardStatus.COMPLETED)
+
+                    logger.info("Card session completed",
+                               card_id=self.session.card_id,
+                               answer_length=len(final_answer) if final_answer else 0)
+                else:
+                    logger.info("Final answer sent without streaming card",
+                               receive_id=active_receive_id,
+                               answer_length=len(final_answer) if final_answer else 0)
                 return True
                 
             except Exception as e:

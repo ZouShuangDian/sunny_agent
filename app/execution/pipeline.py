@@ -1,4 +1,4 @@
-"""
+﻿"""
 共享的 Agent 执行链路（非流式）。
 
 chat.py 和 Worker 都可调用此函数，保证执行逻辑单一来源。
@@ -105,6 +105,11 @@ class PipelineStreamEvent:
     DELTA = "delta"                   # 答案片段
     FINISH = "finish"                 # 执行完成
     ERROR = "error"                   # 执行错误
+    COMPACTION_START = "compaction_start"
+    COMPACTION_MODEL_START = "compaction_model_start"
+    COMPACTION_DONE = "compaction_done"
+    GENERATING = "generating"
+    THINKING = "thinking"
 
 
 # 工具展示配置: tool_name -> (图标, 格式化函数)
@@ -365,9 +370,26 @@ async def run_agent_pipeline_streaming(
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
         await _log_context_budget(sid, history_messages)
+        history_tokens = await estimate_history_tokens(history_messages, settings.LLM_DEFAULT_MODEL)
+        budget_snapshot = build_budget_snapshot(history_tokens)
+        if budget_snapshot["would_compact"]:
+            yield {
+                "event": PipelineStreamEvent.COMPACTION_START,
+                "data": {
+                    "session_id": sid,
+                    "history_tokens": history_tokens,
+                    "available_budget": budget_snapshot["available_budget"],
+                },
+            }
         if await _maybe_compact_history(sid, memory):
             history_messages = await context_builder.load_history_messages(sid)
             await _log_context_budget(sid, history_messages)
+            yield {
+                "event": PipelineStreamEvent.COMPACTION_DONE,
+                "data": {
+                    "session_id": sid,
+                },
+            }
         
         intent_result = IntentResult(
             intent=IntentDetail(
@@ -493,7 +515,8 @@ async def _create_or_update_feishu_session_mapping(
     chat_type: str = "p2p",
     app_id: str | None = None,
 ):
-    """???? Feishu ???????????????"""
+    """创建或更新飞书会话映射记录"""
+
     from uuid import UUID
 
     async with async_session() as db:
@@ -778,11 +801,36 @@ async def run_agent_pipeline_stream(
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
         await _log_context_budget(sid, history_messages)
+        history_tokens = await estimate_history_tokens(history_messages, settings.LLM_DEFAULT_MODEL)
+        budget_snapshot = build_budget_snapshot(history_tokens)
+        if budget_snapshot["would_compact"] or budget_snapshot["must_compact"]:
+            yield {
+                "event": PipelineStreamEvent.COMPACTION_START,
+                "data": {
+                    "session_id": sid,
+                    "history_tokens": history_tokens,
+                    "available_budget": budget_snapshot["available_budget"],
+                },
+            }
+            yield {
+                "event": PipelineStreamEvent.COMPACTION_MODEL_START,
+                "data": {
+                    "session_id": sid,
+                    "history_tokens": history_tokens,
+                },
+            }
         if await _maybe_compact_history(sid, memory):
             history_messages = await context_builder.load_history_messages(sid)
             await _log_context_budget(sid, history_messages)
+            yield {
+                "event": PipelineStreamEvent.COMPACTION_DONE,
+                "data": {
+                    "session_id": sid,
+                },
+            }
 
         actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
+
         intent_result = IntentResult(
             intent=IntentDetail(
                 primary="general",
@@ -812,13 +860,30 @@ async def run_agent_pipeline_stream(
         finish_meta: dict = {}
         stream_completed = False
 
+        yield {
+            "event": PipelineStreamEvent.THINKING,
+            "data": {
+                "session_id": sid,
+                "message": "思考中...",
+            },
+        }
+
         try:
             async for event in _execution_router.execute_stream(intent_result, sid):
                 evt_type = event["event"]
                 evt_data = event["data"]
 
                 if evt_type == SSEEvent.DELTA:
-                    reply_chunks.append(evt_data.get("content", ""))
+                    content = evt_data.get("content", "")
+                    reply_chunks.append(content)
+                    if reply_chunks and len("".join(reply_chunks)) >= 120:
+                        yield {
+                            "event": PipelineStreamEvent.GENERATING,
+                            "data": {
+                                "session_id": sid,
+                                "preview": "".join(reply_chunks),
+                            },
+                        }
                 elif evt_type == SSEEvent.FINISH:
                     finish_meta = evt_data if isinstance(evt_data, dict) else {}
 

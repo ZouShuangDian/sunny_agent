@@ -373,7 +373,11 @@ class BlockStreamingManager:
         except Exception as e:
             logger.error("Failed to update streaming card", 
                         card_id=state.card_id, 
+                        element_id=state.element_id,
+                        sequence=state.sequence,
+                        content_preview=content[:120],
                         error=str(e))
+            raise
     
     async def _idle_timer_task(self, open_id: str, chat_id: str, receive_id: str, receive_id_type: str = "open_id"):
         """空闲定时器任务"""
