@@ -37,25 +37,64 @@ git clone https://github.com/ZouShuangDian/sunny_agent.git
 cd sunny_agent
 ```
 
-### 2. 启动基础设施
+### 2. 启动基础设施(可选，用于开发环境)
+
+#### 核心服务
+
 使用 Docker Compose 一键启动 PostgreSQL、Redis、Milvus：
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-服务详情：
-
 | 服务 | 端口 | 用途 |
 |------|------|------|
 | PostgreSQL | 5432 | 主数据库（用户/密码：`root`/`abc123!`） |
 | Redis | 6379 | 缓存与会话管理（密码：`abc123!`） |
-| Milvus | 19530 | 向量数据库 |
+| Milvus | 19530 | 向量数据库（依赖 etcd + MinIO） |
 
-停止基础设施：
 ```bash
+# 停止
 docker compose -f infra/docker-compose.yml down
-# 清除数据：docker compose -f infra/docker-compose.yml down -v
+# 停止并清除数据
+docker compose -f infra/docker-compose.yml down -v
+```
+
+#### Langfuse 可观测性（可选）
+
+Langfuse 提供 LLM 调用链路追踪、Token 用量统计和评估实验功能。
+
+```bash
+docker compose -f infra/langfuse-compose.yml up -d
+```
+
+| 服务 | 端口 | 用途 |
+|------|------|------|
+| Langfuse Web | 3000 | UI 与 REST API |
+| Langfuse Worker | 3030（仅本机） | 后台任务处理（Redis 队列 → ClickHouse） |
+| PostgreSQL | 5433 | Langfuse 专用数据库（独立于主服务） |
+| ClickHouse | — | Trace 存储与分析 |
+| Redis | — | Langfuse 内部队列 |
+| MinIO | — | 事件与媒体对象存储 |
+
+启动后访问 Langfuse UI：http://localhost:3000
+- 默认账号：`admin@sunnyagent.local` / `changeme123`
+- 默认 API Key：`pk-lf-sunny-dev` / `sk-lf-sunny-dev`
+
+在 `app/.env` 中配置连接：
+
+```env
+LANGFUSE_ENABLED=true
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_PUBLIC_KEY=pk-lf-sunny-dev
+LANGFUSE_SECRET_KEY=sk-lf-sunny-dev
+```
+
+```bash
+# 停止
+docker compose -f infra/langfuse-compose.yml down
+# 停止并清除数据
+docker compose -f infra/langfuse-compose.yml down -v
 ```
 
 ### 3. 安装依赖
@@ -132,40 +171,6 @@ alembic upgrade head
 alembic downgrade -1
 ```
 
-## 📊 Langfuse 可观测性（可选）
-
-Langfuse 提供 LLM 调用链路追踪、Token 用量统计和评估实验功能。
-
-### 启动 Langfuse 服务
-
-```bash
-docker compose -f infra/langfuse-compose.yml up -d
-```
-
-服务包含：Langfuse v3、ClickHouse、Redis、MinIO、PostgreSQL（独立于主服务，端口 5433）。
-
-启动后访问 Langfuse UI：http://localhost:3000
-- 默认账号：`admin@sunnyagent.local` / `changeme123`
-- 默认 API Key：`pk-lf-sunny-dev` / `sk-lf-sunny-dev`
-
-### 配置 SunnyAgent 连接 Langfuse
-
-在 `app/.env` 中添加：
-
-```env
-LANGFUSE_ENABLED=true
-LANGFUSE_HOST=http://localhost:3000
-LANGFUSE_PUBLIC_KEY=pk-lf-sunny-dev
-LANGFUSE_SECRET_KEY=sk-lf-sunny-dev
-```
-
-### 停止 Langfuse 服务
-
-```bash
-docker compose -f infra/langfuse-compose.yml down
-# 清除数据：docker compose -f infra/langfuse-compose.yml down -v
-```
-
 ## 📂 目录结构摘要
 ```
 .
@@ -173,13 +178,20 @@ docker compose -f infra/langfuse-compose.yml down
 ├── app/
 │   ├── main.py              # 应用入口
 │   ├── config.py            # 配置加载
+│   ├── api/                 # API 路由层
 │   ├── db/                  # 数据库相关
 │   │   ├── migrations/      # 迁移脚本目录
 │   │   └── models/          # ORM 模型定义
 │   ├── intent/              # 意图识别引擎
 │   ├── execution/           # 执行路由与逻辑
 │   ├── tools/               # 工具集 (builtin_tools)
-│   ├── observability/       # 监控与日志
-│   └── services/            # 业务服务层
+│   ├── observability/       # Langfuse 集成与监控
+│   ├── services/            # 业务服务层
+│   └── utils/               # 通用工具（加密等）
+├── infra/                   # 基础设施部署配置
+│   ├── docker-compose.yml   # 核心服务（PostgreSQL/Redis/Milvus）
+│   ├── langfuse-compose.yml # Langfuse 可观测性服务栈
+│   └── init-db.sql          # 数据库初始化脚本
+├── scripts/                 # 脚本与实验代码
 └── pyproject.toml           # 项目依赖定义
 ```

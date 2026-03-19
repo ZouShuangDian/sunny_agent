@@ -11,3 +11,4 @@ tests/
 .vscode/
 .opencode/
 .mcp.json
+.coverage
