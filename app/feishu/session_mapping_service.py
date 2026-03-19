@@ -24,24 +24,24 @@ async def get_or_rotate_feishu_session(
     user_id: UUID | None = None,
     source: str = "feishu",
 ) -> str:
-    await _acquire_session_mapping_lock(db, chat_id=chat_id, open_id=open_id)
-    active_mapping = await _get_active_mapping(db, chat_id=chat_id, open_id=open_id)
+    await acquire_feishu_session_lock(db, chat_id=chat_id, open_id=open_id)
+    active_mapping = await get_active_feishu_mapping(db, chat_id=chat_id, open_id=open_id)
     if active_mapping:
-        chat_session = await _get_chat_session(db, active_mapping.session_id)
+        chat_session = await get_chat_session(db, active_mapping.session_id)
         if chat_session and not _is_session_idle(chat_session.last_active_at):
-            await _touch_mapping(db, active_mapping)
+            await touch_mapping(db, active_mapping)
             return active_mapping.session_id
 
         if chat_session:
-            await _archive_mapping_and_session(db, active_mapping, chat_session)
-            new_session_id = await _create_chat_session(
+            await archive_mapping_and_session(db, active_mapping, chat_session)
+            new_session_id = await create_chat_session(
                 db,
                 user_id=user_id,
                 title=chat_session.title,
                 source=source,
             )
-            await _inherit_latest_summary(db, chat_session.session_id, new_session_id)
-            await _create_mapping(
+            await inherit_latest_summary(db, chat_session.session_id, new_session_id)
+            await create_feishu_session_mapping(
                 db,
                 chat_id=chat_id,
                 open_id=open_id,
@@ -53,8 +53,8 @@ async def get_or_rotate_feishu_session(
             await db.commit()
             return new_session_id
 
-    new_session_id = await _create_chat_session(db, user_id=user_id, source=source)
-    await _create_mapping(
+    new_session_id = await create_chat_session(db, user_id=user_id, source=source)
+    await create_feishu_session_mapping(
         db,
         chat_id=chat_id,
         open_id=open_id,
@@ -75,7 +75,7 @@ async def touch_or_activate_feishu_session_mapping(
     chat_type: str,
     user_id: UUID | None = None,
 ) -> None:
-    await _acquire_session_mapping_lock(db, chat_id=chat_id, open_id=open_id)
+    await acquire_feishu_session_lock(db, chat_id=chat_id, open_id=open_id)
     existing = await db.execute(
         select(FeishuChatSessionMapping).where(
             FeishuChatSessionMapping.chat_id == chat_id,
@@ -102,7 +102,7 @@ async def touch_or_activate_feishu_session_mapping(
         )
         .values(is_active=False, archived_at=datetime.now(timezone.utc))
     )
-    await _create_mapping(
+    await create_feishu_session_mapping(
         db,
         chat_id=chat_id,
         open_id=open_id,
@@ -113,7 +113,7 @@ async def touch_or_activate_feishu_session_mapping(
     await db.commit()
 
 
-async def _acquire_session_mapping_lock(
+async def acquire_feishu_session_lock(
     db: AsyncSession,
     *,
     chat_id: str,
@@ -128,7 +128,12 @@ async def _acquire_session_mapping_lock(
     )
 
 
-async def _get_active_mapping(db: AsyncSession, *, chat_id: str, open_id: str) -> FeishuChatSessionMapping | None:
+async def get_active_feishu_mapping(
+    db: AsyncSession,
+    *,
+    chat_id: str,
+    open_id: str,
+) -> FeishuChatSessionMapping | None:
     result = await db.execute(
         select(FeishuChatSessionMapping)
         .where(
@@ -142,7 +147,7 @@ async def _get_active_mapping(db: AsyncSession, *, chat_id: str, open_id: str) -
     return result.scalar_one_or_none()
 
 
-async def _get_chat_session(db: AsyncSession, session_id: str) -> ChatSession | None:
+async def get_chat_session(db: AsyncSession, session_id: str) -> ChatSession | None:
     result = await db.execute(
         select(ChatSession).where(ChatSession.session_id == session_id)
     )
@@ -158,13 +163,13 @@ def _is_session_idle(last_active_at: datetime | None) -> bool:
     return last_active_at < threshold
 
 
-async def _touch_mapping(db: AsyncSession, mapping: FeishuChatSessionMapping) -> None:
+async def touch_mapping(db: AsyncSession, mapping: FeishuChatSessionMapping) -> None:
     mapping.last_active_at = datetime.now(timezone.utc)
     mapping.message_count += 1
     await db.commit()
 
 
-async def _archive_mapping_and_session(
+async def archive_mapping_and_session(
     db: AsyncSession,
     mapping: FeishuChatSessionMapping,
     chat_session: ChatSession,
@@ -176,7 +181,7 @@ async def _archive_mapping_and_session(
     await db.flush()
 
 
-async def _create_chat_session(
+async def create_chat_session(
     db: AsyncSession,
     *,
     user_id: UUID | None,
@@ -196,7 +201,7 @@ async def _create_chat_session(
     return session_id
 
 
-async def _create_mapping(
+async def create_feishu_session_mapping(
     db: AsyncSession,
     *,
     chat_id: str,
@@ -221,7 +226,7 @@ async def _create_mapping(
     await db.flush()
 
 
-async def _inherit_latest_summary(db: AsyncSession, old_session_id: str, new_session_id: str) -> None:
+async def inherit_latest_summary(db: AsyncSession, old_session_id: str, new_session_id: str) -> None:
     result = await db.execute(
         select(ChatMessage)
         .where(
@@ -255,3 +260,21 @@ async def _inherit_latest_summary(db: AsyncSession, old_session_id: str, new_ses
         old_session_id=old_session_id,
         new_session_id=new_session_id,
     )
+
+
+async def list_due_feishu_mappings(
+    db: AsyncSession,
+    *,
+    cutoff_at: datetime,
+    limit: int,
+) -> list[FeishuChatSessionMapping]:
+    result = await db.execute(
+        select(FeishuChatSessionMapping)
+        .where(
+            FeishuChatSessionMapping.is_active.is_(True),
+            FeishuChatSessionMapping.last_active_at < cutoff_at,
+        )
+        .order_by(FeishuChatSessionMapping.last_active_at.asc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())

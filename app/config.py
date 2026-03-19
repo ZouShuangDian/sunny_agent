@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # ── 工作记忆 ──
     WORKING_MEMORY_TTL: int = 1800  # 工作记忆 TTL（秒），默认 30min
     FEISHU_SESSION_IDLE_ARCHIVE_HOURS: int = 24  # Feishu 归档 session
+    FEISHU_SESSION_ARCHIVE_ENABLED: bool = True
+    FEISHU_SESSION_ARCHIVE_CUTOFF_HOUR: int = 17
+    FEISHU_SESSION_ARCHIVE_CUTOFF_MINUTE: int = 25
+    FEISHU_SESSION_ARCHIVE_BATCH_SIZE: int = 100
+    FEISHU_SESSION_ARCHIVE_MIN_MESSAGES: int = 6
+    FEISHU_SESSION_ARCHIVE_MODEL: str = "openai/deepseek-ai/DeepSeek-V3"
 
     WORKING_MEMORY_MAX_TURNS: int = 20  # 对话历史最大保留轮次
 

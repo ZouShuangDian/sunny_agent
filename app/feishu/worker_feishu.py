@@ -3,6 +3,8 @@ Feishu Worker 独立配置
 独立的ARQ Worker，专门处理飞书消息队列
 """
 
+from arq.cron import cron
+
 from app.config import get_settings
 from app.feishu.tasks import (
     WorkerSettings as FeishuWorkerSettings,
@@ -10,6 +12,7 @@ from app.feishu.tasks import (
     startup,
     shutdown,
 )
+from app.tasks.session_archive import archive_feishu_sessions
 
 settings = get_settings()
 
@@ -18,7 +21,7 @@ class WorkerSettingsFeishu:
     """Feishu独立Worker配置"""
     
     # ARQ函数列表
-    functions = [process_feishu_message]
+    functions = [process_feishu_message, archive_feishu_sessions]
     
     # Redis设置
     redis_settings = FeishuWorkerSettings.redis_settings
@@ -38,7 +41,13 @@ class WorkerSettingsFeishu:
     on_shutdown = shutdown
     
     # 不使用Cron Jobs（使用长驻任务替代）
-    cron_jobs = []
+    cron_jobs = [
+        cron(
+            archive_feishu_sessions,
+            hour=settings.FEISHU_SESSION_ARCHIVE_CUTOFF_HOUR,
+            minute=settings.FEISHU_SESSION_ARCHIVE_CUTOFF_MINUTE,
+        )
+    ] if settings.FEISHU_SESSION_ARCHIVE_ENABLED else []
 
 
 # 导出配置，供arq命令使用

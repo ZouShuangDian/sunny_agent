@@ -2,10 +2,31 @@
 Cron 工具函数：表达式解析、下次触发时间计算
 """
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import structlog
 from croniter import croniter
+
+log = structlog.get_logger()
+
+_FIXED_TZ_FALLBACKS = {
+    "UTC": timezone.utc,
+    "Etc/UTC": timezone.utc,
+    "Asia/Shanghai": timezone(timedelta(hours=8)),
+}
+
+
+def get_timezone_info(timezone_name: str):
+    """Resolve an IANA timezone with fixed-offset fallbacks for Windows without tzdata."""
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        fallback = _FIXED_TZ_FALLBACKS.get(timezone_name)
+        if fallback is None:
+            raise
+        log.warning("Timezone data not found, using fixed offset fallback", timezone=timezone_name)
+        return fallback
 
 
 def calc_next_run(
@@ -23,11 +44,11 @@ def calc_next_run(
     Returns:
         下一次触发时间（UTC timezone-aware）
     """
-    tz = ZoneInfo(timezone)
+    tz = get_timezone_info(timezone)
     base = after.astimezone(tz) if after else datetime.now(tz)
     cron = croniter(cron_expr, base)
     next_local = cron.get_next(datetime)
-    return next_local.astimezone(ZoneInfo("UTC"))
+    return next_local.astimezone(get_timezone_info("UTC"))
 
 
 def validate_cron_expr(cron_expr: str) -> bool:
@@ -40,7 +61,7 @@ def check_min_interval(cron_expr: str, min_minutes: int) -> bool:
 
     通过 croniter 计算连续两次触发时间的间距来判断。
     """
-    base = datetime.now(ZoneInfo("UTC"))
+    base = datetime.now(get_timezone_info("UTC"))
     cron = croniter(cron_expr, base)
     first = cron.get_next(datetime)
     second = cron.get_next(datetime)
@@ -51,7 +72,7 @@ def check_min_interval(cron_expr: str, min_minutes: int) -> bool:
 def validate_timezone(timezone: str) -> bool:
     """校验时区是否合法"""
     try:
-        ZoneInfo(timezone)
+        get_timezone_info(timezone)
         return True
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, ZoneInfoNotFoundError):
         return False
