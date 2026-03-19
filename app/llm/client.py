@@ -63,7 +63,7 @@ class LLMClient:
         messages: list[dict],
         model: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 2048,
+        max_tokens: int = 0,
         response_format: dict | None = None,
     ) -> LLMResponse:
         """
@@ -73,7 +73,7 @@ class LLMClient:
             messages: OpenAI 格式的消息列表
             model: 模型名称，不传则用默认模型
             temperature: 温度（意图识别建议 0.0）
-            max_tokens: 最大输出 token 数
+            max_tokens: 最大输出 token 数（不传则用配置默认值）
             response_format: JSON mode（如 {"type": "json_object"}）
         """
         use_model = model or self.default_model
@@ -82,7 +82,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
             "timeout": self.timeout,
         }
         if self.api_key:
@@ -143,7 +143,7 @@ class LLMClient:
         messages: list[dict],
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: int = 0,
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
         """
@@ -160,7 +160,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
             "timeout": settings.LLM_STREAM_TIMEOUT,
             "stream": True,
             "stream_options": {"include_usage": True},  # 确保 finish chunk 携带 token 用量
@@ -245,7 +245,7 @@ class LLMClient:
         tools: list[dict],
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: int = 0,
     ) -> LLMResponse:
         """
         带工具定义的非流式调用（L1 Bounded Loop 使用）。
@@ -257,7 +257,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
             "timeout": self.timeout,
             "tools": tools,
         }

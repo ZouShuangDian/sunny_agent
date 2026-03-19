@@ -591,6 +591,18 @@ class FeishuChatSessionMapping(Base):
         comment="是否活跃"
     )
     
+    parent_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="????????ID"
+    )
+
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="????"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
@@ -606,7 +618,7 @@ class FeishuChatSessionMapping(Base):
     
     # 索引
     __table_args__ = (
-        Index("ix_feishu_chat_session_mapping_chat_open", "chat_id", "open_id", unique=True),
+        Index("ix_feishu_chat_session_mapping_chat_open_active", "chat_id", "open_id", "is_active", "last_active_at"),
         Index("ix_feishu_chat_session_mapping_session", "session_id"),
         Index("ix_feishu_chat_session_mapping_user", "user_id"),
         Index("ix_feishu_chat_session_mapping_active", "is_active", "last_active_at"),

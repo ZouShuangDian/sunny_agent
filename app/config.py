@@ -88,6 +88,8 @@ class Settings(BaseSettings):
 
     # ── 工作记忆 ──
     WORKING_MEMORY_TTL: int = 1800  # 工作记忆 TTL（秒），默认 30min
+    FEISHU_SESSION_IDLE_ARCHIVE_HOURS: int = 24  # Feishu 归档 session
+
     WORKING_MEMORY_MAX_TURNS: int = 20  # 对话历史最大保留轮次
 
     # ── M06 输出校验 ──

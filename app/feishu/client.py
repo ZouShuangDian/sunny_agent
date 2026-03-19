@@ -290,6 +290,24 @@ class FeishuClient:
             }
         )
     
+    async def reply_message(
+        self,
+        message_id: str,
+        text: str,
+        reply_in_thread: bool = False,
+    ) -> dict:
+        """回复指定消息"""
+        content = json.dumps({"text": text})
+        return await self._request(
+            "POST",
+            f"/im/v1/messages/{message_id}/reply",
+            json_data={
+                "msg_type": "text",
+                "content": content,
+                "reply_in_thread": reply_in_thread,
+            }
+        )
+    
     async def send_post_message(
         self,
         receive_id: str,
@@ -316,6 +334,44 @@ class FeishuClient:
             }
         )
     
+    async def send_markdown_card_message(
+        self,
+        receive_id: str,
+        markdown_content: str,
+        receive_id_type: str = "open_id",
+        title: str | None = None,
+    ) -> dict:
+        """Send an interactive card whose body is a markdown element."""
+        card_json = {
+            "schema": "2.0",
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": markdown_content,
+                    }
+                ]
+            }
+        }
+        if title:
+            card_json["header"] = {
+                "title": {
+                    "content": title,
+                    "tag": "plain_text",
+                }
+            }
+
+        return await self._request(
+            "POST",
+            "/im/v1/messages",
+            params={"receive_id_type": receive_id_type},
+            json_data={
+                "receive_id": receive_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card_json),
+            },
+        )
+
     async def create_streaming_card(
         self,
         title: str = None,

@@ -27,12 +27,14 @@ from typing import Callable, List, Optional
 import structlog
 
 from app.feishu.client import FeishuClient
+from app.feishu.markdown_chunker import ChunkerConfig, MarkdownAwareChunker
+from app.feishu.markdown_sanitizer import normalize_markdown_headings
 
 logger = structlog.get_logger()
 
 # 默认配置
-DEFAULT_MIN_CHARS = 800
-DEFAULT_MAX_CHARS = 1200
+DEFAULT_MIN_CHARS = 1500
+DEFAULT_MAX_CHARS = 2400
 DEFAULT_IDLE_MS = 1000
 DEFAULT_CHUNK_SIZE = 2000
 
@@ -78,31 +80,25 @@ class BlockStreamingState:
         self.displayed_text = ""  # 已显示的文本
         self.pending_text = ""    # 待显示的文本缓冲区
         self.typewriter_task: Optional[asyncio.Task] = None  # 打字机更新任务
+        self.chunker = MarkdownAwareChunker(
+            ChunkerConfig(
+                min_chars=min_chars,
+                max_chars=max_chars,
+                idle_ms=idle_ms,
+            )
+        )
         
-    def add_text(self, text: str) -> bool:
-        """
-        添加文本到缓冲
-        
-        Returns:
-            是否应该立即flush
-        """
-        self.buffer += text
-        self.total_text += text
-        self.last_update_time = asyncio.get_event_loop().time()
-        
-        # 检查是否达到最大字符数
-        if len(self.buffer) >= self.max_chars:
-            return True
-        
-        # 检查是否达到最小字符数
-        if len(self.buffer) >= self.min_chars:
-            # 检查段落边界
-            if self.flush_on_enqueue and self.paragraph_aware:
-                if self._is_paragraph_boundary(self.buffer):
-                    return True
-        
-        return False
-    
+    def add_text(self, text: str) -> list[str]:
+        """Append text and return ready-to-send chunks."""
+        normalized_text = normalize_markdown_headings(text, max_level=4)
+        self.total_text += normalized_text
+        now_ms = int(asyncio.get_event_loop().time() * 1000)
+        self.last_update_time = now_ms / 1000
+        chunks = self.chunker.append(normalized_text, now_ms=now_ms)
+        self.buffer = self.chunker.buffer
+        self.chunks_sent += len(chunks)
+        return chunks
+
     def _is_paragraph_boundary(self, text: str) -> bool:
         """检测是否在段落边界"""
         # 段落边界模式
@@ -121,27 +117,20 @@ class BlockStreamingState:
         
         return False
     
-    def should_flush_idle(self) -> bool:
-        """检查是否应该因空闲而flush"""
-        if not self.buffer:
-            return False
-        
-        current_time = asyncio.get_event_loop().time()
-        elapsed_ms = (current_time - self.last_update_time) * 1000
-        
-        if elapsed_ms >= self.idle_ms and len(self.buffer) >= self.min_chars:
-            return True
-        
-        return False
-    
-    def get_buffer(self) -> str:
-        """获取当前缓冲内容"""
-        return self.buffer
-    
-    def clear_buffer(self):
-        """清空缓冲"""
-        self.buffer = ""
-        self.chunks_sent += 1
+    def flush_idle(self) -> list[str]:
+        """Flush one chunk after the buffer stays idle long enough."""
+        now_ms = int(asyncio.get_event_loop().time() * 1000)
+        chunks = self.chunker.flush_idle(now_ms=now_ms)
+        self.buffer = self.chunker.buffer
+        self.chunks_sent += len(chunks)
+        return chunks
+
+    def flush_final(self) -> list[str]:
+        """Flush all remaining buffered chunks."""
+        chunks = self.chunker.flush_final()
+        self.buffer = self.chunker.buffer
+        self.chunks_sent += len(chunks)
+        return chunks
 
 
 class BlockStreamingManager:
@@ -302,7 +291,7 @@ class BlockStreamingManager:
             return False, ""
         
         # Block模式: 原有逻辑
-        should_flush = state.add_text(text)
+        chunks = state.add_text(text)
         
         # 启动空闲定时器
         if not state.is_idle_timer_running:
@@ -312,15 +301,15 @@ class BlockStreamingManager:
                 self._idle_timer_task(open_id, chat_id, receive_id, receive_id_type)
             )
         
-        if should_flush:
-            buffer_text = state.get_buffer()
-            state.clear_buffer()
-            # 立即更新卡片
-            await self.update_card_content(state, buffer_text)
-            return True, buffer_text
-        
+        if chunks:
+            sent_text = ""
+            for chunk in chunks:
+                await self.update_card_content(state, chunk)
+                sent_text = chunk
+            return True, sent_text
+
         return False, ""
-    
+
     async def _typewriter_update_loop(self, state: BlockStreamingState):
         """
         打字机模式更新循环
@@ -393,19 +382,17 @@ class BlockStreamingManager:
         while True:
             await asyncio.sleep(self.idle_ms / 1000)
             
-            if state.should_flush_idle():
-                buffer_text = state.get_buffer()
-                if buffer_text:
-                    # 发送剩余内容
-                    await self.update_card_content(state, buffer_text)
-                    state.clear_buffer()
-                    logger.debug("Idle flush triggered",
-                               open_id=open_id,
-                               chat_id=chat_id)
+            idle_chunks = state.flush_idle()
+            if idle_chunks:
+                for chunk in idle_chunks:
+                    await self.update_card_content(state, chunk)
+                logger.debug("Idle flush triggered",
+                           open_id=open_id,
+                           chat_id=chat_id,
+                           chunks=len(idle_chunks))
                 break
-            
-            # 检查是否还有内容
-            if not state.buffer:
+
+            if not state.chunker.buffer:
                 break
         
         state.is_idle_timer_running = False
@@ -456,10 +443,8 @@ class BlockStreamingManager:
                     except asyncio.CancelledError:
                         pass
             else:
-                # Block模式: 原有逻辑
-                if state.buffer:
-                    await self.update_card_content(state, state.buffer)
-                    state.clear_buffer()
+                for chunk in state.flush_final():
+                    await self.update_card_content(state, chunk)
             
             # Step 2: 关闭流式模式
             # 生成 summary（截断文本用于聊天预览）
@@ -501,41 +486,23 @@ class BlockStreamingManager:
         return cleaned[:max_length - 3] + "..."
     
     def chunk_text(self, text: str) -> List[str]:
-        """
-        将长文本分块
-        
-        策略:
-        - 按段落边界分割
-        - 每块不超过chunk_size
-        - 第一块用于流式卡片，后续块用普通消息
-        """
-        if len(text) <= self.chunk_size:
-            return [text]
-        
-        chunks = []
-        current_chunk = ""
-        
-        # 按段落分割
-        paragraphs = text.split('\n\n')
-        
-        for paragraph in paragraphs:
-            # 如果当前段落加上已有内容超过限制，先保存当前块
-            if len(current_chunk) + len(paragraph) + 2 > self.chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = paragraph
-            else:
-                if current_chunk:
-                    current_chunk += '\n\n' + paragraph
-                else:
-                    current_chunk = paragraph
-        
-        # 添加最后一块
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        
-        return chunks
-    
+        """Split long text on Markdown-aware safe boundaries."""
+        normalized_text = normalize_markdown_headings(text, max_level=4)
+        if len(normalized_text) <= self.chunk_size:
+            return [normalized_text]
+
+        chunker = MarkdownAwareChunker(
+            ChunkerConfig(
+                min_chars=min(self.min_chars, self.chunk_size),
+                max_chars=self.chunk_size,
+                idle_ms=self.idle_ms,
+                hard_limit_chars=max(self.chunk_size, self.max_chars),
+            )
+        )
+        chunks = chunker.append(normalized_text, now_ms=0)
+        chunks.extend(chunker.flush_final())
+        return [chunk for chunk in chunks if chunk]
+
     async def send_message(
         self,
         receive_id: str,
@@ -566,7 +533,7 @@ class BlockStreamingManager:
                     receive_id_type=receive_id_type,
                 )
             elif msg_type == "post":
-                # 富文本消息
+                # ?????
                 post_content = {
                     "zh_cn": {
                         "title": "",
@@ -584,6 +551,12 @@ class BlockStreamingManager:
                         "content": json.dumps(post_content),
                     }
                 )
+            elif msg_type == "interactive_markdown":
+                return await self.feishu_client.send_markdown_card_message(
+                    receive_id=receive_id,
+                    markdown_content=content,
+                    receive_id_type=receive_id_type,
+                )
             else:
                 raise ValueError(f"Unsupported msg_type: {msg_type}")
         except Exception as e:
@@ -600,53 +573,26 @@ class BlockStreamingManager:
         card_id: str,
         receive_id_type: str = "open_id",
     ):
-        """
-        发送分块文本
-        
-        第一块更新到流式卡片，后续块用普通消息
-        """
+        """Send chunked final reply messages as independent markdown cards."""
         chunks = self.chunk_text(text)
-        
+
         if not chunks:
             return
-        
-        # 第一块更新到流式卡片
-        first_chunk = chunks[0]
-        try:
-            await self.feishu_client.update_streaming_card(
-                card_id=card_id,
-                element_id="streaming_content",
-                content=first_chunk,
-                sequence=1,
-            )
-        except Exception as e:
-            logger.error("Failed to update streaming card",
-                        card_id=card_id,
-                        error=str(e))
-            # 失败时发送普通消息
-            await self.send_message(
-                receive_id=receive_id,
-                content=first_chunk,
-                msg_type="text",
-                receive_id_type=receive_id_type,
-            )
-        
-        # 后续块用普通消息
-        for i, chunk in enumerate(chunks[1:], start=2):
+
+        for i, chunk in enumerate(chunks, start=1):
             try:
                 await self.send_message(
                     receive_id=receive_id,
                     content=chunk,
-                    msg_type="text",
+                    msg_type="interactive_markdown",
                     receive_id_type=receive_id_type,
                 )
-                # 小延迟避免发送过快
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error("Failed to send chunk",
                             chunk_index=i,
                             error=str(e))
-
+                raise
 
 # 全局BlockStreaming管理器实例
 _block_streaming_manager: BlockStreamingManager | None = None

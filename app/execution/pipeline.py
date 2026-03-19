@@ -33,6 +33,10 @@ from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.streaming.events import SSEEvent
 from app.feishu.project_manager import get_or_create_feishu_project, increment_project_file_count
+from app.feishu.context_budget import build_budget_snapshot, estimate_history_tokens
+from app.feishu.markdown_sanitizer import normalize_markdown_headings
+from app.feishu.session_compactor import SessionCompactor
+from app.feishu.session_mapping_service import touch_or_activate_feishu_session_mapping
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -41,6 +45,7 @@ settings = get_settings()
 _llm_client = LLMClient()
 _execution_router = ExecutionRouter(_llm_client)
 _chat_persistence = ChatPersistence(async_session)
+_session_compactor = SessionCompactor(_llm_client, _chat_persistence)
 
 # source → sub_intent 映射表
 _SOURCE_SUB_INTENT_MAP = {
@@ -48,6 +53,49 @@ _SOURCE_SUB_INTENT_MAP = {
     "cron": "cron_execution",
     "async_task": "async_task_execution",
 }
+
+def _normalize_final_reply(reply: str) -> str:
+    return normalize_markdown_headings(reply, max_level=4)
+
+
+async def _log_context_budget(session_id: str, history_messages: list[dict]) -> None:
+    try:
+        history_tokens = await estimate_history_tokens(history_messages, settings.LLM_DEFAULT_MODEL)
+        snapshot = build_budget_snapshot(history_tokens)
+        log.info(
+            "Context budget observed",
+            session_id=session_id,
+            model=settings.LLM_DEFAULT_MODEL,
+            history_tokens=snapshot["history_tokens"],
+            available_budget=snapshot["available_budget"],
+            trigger_ratio=snapshot["trigger_ratio"],
+            hard_stop_ratio=snapshot["hard_stop_ratio"],
+            would_compact=snapshot["would_compact"],
+            must_compact=snapshot["must_compact"],
+        )
+    except Exception as exc:
+        log.warning(
+            "Failed to observe context budget",
+            session_id=session_id,
+            error=str(exc),
+        )
+
+
+async def _maybe_compact_history(session_id: str, memory: WorkingMemory) -> bool:
+    result = await _session_compactor.maybe_compact_session(
+        session_id=session_id,
+        memory=memory,
+        model=settings.LLM_DEFAULT_MODEL,
+    )
+    if result.compacted:
+        log.info(
+            "History compaction applied",
+            session_id=session_id,
+            compacted_messages=result.compacted_messages,
+            kept_messages=result.kept_messages,
+            summary_message_id=result.summary_message_id,
+        )
+    return result.compacted
 
 
 # 流式事件类型
@@ -148,6 +196,10 @@ async def run_agent_pipeline(
         # -- Step 2: 构造 IntentResult --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
+        await _log_context_budget(sid, history_messages)
+        if await _maybe_compact_history(sid, memory):
+            history_messages = await context_builder.load_history_messages(sid)
+            await _log_context_budget(sid, history_messages)
 
         actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
         intent_result = IntentResult(
@@ -182,7 +234,7 @@ async def run_agent_pipeline(
             assistant_msg_id = str(_uuid.uuid4())
             assistant_msg = Message(
                 role="assistant",
-                content=exec_result.reply,
+                content=_normalize_final_reply(exec_result.reply),
                 timestamp=time.time(),
                 message_id=assistant_msg_id,
                 intent_primary="general",
@@ -199,7 +251,7 @@ async def run_agent_pipeline(
                 l3_steps=exec_result.l3_steps,
             )
 
-        return exec_result.reply, sid
+        return _normalize_final_reply(exec_result.reply), sid
 
     finally:
         reset_session_id(session_token)
@@ -312,6 +364,10 @@ async def run_agent_pipeline_streaming(
         # -- Step 2: 构造 IntentResult（与 run_agent_pipeline 完全一致） --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
+        await _log_context_budget(sid, history_messages)
+        if await _maybe_compact_history(sid, memory):
+            history_messages = await context_builder.load_history_messages(sid)
+            await _log_context_budget(sid, history_messages)
         
         intent_result = IntentResult(
             intent=IntentDetail(
@@ -399,7 +455,7 @@ async def run_agent_pipeline_streaming(
             assistant_msg_id = str(_uuid.uuid4())
             assistant_msg = Message(
                 role="assistant",
-                content=reply_text,
+                content=_normalize_final_reply(reply_text),
                 timestamp=time.time(),
                 message_id=assistant_msg_id,
                 intent_primary="general",
@@ -437,92 +493,45 @@ async def _create_or_update_feishu_session_mapping(
     chat_type: str = "p2p",
     app_id: str | None = None,
 ):
-    """
-    创建或更新飞书会话与系统会话的映射关系
-    
-    Args:
-        chat_id: 飞书会话 ID
-        open_id: 飞书用户 ID
-        session_id: 系统会话 ID
-        user_id: 系统用户 UUID（字符串）
-        chat_type: 飞书会话类型（'p2p' | 'group'）
-    """
-    from datetime import datetime
-    from sqlalchemy import select
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    """???? Feishu ???????????????"""
     from uuid import UUID
-    
-    from app.db.models.feishu import FeishuChatSessionMapping
-    
+
     async with async_session() as db:
-        # 尝试使用 PostgreSQL 的 ON CONFLICT 语法进行 upsert
-        try:
-            # 构建 INSERT 语句
-            stmt = pg_insert(FeishuChatSessionMapping).values(
-                chat_id=chat_id,
-                open_id=open_id,
-                session_id=session_id,
-                chat_type=chat_type,
-                user_id=UUID(user_id) if user_id else None,
-                message_count=1,
-                last_active_at=datetime.utcnow(),
-                is_active=True,
-            )
-            
-            # 如果冲突（chat_id + open_id 已存在），则更新
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["chat_id", "open_id"],  # 唯一索引字段
-                set_={
-                    "session_id": session_id,
-                    "last_active_at": datetime.utcnow(),
-                    "message_count": FeishuChatSessionMapping.message_count + 1,
-                    "is_active": True,
-                },
-            )
-            
-            await db.execute(stmt)
-            await db.commit()
-            
-            # 如果是私聊且有 app_id，创建/获取对应的 Project
-            if chat_type == "p2p" and app_id and user_id:
-                try:
-                    from uuid import UUID
-                    from app.feishu.project_manager import get_or_create_feishu_project
-                    
-                    # 创建或获取项目
-                    project = await get_or_create_feishu_project(
-                        db=db,
-                        app_id=app_id,
-                        user_id=UUID(user_id),
-                        company=None,  # 暂时不设置 company
-                    )
-                    
-                    log.debug("Created/retrieved Feishu project",
-                             project_id=str(project.id),
-                             project_name=project.name,
-                             chat_id=chat_id,
-                             user_id=user_id)
-                except Exception as proj_err:
-                    log.warning("Failed to create Feishu project",
-                               chat_id=chat_id,
-                               user_id=user_id,
-                               app_id=app_id,
-                               error=str(proj_err))
-                    # Project 创建失败不影响会话映射的创建
-            
-            log.debug("Feishu session mapping created/updated",
-                     chat_id=chat_id,
-                     open_id=open_id,
-                     session_id=session_id,
-                     chat_type=chat_type)
-        except Exception as e:
-            log.error("Failed to create Feishu session mapping",
-                     chat_id=chat_id,
-                     open_id=open_id,
-                     error=str(e))
-            # 回滚事务
-            await db.rollback()
-            raise
+        await touch_or_activate_feishu_session_mapping(
+            db,
+            chat_id=chat_id,
+            open_id=open_id,
+            session_id=session_id,
+            chat_type=chat_type,
+            user_id=UUID(user_id) if user_id else None,
+        )
+
+        if chat_type == "p2p" and app_id and user_id:
+            try:
+                from app.feishu.project_manager import get_or_create_feishu_project
+
+                project = await get_or_create_feishu_project(
+                    db=db,
+                    app_id=app_id,
+                    user_id=UUID(user_id),
+                    company=None,
+                )
+
+                log.debug(
+                    "Created/retrieved Feishu project",
+                    project_id=str(project.id),
+                    project_name=project.name,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                )
+            except Exception as proj_err:
+                log.warning(
+                    "Failed to create/retrieve Feishu project",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    error=str(proj_err),
+                )
+
 
 
 async def run_agent_pipeline_feishu(
@@ -616,6 +625,10 @@ async def run_agent_pipeline_feishu(
         # -- Step 2: 构造 IntentResult（与 run_agent_pipeline 完全一致） --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
+        await _log_context_budget(sid, history_messages)
+        if await _maybe_compact_history(sid, memory):
+            history_messages = await context_builder.load_history_messages(sid)
+            await _log_context_budget(sid, history_messages)
         
         log.info("Constructing IntentResult",
                 history_messages=history_messages,
@@ -653,7 +666,7 @@ async def run_agent_pipeline_feishu(
             assistant_msg_id = str(_uuid.uuid4())
             assistant_msg = Message(
                 role="assistant",
-                content=exec_result.reply,
+                content=_normalize_final_reply(exec_result.reply),
                 timestamp=time.time(),
                 message_id=assistant_msg_id,
                 intent_primary="general",
@@ -670,7 +683,7 @@ async def run_agent_pipeline_feishu(
                 l3_steps=exec_result.l3_steps,
             )
         
-        return exec_result.reply, sid
+        return _normalize_final_reply(exec_result.reply), sid
         
     finally:
         reset_session_id(session_token)
@@ -764,6 +777,10 @@ async def run_agent_pipeline_stream(
         # -- Step 2: 构造 IntentResult --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
+        await _log_context_budget(sid, history_messages)
+        if await _maybe_compact_history(sid, memory):
+            history_messages = await context_builder.load_history_messages(sid)
+            await _log_context_budget(sid, history_messages)
 
         actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
         intent_result = IntentResult(
@@ -818,7 +835,7 @@ async def run_agent_pipeline_stream(
                 _intent = actual_sub_intent or "general"
                 assistant_msg = Message(
                     role="assistant",
-                    content=reply_text,
+                    content=_normalize_final_reply(reply_text),
                     timestamp=time.time(),
                     message_id=str(_uuid.uuid4()),
                     intent_primary=_intent,
@@ -850,7 +867,7 @@ async def run_agent_pipeline_stream(
                 "event": "done",
                 "data": {
                     "session_id": sid,
-                    "reply": reply_text[:200],
+                    "reply": reply_text,
                     "message_id": assistant_msg.message_id,
                 },
             }
