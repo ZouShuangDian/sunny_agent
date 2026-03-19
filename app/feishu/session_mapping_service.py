@@ -1,9 +1,10 @@
 import uuid
+import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -23,6 +24,7 @@ async def get_or_rotate_feishu_session(
     user_id: UUID | None = None,
     source: str = "feishu",
 ) -> str:
+    await _acquire_session_mapping_lock(db, chat_id=chat_id, open_id=open_id)
     active_mapping = await _get_active_mapping(db, chat_id=chat_id, open_id=open_id)
     if active_mapping:
         chat_session = await _get_chat_session(db, active_mapping.session_id)
@@ -73,6 +75,7 @@ async def touch_or_activate_feishu_session_mapping(
     chat_type: str,
     user_id: UUID | None = None,
 ) -> None:
+    await _acquire_session_mapping_lock(db, chat_id=chat_id, open_id=open_id)
     existing = await db.execute(
         select(FeishuChatSessionMapping).where(
             FeishuChatSessionMapping.chat_id == chat_id,
@@ -108,6 +111,21 @@ async def touch_or_activate_feishu_session_mapping(
         user_id=user_id,
     )
     await db.commit()
+
+
+async def _acquire_session_mapping_lock(
+    db: AsyncSession,
+    *,
+    chat_id: str,
+    open_id: str,
+) -> None:
+    """Serialize mapping updates per chat/open pair within the current transaction."""
+    lock_key_material = f"feishu-session:{chat_id}:{open_id}".encode("utf-8")
+    lock_key = int.from_bytes(hashlib.sha256(lock_key_material).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": lock_key},
+    )
 
 
 async def _get_active_mapping(db: AsyncSession, *, chat_id: str, open_id: str) -> FeishuChatSessionMapping | None:

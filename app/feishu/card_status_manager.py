@@ -497,7 +497,10 @@ async def get_card_status_manager(
             feishu_client = await get_feishu_client(app_id) if app_id else await get_feishu_client()
         
         if not block_streaming_manager:
-            block_streaming_manager = await get_block_streaming_manager(feishu_client)
+            block_streaming_manager = await get_block_streaming_manager(
+                feishu_client,
+                app_id=app_id,
+            )
         
         _card_status_managers[key] = CardStatusManager(
             block_streaming_manager=block_streaming_manager,

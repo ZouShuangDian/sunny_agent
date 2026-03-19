@@ -595,17 +595,25 @@ class BlockStreamingManager:
                 raise
 
 # 全局BlockStreaming管理器实例
-_block_streaming_manager: BlockStreamingManager | None = None
+_block_streaming_managers: dict[str, BlockStreamingManager] = {}
 
 
 async def get_block_streaming_manager(
     feishu_client: FeishuClient = None,
     config: dict = None,
+    app_id: str | None = None,
 ) -> BlockStreamingManager:
-    """获取BlockStreamingManager单例"""
-    global _block_streaming_manager
-    if _block_streaming_manager is None:
+    """Get a BlockStreamingManager instance isolated by app_id."""
+    manager_app_id = app_id
+    if manager_app_id is None and feishu_client is not None:
+        manager_app_id = feishu_client.app_id
+    if not manager_app_id:
+        manager_app_id = "__default__"
+
+    if manager_app_id not in _block_streaming_managers:
         from app.feishu.client import get_feishu_client
-        client = feishu_client or await get_feishu_client()
-        _block_streaming_manager = BlockStreamingManager(client, config)
-    return _block_streaming_manager
+        client = feishu_client or await get_feishu_client(
+            None if manager_app_id == "__default__" else manager_app_id
+        )
+        _block_streaming_managers[manager_app_id] = BlockStreamingManager(client, config)
+    return _block_streaming_managers[manager_app_id]

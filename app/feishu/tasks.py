@@ -40,6 +40,8 @@ logger = structlog.get_logger()
 
 # 卡片显示配置
 MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
+PROCESSING_QUEUE_WARN_THRESHOLD = 20
+PROCESSING_QUEUE_WARN_INTERVAL_SECONDS = 60
 
 
 async def _send_rejected_card(
@@ -101,46 +103,48 @@ async def _process_message_internal(
     if not app_id:
         logger.warning("Message missing app_id, using default", event_id=event_id)
         app_id = settings.FEISHU_APP_ID
+
+    card_status = None
+    log_entry = None
+    processing_message_id = message_id
     
     logger.info("Processing Feishu message",
                event_id=event_id,
                message_id=message_id,
                chat_type=chat_type)
     
-    # ← 新增：创建卡片状态管理器
-    card_status = await get_card_status_manager(
-        open_id=open_id,
-        chat_id=chat_id,
-        app_id=app_id,
-    )
-    
-    # ← 新增：开始卡片会话（显示"⏳ 思考中..."）
-    receive_id = chat_id if chat_type == "group" else open_id
-    receive_id_type = "chat_id" if chat_type == "group" else "open_id"
-    
-    # ← 新增：限流检查
     try:
-        allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id, chat_id, msg_type)
-    except Exception as e:
-        logger.error("Rate limiter check failed", error=str(e), app_id=app_id, open_id=open_id)
-        allowed, reason = True, "ok"  # 限流检查失败时放行
-    
-    if not allowed:
-        # 限流触发，直接发送拒绝卡片
+        # ← 新增：创建卡片状态管理器
+        card_status = await get_card_status_manager(
+            open_id=open_id,
+            chat_id=chat_id,
+            app_id=app_id,
+        )
+
+        # ← 新增：开始卡片会话（显示"⏳ 思考中..."）
+        receive_id = chat_id if chat_type == "group" else open_id
+        receive_id_type = "chat_id" if chat_type == "group" else "open_id"
+
+        # ← 新增：限流检查
         try:
-            await _send_rejected_card(app_id, message_id, reason)
+            allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id, chat_id, msg_type)
         except Exception as e:
-            logger.warning("Failed to send rejected card", error=str(e))
-        
-        return {"status": "rejected", "error": "rate_limit_exceeded", "reason": reason}
-    
-    # 通过限流，增加 RPM 计数
-    try:
-        await rate_limiter.increment_rpm(app_id, open_id)
-    except Exception as e:
-        logger.error("Failed to increment RPM", error=str(e))
-    
-    try:
+            logger.error("Rate limiter check failed", error=str(e), app_id=app_id, open_id=open_id)
+            allowed, reason = True, "ok"  # 限流检查失败时放行
+
+        if not allowed:
+            try:
+                await _send_rejected_card(app_id, message_id, reason)
+            except Exception as e:
+                logger.warning("Failed to send rejected card", error=str(e))
+
+            return {"status": "rejected", "error": "rate_limit_exceeded", "reason": reason}
+
+        try:
+            await rate_limiter.increment_rpm(app_id, open_id)
+        except Exception as e:
+            logger.error("Failed to increment RPM", error=str(e))
+
         # 开始处理
         await rate_limiter.start_processing(app_id, open_id, message_id, chat_id)
         processing_message_id = message_id  # 保存原始消息ID，供 finally 清理限流状态
@@ -649,11 +653,12 @@ async def _process_message_internal(
                 chat_id=chat_id,
                 app_id=app_id,
             )
-        
-        log_entry.status = "failed"
-        log_entry.error_type = "processing_error"
-        log_entry.error_message = str(e)
-        await db.commit()
+
+        if log_entry is not None:
+            log_entry.status = "failed"
+            log_entry.error_type = "processing_error"
+            log_entry.error_message = str(e)
+            await db.commit()
         
         raise
     
@@ -824,87 +829,128 @@ async def message_transfer_loop():
     logger.info("Message transfer loop started",
                source_queue=FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE,
                target_queue=FeishuRedisKeys.ARQ_QUEUE)
-    
-    while True:
-        try:
-            # 使用 BRPOP 从外部队列阻塞读取消息
-            # timeout=1 秒，便于优雅退出
-            result = await redis_client.brpop(
-                FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE,
-                timeout=1
-            )
-            
-            if not result:
-                continue
-            
-            # result 是 (queue_name, message_data) 元组
-            queue_name, message_json = result
-            
-            # 解析消息
+    arq_pool = await create_pool(WorkerSettings.redis_settings)
+    last_backlog_warn_at = 0.0
+
+    try:
+        while True:
             try:
-                # 外部服务推送的是飞书原始事件格式
-                feishu_event = json.loads(message_json)
-                
-                # 转换为内部标准格式
-                message = _convert_feishu_event_to_message(feishu_event)
-                
-                event_id = message.get("event_id")
-                message_id = message.get("message_id")
-                
-                # 推送到 processing 队列（用于可靠传输）
-                await redis_client.lpush(FeishuRedisKeys.PROCESSING_QUEUE, message_json)
-                
-                # 幂等校验
-                processed_key = FeishuRedisKeys.processed(event_id, message_id)
-                already_processed = await redis_client.exists(processed_key)
-                
-                if already_processed:
-                    logger.info("Message already processed, skipping",
-                               event_id=event_id,
-                               message_id=message_id)
-                    # 从 processing 队列移除
-                    await redis_client.lrem(FeishuRedisKeys.PROCESSING_QUEUE, 0, message_json)
+                last_backlog_warn_at = await _maybe_warn_processing_backlog(last_backlog_warn_at)
+                message_json, source_queue = await _claim_next_transfer_message()
+                if not message_json:
                     continue
-                
-                # 标记为已处理（24小时TTL）
-                await redis_client.setex(processed_key, 7200, "1")
-                
-                # 入队到 ARQ
-                arq_pool = await create_pool(WorkerSettings.redis_settings)
-                await arq_pool.enqueue_job(
-                    "process_feishu_message",
-                    message,
-                    _queue_name=FeishuRedisKeys.ARQ_QUEUE,
-                )
-                await arq_pool.close()
-                
-                # 从 processing 队列移除（确认已入队）
-                await redis_client.lrem(FeishuRedisKeys.PROCESSING_QUEUE, 0, message_json)
-                
-                logger.info("Message transferred to ARQ queue",
-                           event_id=event_id,
-                           message_id=message_id)
-                
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse message JSON",
-                            error=str(e),
-                            message_preview=message_json[:200] if len(message_json) > 200 else message_json)
-                # 解析失败的消息，从 processing 队列移除（避免无限重试）
-                await redis_client.lrem(FeishuRedisKeys.PROCESSING_QUEUE, 0, message_json)
-                
+
+                try:
+                    feishu_event = json.loads(message_json)
+                    message = _convert_feishu_event_to_message(feishu_event)
+
+                    event_id = message.get("event_id")
+                    message_id = message.get("message_id")
+                    processed_key = FeishuRedisKeys.processed(event_id, message_id)
+
+                    if await redis_client.exists(processed_key):
+                        logger.info(
+                            "Message already processed, acking processing queue item",
+                            event_id=event_id,
+                            message_id=message_id,
+                            source_queue=source_queue,
+                        )
+                        await _ack_transfer_message(message_json)
+                        continue
+
+                    await arq_pool.enqueue_job(
+                        "process_feishu_message",
+                        message,
+                        _queue_name=FeishuRedisKeys.ARQ_QUEUE,
+                    )
+                    try:
+                        await redis_client.setex(processed_key, 86400, "1")
+                    except Exception as marker_err:
+                        logger.error(
+                            "Failed to write processed marker after ARQ enqueue",
+                            event_id=event_id,
+                            message_id=message_id,
+                            error=str(marker_err),
+                        )
+                    await _ack_transfer_message(message_json)
+
+                    logger.info(
+                        "Message transferred to ARQ queue",
+                        event_id=event_id,
+                        message_id=message_id,
+                        source_queue=source_queue,
+                    )
+
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        "Failed to parse message JSON",
+                        error=str(e),
+                        message_preview=message_json[:200] if len(message_json) > 200 else message_json,
+                    )
+                    await _ack_transfer_message(message_json)
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to transfer message into ARQ",
+                        error=str(e),
+                        event_id=event_id if 'event_id' in locals() else "unknown",
+                        source_queue=source_queue,
+                    )
+                    await asyncio.sleep(0.5)
+
+            except asyncio.CancelledError:
+                logger.info("Message transfer loop cancelled")
+                break
             except Exception as e:
-                logger.error("Failed to process message",
-                            error=str(e),
-                            event_id=event_id if 'event_id' in locals() else "unknown")
-                # 处理失败，保留在 processing 队列中，稍后重试
-                # 注意：这里不会无限重试，因为每次重启会清理 processing 队列
-                        
-        except asyncio.CancelledError:
-            logger.info("Message transfer loop cancelled")
-            break
-        except Exception as e:
-            logger.error("Message transfer error", error=str(e))
-            await asyncio.sleep(0.1)  # 短暂休息避免忙循环
+                logger.error("Message transfer error", error=str(e))
+                await asyncio.sleep(0.1)  # 短暂休息避免忙循环
+    finally:
+        await arq_pool.close()
+
+
+async def _claim_next_transfer_message() -> tuple[str | None, str | None]:
+    """Claim one message for transfer using processing backlog first, then atomic move from source queue."""
+    pending_message = await redis_client.lindex(FeishuRedisKeys.PROCESSING_QUEUE, -1)
+    if pending_message:
+        return pending_message, FeishuRedisKeys.PROCESSING_QUEUE
+
+    moved_message = await redis_client.brpoplpush(
+        FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE,
+        FeishuRedisKeys.PROCESSING_QUEUE,
+        timeout=1,
+    )
+    if moved_message:
+        return moved_message, FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE
+    return None, None
+
+
+async def _ack_transfer_message(message_json: str) -> None:
+    """Ack a claimed transfer message by removing it from the processing queue."""
+    await redis_client.lrem(FeishuRedisKeys.PROCESSING_QUEUE, 1, message_json)
+
+
+async def _maybe_warn_processing_backlog(last_warn_at: float) -> float:
+    """Emit a periodic warning when the processing backlog grows too large."""
+    now = time.monotonic()
+    if now - last_warn_at < PROCESSING_QUEUE_WARN_INTERVAL_SECONDS:
+        return last_warn_at
+
+    try:
+        backlog_size = await redis_client.llen(FeishuRedisKeys.PROCESSING_QUEUE)
+    except Exception as e:
+        logger.warning("Failed to inspect processing queue backlog", error=str(e))
+        return last_warn_at
+
+    if backlog_size >= PROCESSING_QUEUE_WARN_THRESHOLD:
+        logger.warning(
+            "Feishu processing backlog is growing",
+            queue=FeishuRedisKeys.PROCESSING_QUEUE,
+            backlog_size=backlog_size,
+            warn_threshold=PROCESSING_QUEUE_WARN_THRESHOLD,
+        )
+        return now
+
+    return last_warn_at
 
 
 def _convert_feishu_event_to_message(feishu_event: dict) -> dict:
