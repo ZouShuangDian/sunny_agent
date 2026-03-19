@@ -23,9 +23,9 @@ from app.memory.chat_persistence import ChatPersistence
 from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.notify import NotificationType, notify_user
-# 开发调试用 mock 模式，回放录制事件，不消耗 token
-# 上线时切回：from app.tasks.deep_research_perplexity import DeepResearchExecutor
-from app.tasks.deep_research_mock import DeepResearchExecutor
+# 开发调试用 mock 模式，回放录制事件，不消耗 token 上线时切回：
+from app.tasks.deep_research_perplexity import DeepResearchExecutor
+# from app.tasks.deep_research_mock import DeepResearchExecutor
 
 log = structlog.get_logger()
 
@@ -176,10 +176,8 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> t
     event_counter = 0
     usernumb = structlog.contextvars.get_contextvars().get("usernumb", "")
 
-    # 研究过程累积数据（从 _on_raw_event 收集，用于最终组装 blocks）
-    all_sources: list[dict] = []
-    search_round_count = 0
-    urls_fetched_count = 0
+    # 研究过程 blocks（每个阶段事件追加为一个 block，最终加上报告 block）
+    process_blocks: list[dict] = []
 
     async def push_event(data: dict) -> None:
         """Redis List（断线补偿）+ Pub/Sub（实时推送）双写"""
@@ -191,19 +189,37 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> t
         await redis_client.publish(RedisKeys.task_channel(task_id), payload)
 
     async def _on_raw_event(event: dict) -> None:
-        """推送标准化事件给前端 + 累积研究过程数据用于 blocks 组装"""
-        nonlocal search_round_count, urls_fetched_count
+        """推送标准化事件给前端 + 每个阶段事件作为独立 block 存入历史"""
         stage = event.get("stage", "")
         detail = event.get("detail", {})
 
-        # 从事件中累积数据
+        # 每个有意义的阶段都存为一个 block（writing 除外，writing 的完整内容在 research_report block 中）
         if stage == "searching":
-            search_round_count = detail.get("round", search_round_count)
+            process_blocks.append({
+                "type": "searching",
+                "thought": detail.get("thought", ""),
+                "queries": detail.get("queries", []),
+                "round": detail.get("round"),
+            })
         elif stage == "search_done":
-            all_sources.extend(detail.get("results", []))
+            process_blocks.append({
+                "type": "search_done",
+                "results": detail.get("results", []),
+                "count": detail.get("count", 0),
+                "round": detail.get("round"),
+            })
+        elif stage == "reading":
+            process_blocks.append({
+                "type": "reading",
+                "thought": detail.get("thought", ""),
+                "urls": detail.get("urls", []),
+            })
         elif stage == "read_done":
-            urls_fetched_count += detail.get("count", 0)
-            all_sources.extend(detail.get("contents", []))
+            process_blocks.append({
+                "type": "read_done",
+                "contents": detail.get("contents", []),
+                "count": detail.get("count", 0),
+            })
 
         # 推送给前端
         await push_event(event)
@@ -212,28 +228,8 @@ async def _execute_deep_research(task_id: str, session_id: str, query: str) -> t
         executor = DeepResearchExecutor()
         result = await executor.execute(query=query, on_progress=_on_raw_event)
 
-        # 组装 blocks JSON（一条 message 存多个 block）
-        blocks = [
-            {
-                "type": "text",
-                "content": "即将开始研究，预计需要 5-10 分钟，完成后会通知您。",
-            },
-            {
-                "type": "research_process",
-                "title": "已搜集和分析资料",
-                "search_rounds": search_round_count,
-                "sources_count": len(all_sources),
-                "urls_fetched": urls_fetched_count,
-                "status": "completed",
-            },
-        ]
-        # 来源列表（最多 20 个，避免存储过大）
-        if all_sources:
-            blocks.append({
-                "type": "research_sources",
-                "sources": all_sources[:20],
-            })
-        # 研究报告正文
+        # 组装最终 blocks：过程 blocks + 报告 block
+        blocks = list(process_blocks)
         blocks.append({
             "type": "research_report",
             "title": query[:100],

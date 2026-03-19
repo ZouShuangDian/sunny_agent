@@ -62,11 +62,15 @@ class Settings(BaseSettings):
     RERANK_API_KEY: str = ""
     RERANK_MODEL: str = "Bge-reranker-v2-m3"
 
-    # ── Google Gemini Deep Research ──
-    GOOGLE_API_KEY: str = ""
-
     # ── Perplexity Deep Research ──
     PERPLEXITY_API_KEY: str = ""
+
+    # ── MCP 连接器 ──
+    MCP_PLATFORM_URL: str = "https://po-api.sunnyoptical.cn"                # 公司 MCP 管理平台地址
+    MCP_PLATFORM_TOKEN: str = "syDNhE4Fnjie6QY"              # 平台鉴权 Token（mcp-token Header）
+    MCP_PLATFORM_TIMEOUT: int = 10            # 平台接口超时（秒）
+    MCP_SERVER_TIMEOUT: int = 30              # MCP Server 连接超时（秒）
+    MCP_TOOL_CALL_TIMEOUT: int = 120           # 工具调用超时（秒）
 
     # ── Sandbox Service（沙箱代码执行） ──
     SANDBOX_SERVICE_URL: str = "http://localhost:8020"  # sandbox-service HTTP 地址

@@ -15,6 +15,7 @@ from app.db.models.cron_job import CronJob
 from app.db.models.cron_execution import CronJobExecution
 from app.db.models.notification import Notification
 from app.db.models.langfuse_config import LangfuseConfig
+from app.db.models.connector import UserConnector, UserConnectorTool
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
@@ -26,4 +27,5 @@ __all__ = [
     "CronJob", "CronJobExecution",
     "Notification",
     "LangfuseConfig",
+    "UserConnector", "UserConnectorTool",
 ]

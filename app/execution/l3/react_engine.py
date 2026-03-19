@@ -237,7 +237,7 @@ class L3ReActEngine:
         """
         sid_token = set_session_id(session_id)
         try:
-            ctx = self._build_context(intent_result)
+            ctx = await self._build_context(intent_result)
             writer = LiveStepsWriter(redis=redis_client, session_id=session_id)
             return await self.run(ctx, middlewares=[
                 TodoMiddleware(),
@@ -271,7 +271,7 @@ class L3ReActEngine:
         emitter = QueueEventEmitter()
         loop_task: asyncio.Task | None = None
         try:
-            ctx = self._build_context(intent_result, event_emitter=emitter)
+            ctx = await self._build_context(intent_result, event_emitter=emitter)
             writer = LiveStepsWriter(redis=redis_client, session_id=session_id)
             middlewares: list[ReActMiddleware] = [
                 TodoMiddleware(),
@@ -342,7 +342,7 @@ class L3ReActEngine:
     #  内部辅助方法
     # ────────────────────────────────────────────────────────────────
 
-    def _build_context(
+    async def _build_context(
         self,
         intent_result: IntentResult,
         event_emitter: EventEmitter | None = None,
@@ -361,7 +361,7 @@ class L3ReActEngine:
 
         user_goal = getattr(intent_result.intent, "user_goal", None) or None
 
-        # 工具过滤：mode 配置了 allowed_tools 则仅暴露白名单
+        # 工具过滤：mode 配置了 allowed_tools 则仅暴露白名单（不加载 MCP 工具）
         mode_ctx = get_mode_context()
         if mode_ctx and mode_ctx.allowed_tools is not None:
             tool_schemas = self.tool_registry.get_schemas(mode_ctx.allowed_tools)
@@ -369,6 +369,12 @@ class L3ReActEngine:
             tool_schemas = self.tool_registry.get_all_schemas(
                 include_mode_only=mode_ctx is not None,
             )
+            # 普通对话：追加用户已启用的 MCP 连接器工具
+            from app.execution.user_context import get_user_id
+            from app.mcp.tool_loader import load_mcp_tool_schemas
+            mcp_schemas = await load_mcp_tool_schemas(get_user_id() or "")
+            if mcp_schemas:
+                tool_schemas = tool_schemas + mcp_schemas
 
         return LoopContext(
             messages=self._build_initial_messages(intent_result),
