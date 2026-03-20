@@ -19,6 +19,8 @@ prometheus-client>=0.24.1,<0.25.0
 httpx>=0.28.1,<0.29.0
 prompt-toolkit>=3.0.52,<4.0.0
 croniter>=2.0,<3.0
-google-genai>=1.67.0,<2.0.0
+greenlet>=3.0,<4.0
+langfuse>=3.0.0,<4.0.0
+cryptography>=44.0.0,<45.0.0
 # ⚠️ arq 未列入：arq 声明依赖 redis<6，与本项目 redis>=7 冲突（运行时兼容）
 # 安装方式：pip install arq --no-deps
