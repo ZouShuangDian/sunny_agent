@@ -3,10 +3,9 @@
 处理DM/群组访问策略、白名单验证等
 """
 
-import asyncio
 import json
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from typing import Optional
+from datetime import datetime
 
 import structlog
 
@@ -18,7 +17,6 @@ from app.cache.redis_client import redis_client
 from app.db.models.feishu import (
     DMPolicy,
     FeishuAccessConfig,
-    FeishuGroupConfig,
     GroupPolicy,
 )
 
@@ -175,68 +173,6 @@ class AccessController:
             return False, "请在群聊中@我"
         
         return True, ""
-    
-    async def get_group_config(
-        self,
-        db: AsyncSession,
-        chat_id: str,
-        app_id: str,
-    ) -> Optional[FeishuGroupConfig]:
-        """获取群组特定配置"""
-        result = await db.execute(
-            select(FeishuGroupConfig).where(
-                FeishuGroupConfig.chat_id == chat_id,
-                FeishuGroupConfig.is_active == True
-            )
-        )
-        return result.scalar_one_or_none()
-    
-    async def get_effective_config(
-        self,
-        db: AsyncSession,
-        app_id: str,
-        chat_id: Optional[str] = None,
-    ) -> dict:
-        """
-        获取生效的配置（合并全局配置和群组配置）
-        
-        Returns:
-            合并后的配置字典
-        """
-        base_config = await self._get_cached_config(db, app_id)
-        if not base_config:
-            return {}
-        
-        effective_config = base_config.copy()
-        
-        # 如果有群组ID，尝试合并群组配置
-        if chat_id:
-            group_config = await self.get_group_config(db, chat_id, app_id)
-            if group_config:
-                # 合并覆盖配置
-                if group_config.override_block_streaming:
-                    effective_config["block_streaming_config"].update(
-                        group_config.override_block_streaming
-                    )
-                if group_config.override_debounce:
-                    effective_config["debounce_config"].update(
-                        group_config.override_debounce
-                    )
-                if group_config.override_human_like_delay:
-                    effective_config["human_like_delay"].update(
-                        group_config.override_human_like_delay
-                    )
-        
-        return effective_config
-    
-    async def invalidate_cache(self, app_id: str):
-        """使配置缓存失效（Redis）"""
-        cache_key = self._get_cache_key(app_id)
-        try:
-            await self._redis.delete(cache_key)
-            logger.info(f"已清除访问配置缓存: {app_id}")
-        except Exception as e:
-            logger.error(f"清除访问配置缓存失败: {app_id}", error=str(e))
     
     def get_rejection_message(self, reason: str) -> str:
         """获取拒绝消息的友好提示"""

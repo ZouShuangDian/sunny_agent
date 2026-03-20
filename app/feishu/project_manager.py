@@ -111,24 +111,3 @@ async def get_or_create_feishu_project(
                app_id=app_id)
     
     return project
-
-
-async def increment_project_file_count(db: AsyncSession, project_id: uuid.UUID) -> None:
-    """
-    增加项目文件计数
-    
-    Args:
-        db: 数据库会话
-        project_id: 项目 ID
-    """
-    result = await db.execute(
-        select(Project).where(Project.id == project_id)
-    )
-    project = result.scalar_one_or_none()
-    
-    if project:
-        project.file_count += 1
-        await db.commit()
-        logger.debug("Incremented project file count",
-                    project_id=project_id,
-                    new_count=project.file_count)

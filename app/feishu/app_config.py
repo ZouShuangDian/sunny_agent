@@ -56,23 +56,6 @@ async def get_app_secret_from_db(app_id: str, db: AsyncSession) -> Optional[str]
     return None
 
 
-async def get_all_active_apps(db: AsyncSession) -> list[FeishuAccessConfig]:
-    """
-    获取所有活跃的飞书应用配置
-    
-    Args:
-        db: 数据库会话
-        
-    Returns:
-        活跃的应用配置列表
-    """
-    stmt = select(FeishuAccessConfig).where(
-        FeishuAccessConfig.is_active == True
-    )
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
-
-
 async def invalidate_app_secret_cache(app_id: str) -> None:
     """
     使应用密钥缓存失效

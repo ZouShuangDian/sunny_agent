@@ -4,7 +4,6 @@ Feishu ARQ 任务
 """
 
 import asyncio
-import json
 import time
 from datetime import datetime
 from uuid import UUID
@@ -29,9 +28,6 @@ from app.execution.pipeline import run_agent_pipeline_stream
 
 settings = get_settings()
 logger = structlog.get_logger()
-
-# 卡片显示配置
-MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
 
 
 async def _send_rejected_card(
@@ -96,6 +92,7 @@ async def _process_message_internal(
 
     log_entry = None
     processing_message_id = message_id
+    incoming_message_id = message_id
     
     logger.info("Processing Feishu message",
                event_id=event_id,
@@ -103,9 +100,6 @@ async def _process_message_internal(
                chat_type=chat_type)
     
     try:
-        # ← 新增：创建卡片状态管理器
-
-        # ← 新增：开始卡片会话（显示"⏳ 思考中..."）
         receive_id = chat_id if chat_type == "group" else open_id
         receive_id_type = "chat_id" if chat_type == "group" else "open_id"
 
@@ -118,10 +112,10 @@ async def _process_message_internal(
             now = time.monotonic()
             if text_message == last_progress_text and (now - last_progress_sent_at) < min_interval_seconds:
                 return
-            await progress_client.send_text_message(
-                receive_id=receive_id,
+            await progress_client.reply_message(
+                message_id=incoming_message_id,
                 text=text_message,
-                receive_id_type=receive_id_type,
+                reply_in_thread=False,
             )
             last_progress_text = text_message
             last_progress_sent_at = now
@@ -131,8 +125,6 @@ async def _process_message_internal(
             if len(compact) <= limit:
                 return compact
             return compact[-limit:]
-
-        # ← 新增：限流检查
         try:
             allowed, reason = await rate_limiter.check_rate_limit(app_id, open_id, message_id, chat_id, msg_type)
         except Exception as e:
@@ -446,14 +438,6 @@ async def _process_message_internal(
                 evt_data = event.get("data", {})
                 stream_activity_at = time.monotonic()
 
-                # logger.info(
-                #     "Feishu pipeline stream event",
-                #     event_id=event_id,
-                #     message_id=message_id,
-                #     session_id=session_id,
-                #     evt_type=evt_type,
-                # )
-
                 if evt_type == "delta":
                     content = evt_data.get("content", "")
                     if content:
@@ -480,15 +464,6 @@ async def _process_message_internal(
                     tool_name = evt_data.get("name", "unknown")
                     current_step = f"正在调用工具：{tool_name}"
                     await _send_progress_text(current_step)
-
-                # elif evt_type == "tool_result":
-                #     tool_name = evt_data.get("name", "unknown")
-                #     result = evt_data.get("result", {})
-                #     if isinstance(result, dict) and "error" in result:
-                #         current_step = f"工具执行失败：{tool_name}"
-                #     else:
-                #         current_step = f"工具执行完成：{tool_name}"
-                #     await _send_progress_text(current_step)
 
                 elif evt_type == "compaction_start":
                     current_step = "历史对话较长，正在整理上下文。"
@@ -609,6 +584,7 @@ async def _process_message_internal(
             receive_id_type=receive_id_type,
             open_id=open_id,
             chat_id=chat_id,
+            reply_to_message_id=incoming_message_id,
         )
         if not complete_ok:
             raise RuntimeError("Feishu final reply delivery failed")

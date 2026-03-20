@@ -34,6 +34,7 @@ class CardStatusManager:
         receive_id_type: str | None = None,
         open_id: str | None = None,
         chat_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> bool:
         if not send_as_message:
             logger.error("Unsupported final reply mode", send_as_message=send_as_message)
@@ -51,24 +52,44 @@ class CardStatusManager:
         try:
             for chunk_index, chunk in enumerate(chunks, start=1):
                 try:
-                    await self.block_streaming_manager.send_message(
-                        receive_id=active_receive_id,
-                        content=chunk,
-                        msg_type="interactive_markdown",
-                        receive_id_type=active_receive_id_type,
-                    )
+                    if reply_to_message_id:
+                        await self.feishu_client.reply_message(
+                            message_id=reply_to_message_id,
+                            msg_type="interactive",
+                            content={
+                                "schema": "2.0",
+                                "body": {
+                                    "elements": [{"tag": "markdown", "content": chunk}]
+                                },
+                            },
+                            reply_in_thread=False,
+                        )
+                    else:
+                        await self.block_streaming_manager.send_message(
+                            receive_id=active_receive_id,
+                            content=chunk,
+                            msg_type="interactive_markdown",
+                            receive_id_type=active_receive_id_type,
+                        )
                 except Exception as send_err:
                     logger.warning(
                         "Failed to send markdown final reply chunk, falling back to text",
                         chunk_index=chunk_index,
                         error=str(send_err),
                     )
-                    await self.block_streaming_manager.send_message(
-                        receive_id=active_receive_id,
-                        content=chunk,
-                        msg_type="text",
-                        receive_id_type=active_receive_id_type,
-                    )
+                    if reply_to_message_id:
+                        await self.feishu_client.reply_message(
+                            message_id=reply_to_message_id,
+                            text=chunk,
+                            reply_in_thread=False,
+                        )
+                    else:
+                        await self.block_streaming_manager.send_message(
+                            receive_id=active_receive_id,
+                            content=chunk,
+                            msg_type="text",
+                            receive_id_type=active_receive_id_type,
+                        )
                 await asyncio.sleep(0.3)
 
             logger.info(

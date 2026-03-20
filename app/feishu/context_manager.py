@@ -165,36 +165,6 @@ class MediaContextManager:
                         chat_id=chat_id,
                         error=str(e))
             return []
-    
-    async def clear_context(
-        self,
-        app_id: str,
-        open_id: str,
-        chat_id: str,
-    ) -> None:
-        """
-        清除上下文（可选，用于清理场景）
-        
-        Args:
-            app_id: 应用ID
-            open_id: 用户open_id
-            chat_id: 聊天ID
-        """
-        try:
-            key = self._get_context_key(app_id, open_id, chat_id)
-            await redis_client.delete(key)
-            
-            logger.info("Media context cleared",
-                       app_id=app_id,
-                       open_id=open_id,
-                       chat_id=chat_id)
-            
-        except Exception as e:
-            logger.error("Failed to clear media context",
-                        app_id=app_id,
-                        open_id=open_id,
-                        chat_id=chat_id,
-                        error=str(e))
 
 
 # 全局实例

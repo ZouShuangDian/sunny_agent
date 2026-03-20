@@ -37,16 +37,6 @@ MAX_FILE_SIZE = 30 * 1024 * 1024  # 30MB
 CHUNK_SIZE = 8192  # 8KB
 
 
-class MediaDownloadError(Exception):
-    """媒体下载错误"""
-    pass
-
-
-class FileTooLargeError(MediaDownloadError):
-    """文件过大错误"""
-    pass
-
-
 class MediaDownloader:
     """媒体文件下载器"""
     

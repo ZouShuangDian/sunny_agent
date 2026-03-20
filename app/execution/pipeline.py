@@ -32,7 +32,7 @@ from app.memory.chat_persistence import ChatPersistence
 from app.memory.schemas import Message
 from app.memory.working_memory import WorkingMemory
 from app.streaming.events import SSEEvent
-from app.feishu.project_manager import get_or_create_feishu_project, increment_project_file_count
+from app.feishu.project_manager import get_or_create_feishu_project
 from app.feishu.context_budget import build_budget_snapshot, estimate_history_tokens
 from app.feishu.markdown_sanitizer import normalize_markdown_headings
 from app.feishu.session_mapping_service import touch_or_activate_feishu_session_mapping

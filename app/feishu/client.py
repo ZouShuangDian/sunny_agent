@@ -293,47 +293,30 @@ class FeishuClient:
     async def reply_message(
         self,
         message_id: str,
-        text: str,
+        text: str | None = None,
         reply_in_thread: bool = False,
+        msg_type: str = "text",
+        content: str | dict | None = None,
     ) -> dict:
-        """回复指定消息"""
-        content = json.dumps({"text": text})
+        """Reply to an existing Feishu message."""
+        payload_content = content
+        if payload_content is None:
+            if msg_type != "text":
+                raise FeishuError("content is required for non-text reply messages")
+            payload_content = json.dumps({"text": text or ""})
+        elif isinstance(payload_content, dict):
+            payload_content = json.dumps(payload_content)
+
         return await self._request(
             "POST",
             f"/im/v1/messages/{message_id}/reply",
             json_data={
-                "msg_type": "text",
-                "content": content,
+                "msg_type": msg_type,
+                "content": payload_content,
                 "reply_in_thread": reply_in_thread,
             }
         )
-    
-    async def send_post_message(
-        self,
-        receive_id: str,
-        title: str,
-        content: list,
-        receive_id_type: str = "open_id",
-    ) -> dict:
-        """发送富文本消息"""
-        post_content = {
-            "zh_cn": {
-                "title": title,
-                "content": content,
-            }
-        }
-        
-        return await self._request(
-            "POST",
-            "/im/v1/messages",
-            params={"receive_id_type": receive_id_type},
-            json_data={
-                "receive_id": receive_id,
-                "msg_type": "post",
-                "content": json.dumps(post_content),
-            }
-        )
-    
+
     async def send_markdown_card_message(
         self,
         receive_id: str,
@@ -372,187 +355,6 @@ class FeishuClient:
             },
         )
 
-    async def create_streaming_card(
-        self,
-        title: str = None,
-        initial_content: str = "⏳ 思考中...",
-    ) -> dict:
-        """
-        创建流式卡片实体
-        
-        调用 POST /cardkit/v1/cards 创建卡片，返回 card_id
-        卡片配置 streaming_mode: true，显示 "[Generating...]" 预览
-        """
-        card_json = {
-            "schema": "2.0",
-            "config": {
-                "streaming_mode": True,
-                "summary": {
-                    "content": "[Generating...]"
-                },
-                "streaming_config": {
-                    "print_frequency_ms": {"default": 50},
-                    "print_step": {"default": 2},
-                    "print_strategy": "fast"
-                }
-            },
-            "body": {
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": initial_content,
-                        "element_id": "streaming_content"
-                    }
-                ]
-            }
-        }
-        
-        # 如果有标题，添加 header
-        if title:
-            card_json["header"] = {
-                "title": {
-                    "content": title,
-                    "tag": "plain_text"
-                }
-            }
-        
-        response = await self._request(
-            "POST",
-            "/cardkit/v1/cards",
-            json_data={
-                "type": "card_json",
-                "data": json.dumps(card_json)
-            }
-        )
-        
-        logger.info("Created streaming card", card_id=response.get("data", {}).get("card_id"))
-        return response
-    
-    async def send_streaming_card(
-        self,
-        receive_id: str,
-        card_id: str,
-        receive_id_type: str = "open_id",
-    ) -> dict:
-        """
-        发送流式卡片消息
-        
-        调用 POST /im/v1/messages 将卡片作为消息发送
-        """
-        content = json.dumps({
-            "type": "card",
-            "data": {"card_id": card_id}
-        })
-        
-        response = await self._request(
-            "POST",
-            "/im/v1/messages",
-            params={"receive_id_type": receive_id_type},
-            json_data={
-                "receive_id": receive_id,
-                "msg_type": "interactive",
-                "content": content
-            }
-        )
-        
-        logger.info("Sent streaming card message", 
-                   message_id=response.get("data", {}).get("message_id"))
-        return response
-    
-    async def update_streaming_card(
-        self,
-        card_id: str,
-        element_id: str,
-        content: str,
-        sequence: int = None,
-    ) -> dict:
-        """
-        更新流式卡片内容
-        
-        调用 PUT /cardkit/v1/cards/{card_id}/elements/{element_id}/content
-        sequence 参数确保更新顺序，每次更新需要递增
-        """
-        json_data = {"content": content}
-        if sequence is not None:
-            json_data["sequence"] = sequence
-            json_data["uuid"] = f"stream_{card_id}_{sequence}"
-        
-        # 添加调试日志
-        logger.debug("Updating streaming card",
-                    card_id=card_id,
-                    element_id=element_id,
-                    sequence=sequence,
-                    content_length=len(content))
-        
-        try:
-            response = await self._request(
-                "PUT",
-                f"/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
-                json_data=json_data
-            )
-            logger.debug("Updated streaming card", 
-                        card_id=card_id, 
-                        sequence=sequence,
-                        content_length=len(content))
-            return response
-        except FeishuError as e:
-            # 流式更新失败时不抛出异常，避免中断整个流程
-            logger.warning("Failed to update streaming card", 
-                          card_id=card_id,
-                          element_id=element_id,
-                          sequence=sequence,
-                          json_data=json_data,
-                          error=e.message,
-                          response=e.response)
-            raise
-    
-    async def close_streaming_card(
-        self,
-        card_id: str,
-        sequence: int = None,
-        final_summary: str = None,
-    ) -> dict:
-        """
-        关闭流式卡片
-        
-        调用 PATCH /cardkit/v1/cards/{card_id}/settings
-        设置 streaming_mode: false 并更新 summary 清除 "[Generating...]"
-        """
-        config_obj = {
-            "streaming_mode": False,
-            "summary": {"content": final_summary or ""}
-        }
-        
-        json_data = {
-            "settings": json.dumps({"config": config_obj})
-        }
-        if sequence is not None:
-            json_data["sequence"] = sequence
-            json_data["uuid"] = f"close_{card_id}_{sequence}"
-        
-        # 添加调试日志
-        logger.debug("Closing streaming card",
-                    card_id=card_id,
-                    sequence=sequence,
-                    json_data=json_data)
-        
-        try:
-            response = await self._request(
-                "PATCH",
-                f"/cardkit/v1/cards/{card_id}/settings",
-                json_data=json_data
-            )
-            logger.info("Closed streaming card", card_id=card_id)
-            return response
-        except FeishuError as e:
-            logger.error("Failed to close streaming card", 
-                        card_id=card_id,
-                        sequence=sequence,
-                        json_data=json_data,
-                        error=e.message,
-                        response=e.response)
-            raise
-    
     async def download_media(
         self,
         file_key: str,
@@ -633,73 +435,6 @@ class FeishuClient:
         # 默认：使用 key 生成文件名
         safe_key = "".join(c for c in file_key if c.isalnum() or c in "-_.")[:16]
         return f"file_{safe_key}.bin"
-    
-    async def delete_message(self, message_id: str) -> dict:
-        """
-        删除消息（撤回）
-        
-        调用 DELETE /im/v1/messages/{message_id}
-        用于删除"思考中..."等临时消息
-        """
-        try:
-            response = await self._request(
-                "DELETE",
-                f"/im/v1/messages/{message_id}",
-            )
-            logger.info("Message deleted", message_id=message_id)
-            return response
-        except FeishuError as e:
-            logger.warning("Failed to delete message", 
-                          message_id=message_id, 
-                          error=e.message)
-            # 不抛出异常，因为删除失败不应该影响主流程
-            return {"code": e.code or -1, "msg": e.message}
-    
-    async def replace_card_content(
-        self,
-        card_id: str,
-        new_content: str,
-        element_id: str = "streaming_content",
-    ) -> dict:
-        """
-        覆盖卡片内容
-        
-        将指定卡片的内容完全替换为新内容。适用于将"思考中..."替换为最终回复。
-        
-        Args:
-            card_id: 卡片ID
-            new_content: 新内容（支持Markdown格式）
-            element_id: 要更新的元素ID，默认为"streaming_content"
-        
-        Returns:
-            API响应
-        
-        Example:
-            # 将卡片内容从"思考中..."替换为"我明白了你的问题"
-            await client.replace_card_content(
-                card_id="23232",
-                new_content="我明白了你的问题"
-            )
-        """
-        try:
-            response = await self._request(
-                "PUT",
-                f"/cardkit/v1/cards/{card_id}/elements/{element_id}/content",
-                json_data={
-                    "content": new_content,
-                    "uuid": f"replace_{card_id}_{str(int(time.time()))}",
-                }
-            )
-            logger.info("Card content replaced",
-                       card_id=card_id,
-                       element_id=element_id,
-                       content_length=len(new_content))
-            return response
-        except FeishuError as e:
-            logger.error("Failed to replace card content",
-                        card_id=card_id,
-                        error=e.message)
-            raise
     
     async def close(self):
         """关闭HTTP客户端"""
