@@ -14,6 +14,7 @@ import contextlib
 import time
 import uuid
 from contextvars import Token as CtxToken
+from pathlib import Path
 
 import redis.asyncio as aioredis
 import structlog
@@ -59,6 +60,7 @@ from app.plugins.service import plugin_service
 from app.skills.service import skill_service
 from app.security.audit import audit_logger
 from app.security.auth import AuthenticatedUser, get_current_user
+from app.services.file_service import FileService
 
 router = APIRouter(prefix="/api", tags=["对话"])
 log = structlog.get_logger()
@@ -76,6 +78,7 @@ output_validator = OutputValidator(llm_client)
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None  # 首次对话不传，服务端生成
+    file_ids: list[uuid.UUID] = []
 
 
 class ChatResponse(BaseModel):
@@ -85,6 +88,36 @@ class ChatResponse(BaseModel):
 
 
 # ── 公共辅助函数 ──
+
+async def _build_file_context_messages(
+    file_ids: list[uuid.UUID],
+    user: AuthenticatedUser,
+) -> list[dict]:
+    if not file_ids:
+        return []
+
+    messages: list[dict] = []
+    total_chars = 0
+
+    async with async_session() as db:
+        file_service = FileService(db)
+        for file_id in file_ids:
+            file_record = await file_service.get_file_by_id(file_id, user=user)
+            file_path = file_service.get_file_absolute_path(file_record)
+            block = (
+                f"Attached file reference\n"
+                f"file_id: {file_record.id}\n"
+                f"file_name: {file_record.file_name}\n"
+                f"file_path: {file_path}\n"
+                f"mime_type: {file_record.mime_type}\n"
+                f"file_size: {file_record.file_size}\n"
+                f"use_tool: read_uploaded_file(file_id='{file_record.id}') when content is needed"
+            )
+            messages.append({"role": "system", "content": block})
+            total_chars += len(block)
+
+    log.info("Built file context messages", file_count=len(messages), requested_count=len(file_ids))
+    return messages
 
 async def _prune_l3_steps(session_id: str) -> None:
     """
@@ -193,6 +226,7 @@ async def _build_plugin_intent(
     session_id: str,
     memory: WorkingMemory,
     trace_id: str,
+    extra_context_messages: list[dict] | None = None,
 ) -> tuple[IntentResult, CtxToken] | tuple[None, None]:
     """
     Plugin 命令检测 + synthetic IntentResult 构造。
@@ -231,6 +265,8 @@ async def _build_plugin_intent(
     # 加载历史消息（统一使用 to_llm_messages，含 compaction 节点包装）
     context_builder = ContextBuilder(memory)
     history_messages = await context_builder.load_history_messages(session_id)
+    if extra_context_messages:
+        history_messages.extend(extra_context_messages)
 
     raw_input = user_context.strip() if user_context.strip() else f"执行 {plugin_name}:{command_name}"
     intent_result = IntentResult(
@@ -273,6 +309,7 @@ async def _build_mode_intent(
     session_id: str,
     memory: WorkingMemory,
     trace_id: str,
+    extra_context_messages: list[dict] | None = None,
 ) -> tuple[IntentResult, CtxToken]:
     """
     内置模式（/mode:xxx）intent 构造。
@@ -299,6 +336,8 @@ async def _build_mode_intent(
     # 加载历史消息
     context_builder = ContextBuilder(memory)
     history_messages = await context_builder.load_history_messages(session_id)
+    if extra_context_messages:
+        history_messages.extend(extra_context_messages)
 
     intent_result = IntentResult(
         intent=IntentDetail(
@@ -391,6 +430,8 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
+    extra_context_messages: list[dict] | None = None,
+) -> tuple[IntentResult, CtxToken | None, CtxToken | None]:
 ) -> tuple[IntentResult, CtxToken | None, CtxToken | None, CtxToken | None]:
     """
     公共意图管线，/chat 和 /chat/stream 共享。
@@ -406,7 +447,7 @@ async def _run_intent_pipeline(
         # 内置模式：/mode:deep-research
         if prefix == "mode" and command in BUILTIN_MODES:
             intent_result, mode_token = await _build_mode_intent(
-                message, command, user, session_id, memory, trace_id,
+                message, command, user, session_id, memory, trace_id
             )
             return intent_result, None, mode_token, None
 
@@ -433,7 +474,7 @@ async def _run_intent_pipeline(
 
         # Plugin 命令：/plugin-name:command-name
         intent_result, plugin_token = await _build_plugin_intent(
-            message, user, session_id, memory, trace_id,
+            message, user, session_id, memory, trace_id, extra_context_messages,
         )
         if intent_result is not None:
             return intent_result, plugin_token, None, None
@@ -443,6 +484,8 @@ async def _run_intent_pipeline(
     # 常规对话：加载历史 + 直接构造 IntentResult
     context_builder = ContextBuilder(memory)
     history_messages = await context_builder.load_history_messages(session_id)
+    if extra_context_messages:
+        history_messages.extend(extra_context_messages)
 
     intent_result = IntentResult(
         intent=IntentDetail(primary="general", user_goal=message),
@@ -500,6 +543,7 @@ async def chat(
     memory = WorkingMemory(redis)
     session_id = body.session_id or str(uuid.uuid4())
     await _init_session(session_id, user, memory, body.message)
+    file_context_messages = await _build_file_context_messages(body.file_ids, user)
 
     # ── Langfuse Trace ──
     from app.observability.langfuse_client import get_langfuse
@@ -537,7 +581,8 @@ async def chat(
         final_result, plugin_token, mode_token, skill_directive_token = await _run_intent_pipeline(
             message=body.message, user=user, session_id=session_id,
             memory=memory, redis=redis, trace_id=trace_id,
-        )
+            extra_context_messages=file_context_messages,
+    )
 
         try:
             # user 消息立即持久化（执行前，确保永不丢失）
@@ -675,6 +720,7 @@ async def chat_stream(
             memory = WorkingMemory(redis)
             session_id = body.session_id or str(uuid.uuid4())
             await _init_session(session_id, user, memory, body.message)
+            file_context_messages = await _build_file_context_messages(body.file_ids, user)
 
             # Update Langfuse trace with actual session_id if it was generated
             if langfuse_trace and not body.session_id:
@@ -692,7 +738,8 @@ async def chat_stream(
                 final_result, plugin_token, mode_token, skill_directive_token = await _run_intent_pipeline(
                     message=body.message, user=user, session_id=session_id,
                     memory=memory, redis=redis, trace_id=trace_id,
-                )
+                    extra_context_messages=file_context_messages,
+            )
 
                 session_is_running = False  # 追踪 running 状态，确保异常时清理
                 try:

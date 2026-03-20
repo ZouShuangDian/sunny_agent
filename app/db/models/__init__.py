@@ -16,6 +16,18 @@ from app.db.models.cron_execution import CronJobExecution
 from app.db.models.notification import Notification
 from app.db.models.langfuse_config import LangfuseConfig
 from app.db.models.connector import UserConnector, UserConnectorTool
+from app.db.models.feishu import (
+    DMPolicy,
+    FeishuAccessConfig,
+    FeishuChatSessionMapping,
+    FeishuGroupConfig,
+    FeishuMediaFiles,
+    FeishuMessageLogs,
+    FeishuUserBindings,
+    GroupPolicy,
+    MediaType,
+    MessageStatus,
+)
 
 __all__ = [
     "Base", "User", "Role", "AuditLog",
@@ -28,4 +40,15 @@ __all__ = [
     "Notification",
     "LangfuseConfig",
     "UserConnector", "UserConnectorTool",
+    # Feishu Models
+    "DMPolicy",
+    "GroupPolicy",
+    "MediaType",
+    "MessageStatus",
+    "FeishuAccessConfig",
+    "FeishuGroupConfig",
+    "FeishuUserBindings",
+    "FeishuMediaFiles",
+    "FeishuMessageLogs",
+    "FeishuChatSessionMapping",
 ]

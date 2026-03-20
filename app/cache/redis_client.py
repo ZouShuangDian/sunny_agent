@@ -25,7 +25,7 @@ class RedisKeys:
         """会话级工作记忆 Hash Key (TTL 30min)"""
         return f"wm:{session_id}"
 
-    # ── 限流计数器 ──
+    # ── 限流计数器（通用） ──
     @staticmethod
     def rate_limit(user_id: str, window: str) -> str:
         """滑动窗口限流计数器 (TTL 1min)"""
@@ -42,7 +42,6 @@ class RedisKeys:
     def todo(session_id: str) -> str:
         """会话级 Todo 任务列表 (TTL 7天)"""
         return f"todo:{session_id}"
-
 
     @staticmethod
     def sso_ticket_result(ticket: str) -> str:
@@ -108,6 +107,114 @@ class RedisKeys:
     def langfuse_usage_by_user(start: str, end: str) -> str:
         """Langfuse 按用户用量缓存 (TTL 5min)"""
         return f"sunny:langfuse:usage:by_user:{start}:{end}"
+
+
+class RateLimitRedisKeys:
+    """
+    限流器 Redis Key 统一管理
+    命名规范：rl:{功能类型}:{app_id}:{user_id}:{标识}
+    所有 Key 都按 app_id 隔离，确保不同机器人独立限流
+    """
+
+    # ── 并发计数 ──
+    @staticmethod
+    def concurrent(app_id: str, user_id: str, chat_id: str) -> str:
+        """
+        并发请求计数（Redis Set）
+        成员：message_id 列表
+        TTL: 300 秒（5 分钟兜底）
+        Key 格式：rl:concurrent:{app_id}:{user_id}:{chat_id}
+        """
+        return f"rl:concurrent:{app_id}:{user_id}:{chat_id}"
+
+    # ── 频率计数（滑动窗口） ──
+    @staticmethod
+    def rpm(app_id: str, user_id: str, timestamp: int) -> str:
+        """
+        每分钟请求数（Redis String + INCR）
+        窗口：基于时间戳的 1 分钟窗口
+        TTL: 60 秒
+        """
+        return f"rl:freq:{app_id}:{user_id}:{timestamp}"
+
+
+class FeishuRedisKeys:
+    """
+    飞书集成模块 Redis Key 统一管理
+    命名规范：feishu:{功能类型}:{标识}
+    """
+
+    # ── ARQ 队列 ──
+    ARQ_QUEUE = "arq:feishu:queue"
+
+    # ── Webhook 消息队列 ──
+    EXTERNAL_WEBHOOK_QUEUE = "feishu:webhook:queue"
+    PROCESSING_QUEUE = "feishu:processing:queue"
+
+    # ── Token 缓存 ──
+    @staticmethod
+    def token(app_id: str) -> str:
+        """飞书应用 Token 缓存 (TTL 7000s)"""
+        return f"feishu:token:{app_id}"
+
+    # ── 用户缓存 ──
+    @staticmethod
+    def user(app_id: str, open_id: str) -> str:
+        """飞书用户身份解析缓存 (TTL 1h)"""
+        return f"feishu:user:{app_id}:{open_id}"
+
+    # ── 幂等校验 ──
+    @staticmethod
+    def processed(event_id: str, message_id: str) -> str:
+        """消息幂等校验标记 (TTL 24h)"""
+        return f"feishu:processed:{event_id}:{message_id}"
+
+    # ── 消息防抖（Debounce） ──
+    @staticmethod
+    def debounce_buffer(open_id: str, chat_id: str) -> str:
+        """防抖消息缓冲队列"""
+        return f"feishu:buffer:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_state(open_id: str, chat_id: str) -> str:
+        """防抖状态标记"""
+        return f"feishu:state:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_timer(open_id: str, chat_id: str) -> str:
+        """防抖定时器标记"""
+        return f"feishu:timer:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_no_text(open_id: str, chat_id: str) -> str:
+        """无文本防抖标记"""
+        return f"feishu:no_text:{open_id}:{chat_id}"
+
+    @staticmethod
+    def debounce_lock(open_id: str, chat_id: str) -> str:
+        """防抖分布式锁"""
+        return f"feishu:lock:{open_id}:{chat_id}"
+
+    # ── 媒体文件下载缓存（多实例兼容） ──
+    @staticmethod
+    def media_cache(app_id: str, message_id: str) -> str:
+        """媒体文件预下载缓存 (TTL 10min)"""
+        return f"feishu:media_cache:{app_id}:{message_id}"
+
+    # ── 媒体文件上下文（历史引用） ──
+    @staticmethod
+    def media_context(app_id: str, open_id: str, chat_id: str) -> str:
+        """媒体文件上下文列表 (TTL 10min, 最多50条)"""
+        return f"feishu:media_context:{app_id}:{open_id}:{chat_id}"
+
+
+# 保持向后兼容：导出常用 key 生成函数
+token_blacklist = RedisKeys.token_blacklist
+working_memory = RedisKeys.working_memory
+rate_limit = RedisKeys.rate_limit
+feishu_token = FeishuRedisKeys.token
+feishu_user = FeishuRedisKeys.user
+feishu_processed = FeishuRedisKeys.processed
 
 settings = get_settings()
 

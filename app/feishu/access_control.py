@@ -1,0 +1,199 @@
+"""
+访问控制模块
+处理DM/群组访问策略、白名单验证等
+"""
+
+import json
+from typing import Optional
+from datetime import datetime
+
+import structlog
+
+logger = structlog.get_logger()
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.cache.redis_client import redis_client
+from app.db.models.feishu import (
+    DMPolicy,
+    FeishuAccessConfig,
+    GroupPolicy,
+)
+
+
+class AccessController:
+    """访问控制器（使用 Redis 缓存）"""
+    
+    CACHE_KEY_PREFIX = "feishu:access_config"
+    CACHE_TTL = 300  # 5分钟缓存
+    
+    def __init__(self):
+        self._redis = redis_client
+    
+    async def _load_config(
+        self, 
+        db: AsyncSession, 
+        app_id: str
+    ) -> Optional[FeishuAccessConfig]:
+        """加载访问配置"""
+        result = await db.execute(
+            select(FeishuAccessConfig).where(
+                FeishuAccessConfig.app_id == app_id,
+                FeishuAccessConfig.is_active == True
+            )
+        )
+        return result.scalar_one_or_none()
+    
+    def _get_cache_key(self, app_id: str) -> str:
+        """生成 Redis 缓存 key"""
+        return f"{self.CACHE_KEY_PREFIX}:{app_id}"
+    
+    async def _get_cached_config(
+        self, 
+        db: AsyncSession, 
+        app_id: str
+    ) -> Optional[dict]:
+        """获取缓存的配置（使用 Redis）"""
+        cache_key = self._get_cache_key(app_id)
+        
+        # 先尝试从 Redis 获取
+        try:
+            cached_data = await self._redis.get(cache_key)
+            if cached_data:
+                # 检查缓存是否过期（TTL 由 Redis 自动管理）
+                config_dict = json.loads(cached_data)
+                logger.debug("Access config loaded from Redis cache",
+                            app_id=app_id,
+                            dm_policy=config_dict.get("dm_policy"))
+                return config_dict
+        except Exception as e:
+            logger.warning("Failed to get config from Redis cache",
+                          app_id=app_id,
+                          error=str(e))
+        
+        # 缓存未命中，从数据库加载
+        config = await self._load_config(db, app_id)
+        if not config:
+            return None
+        
+        config_dict = {
+            "dm_policy": config.dm_policy,
+            "group_policy": config.group_policy,
+            "dm_allowlist": config.dm_allowlist,
+            "group_allowlist": config.group_allowlist,
+            "require_mention": config.require_mention,
+            "block_streaming_config": config.block_streaming_config,
+            "debounce_config": config.debounce_config,
+            "human_like_delay": config.human_like_delay,
+        }
+        
+        # 写入 Redis 缓存
+        try:
+            await self._redis.setex(
+                cache_key,
+                self.CACHE_TTL,
+                json.dumps(config_dict, default=str)  # 处理 datetime 等不可序列化类型
+            )
+            logger.info("Access config cached to Redis",
+                       app_id=app_id,
+                       ttl=self.CACHE_TTL)
+        except Exception as e:
+            logger.error("Failed to cache config to Redis",
+                        app_id=app_id,
+                        error=str(e))
+        
+        return config_dict
+    
+    async def check_dm_access(
+        self,
+        db: AsyncSession,
+        app_id: str,
+        employee_no: str,
+    ) -> tuple[bool, str]:
+        """
+        检查私信访问权限
+        
+        Returns:
+            (是否允许, 拒绝原因)
+        """
+        config = await self._get_cached_config(db, app_id)
+        
+        if not config:
+            return False, "未找到访问配置"
+        
+        policy = config["dm_policy"]
+        
+        if policy == DMPolicy.DISABLED.value:
+            return False, "私信功能已禁用"
+        
+        if policy == DMPolicy.OPEN.value:
+            return True, ""
+        
+        if policy == DMPolicy.ALLOWLIST.value:
+            allowlist = config.get("dm_allowlist", [])
+            if employee_no in allowlist:
+                return True, ""
+            return False, "您不在白名单中，请联系管理员添加"
+        
+        return False, "未知的访问策略"
+    
+    async def check_group_access(
+        self,
+        db: AsyncSession,
+        app_id: str,
+        chat_id: str,
+        employee_no: Optional[str] = None,
+        has_mention: bool = False,
+    ) -> tuple[bool, str]:
+        """
+        检查群组访问权限
+        
+        Returns:
+            (是否允许, 拒绝原因)
+        """
+        config = await self._get_cached_config(db, app_id)
+        
+        if not config:
+            return False, "未找到访问配置"
+        
+        policy = config["group_policy"]
+        
+        if policy == GroupPolicy.DISABLED.value:
+            return False, "群聊功能已禁用"
+        
+        # 检查群组白名单
+        if policy == GroupPolicy.ALLOWLIST.value:
+            allowlist = config.get("group_allowlist", [])
+            if chat_id not in allowlist:
+                return False, "该群组不在白名单中"
+        
+        # 检查是否需要@提及
+        require_mention = config.get("require_mention", True)
+        if require_mention and not has_mention:
+            return False, "请在群聊中@我"
+        
+        return True, ""
+    
+    def get_rejection_message(self, reason: str) -> str:
+        """获取拒绝消息的友好提示"""
+        messages = {
+            "私信功能已禁用": "❌ 私信功能当前不可用，请联系管理员开启",
+            "您不在白名单中，请联系管理员添加": "❌ 您当前没有使用权限，请联系管理员添加到白名单",
+            "群聊功能已禁用": "❌ 群聊功能当前不可用",
+            "该群组不在白名单中": "❌ 该群组未授权使用此功能",
+            "请在群聊中@我": "👋 请在消息中@我，我才能回复您哦",
+            "未找到访问配置": "⚙️ 系统配置错误，请联系管理员",
+        }
+        return messages.get(reason, f"❌ {reason}")
+
+
+# 全局访问控制器实例
+_access_controller: AccessController | None = None
+
+
+def get_access_controller() -> AccessController:
+    """获取AccessController单例"""
+    global _access_controller
+    if _access_controller is None:
+        _access_controller = AccessController()
+    return _access_controller

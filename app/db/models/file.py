@@ -68,7 +68,30 @@ class File(Base):
     
     # 关联关系
     session_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True, comment="关联会话ID"
+        String(100), nullable=True, comment="关联会话 ID"
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{_schema}.projects.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="关联项目 ID"
+    )
+    file_context: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="project", comment="上下文：project/session/session_in_project/feishu_private/feishu_group"
+    )
+    
+    # 飞书来源文件字段
+    feishu_app_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True, comment="飞书应用 ID"
+    )
+    feishu_message_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True, comment="飞书消息 ID"
+    )
+    feishu_file_key: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="飞书文件 key"
+    )
+    feishu_chat_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="聊天类型：p2p/group"
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -90,6 +113,11 @@ class File(Base):
     # 反向关联
     uploader: Mapped["User"] = relationship("User", back_populates="files")
     project: Mapped["Project"] = relationship("Project", back_populates="files")
+    feishu_media: Mapped[list["FeishuMediaFiles"]] = relationship(
+        "FeishuMediaFiles", 
+        back_populates="file_record",
+        foreign_keys="FeishuMediaFiles.file_id"
+    )
 
     # 索引
     __table_args__ = (
@@ -99,5 +127,7 @@ class File(Base):
         Index("ix_files_uploaded_by", "uploaded_by"),
         Index("ix_files_context", "file_context"),
         Index("ix_files_project_session", "project_id", "session_id"),
+        Index("ix_files_feishu_message", "feishu_message_id"),
+        Index("ix_files_feishu_app_chat", "feishu_app_id", "feishu_chat_type", "feishu_message_id"),
         {"schema": _schema},
     )
