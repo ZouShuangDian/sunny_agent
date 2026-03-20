@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SunnyAgent - Document Preview Prototype</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f8fafc;
+      color: #1e293b;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ============ Layout ============ */
+    .app-layout {
+      display: flex;
+      height: 100vh;
+      position: relative;
+    }
+
+    /* ============ Sidebar ============ */
+    .sidebar {
+      width: 260px;
+      background: #fff;
+      border-right: 1px solid #e2e8f0;
+      padding: 16px;
+      flex-shrink: 0;
+    }
+    .sidebar-logo {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1e293b;
+      padding: 8px 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sidebar-logo svg { color: #3b82f6; }
+    .sidebar-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #475569;
+      cursor: pointer;
+      margin-bottom: 4px;
+      transition: background 0.2s;
+    }
+    .sidebar-item:hover { background: #f1f5f9; }
+    .sidebar-item.active { background: #eff6ff; color: #3b82f6; font-weight: 500; }
+
+    /* ============ Chat Area ============ */
+    .chat-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      transition: margin-left 0.3s ease;
+    }
+
+    .chat-header {
+      height: 52px;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      font-size: 15px;
+      font-weight: 500;
+      color: #1e293b;
+      background: #fff;
+      flex-shrink: 0;
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+    }
+
+    /* ============ Message Bubble ============ */
+    .message-bubble {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .message-bubble.user-bubble {
+      flex-direction: row-reverse;
+    }
+    .message-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      border: 1px solid #e2e8f0;
+      background: #f8fafc;
+      color: #64748b;
+    }
+    .user-bubble .message-avatar {
+      background: #eff6ff;
+      color: #3b82f6;
+      border-color: #3b82f6;
+    }
+    .message-body {
+      flex: 1;
+      min-width: 0;
+      line-height: 1.6;
+      font-size: 14px;
+      color: #334155;
+    }
+    .user-bubble .message-body {
+      text-align: right;
+    }
+
+    /* ============ Tool Call Card (present-files style) ============ */
+    .tool-call-card {
+      background: #f1f5f9;
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 10px;
+    }
+    .tool-call-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .tool-call-header svg { color: #10b981; }
+    .tool-call-header span { font-weight: 500; color: #1e293b; font-size: 14px; }
+
+    /* ============ File Card ============ */
+    .file-card {
+      display: flex;
+      align-items: center;
+      padding: 12px;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+      color: inherit;
+      margin-bottom: 8px;
+    }
+    .file-card:last-child { margin-bottom: 0; }
+    .file-card:hover {
+      border-color: #10b981;
+      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.1);
+    }
+    .file-card-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .file-card-icon.md { background: #f0fdf4; color: #10b981; }
+    .file-card-icon.pdf { background: #fef2f2; color: #ef4444; }
+    .file-card-icon.docx { background: #eff6ff; color: #3b82f6; }
+    .file-card-icon.xlsx { background: #f0fdf4; color: #059669; }
+
+    .file-card-info { flex: 1; min-width: 0; }
+    .file-card-name {
+      font-size: 14px;
+      font-weight: 500;
+      color: #1e293b;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .file-card-meta {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 2px;
+    }
+    .file-card-action {
+      color: #94a3b8;
+      transition: color 0.2s;
+    }
+    .file-card:hover .file-card-action { color: #10b981; }
+
+    /* ============ Chat Input ============ */
+    .chat-input-wrapper {
+      padding: 16px 20px 20px;
+      background: #fff;
+      border-top: 1px solid #e2e8f0;
+    }
+    .chat-input {
+      display: flex;
+      align-items: center;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 10px 16px;
+      gap: 10px;
+    }
+    .chat-input input {
+      flex: 1;
+      border: none;
+      background: none;
+      outline: none;
+      font-size: 14px;
+      color: #1e293b;
+    }
+    .chat-input input::placeholder { color: #94a3b8; }
+    .chat-input button {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: none;
+      background: #3b82f6;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+    }
+    .chat-input button:hover { background: #2563eb; }
+
+    /* ============ Preview Panel (Drawer) ============ */
+    .preview-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 100;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .preview-overlay.active {
+      pointer-events: auto;
+      opacity: 1;
+    }
+
+    .preview-panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 60%;
+      height: 100vh;
+      background: #fff;
+      box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08);
+      z-index: 101;
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+      display: flex;
+      flex-direction: column;
+    }
+    .preview-panel.active {
+      transform: translateX(0);
+    }
+
+    .preview-header {
+      height: 56px;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid #e2e8f0;
+      flex-shrink: 0;
+      gap: 12px;
+    }
+    .preview-header-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .preview-header-info { flex: 1; min-width: 0; }
+    .preview-header-name {
+      font-size: 15px;
+      font-weight: 600;
+      color: #1e293b;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .preview-header-type {
+      font-size: 11px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .preview-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      position: relative;
+    }
+    .preview-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #64748b;
+      transition: all 0.2s;
+    }
+    .preview-btn:hover {
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+
+    /* Download Dropdown */
+    .download-dropdown {
+      position: absolute;
+      top: 44px;
+      right: 0;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+      min-width: 180px;
+      padding: 6px;
+      z-index: 10;
+      display: none;
+    }
+    .download-dropdown.show { display: block; }
+    .download-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #334155;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .download-option:hover { background: #f1f5f9; }
+    .download-option svg { color: #64748b; flex-shrink: 0; }
+
+    /* Preview Content */
+    .preview-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 32px;
+    }
+
+    /* ============ Markdown Preview Content ============ */
+    .md-preview h1 { font-size: 24px; font-weight: 700; color: #0f172a; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; }
+    .md-preview h2 { font-size: 18px; font-weight: 600; color: #1e293b; margin: 24px 0 12px; }
+    .md-preview p { margin-bottom: 12px; line-height: 1.7; color: #334155; }
+    .md-preview ul, .md-preview ol { padding-left: 24px; margin-bottom: 12px; }
+    .md-preview li { margin-bottom: 6px; line-height: 1.6; color: #334155; }
+    .md-preview table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+    .md-preview th { background: #3b82f6; color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
+    .md-preview td { padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #334155; }
+    .md-preview tr:hover td { background: #f8fafc; }
+    .md-preview hr { border: none; border-top: 1px solid #e2e8f0; margin: 20px 0; }
+    .md-preview strong { color: #0f172a; }
+
+    /* ============ Excel Preview ============ */
+    .excel-tabs {
+      display: flex;
+      gap: 2px;
+      margin-bottom: 16px;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    .excel-tab {
+      padding: 8px 16px;
+      font-size: 13px;
+      color: #64748b;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+    .excel-tab:hover { color: #1e293b; }
+    .excel-tab.active { color: #059669; border-bottom-color: #059669; font-weight: 500; }
+
+    .excel-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .excel-table th {
+      background: #f8fafc;
+      color: #475569;
+      padding: 8px 12px;
+      text-align: left;
+      font-weight: 600;
+      border: 1px solid #e2e8f0;
+      position: sticky;
+      top: 0;
+    }
+    .excel-table td {
+      padding: 8px 12px;
+      border: 1px solid #e2e8f0;
+      color: #334155;
+    }
+    .excel-table tr:hover td { background: #f0fdf4; }
+
+    /* ============ PDF Preview ============ */
+    .pdf-preview {
+      background: #64748b;
+      border-radius: 8px;
+      padding: 20px;
+      min-height: 600px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+    .pdf-page {
+      background: #fff;
+      width: 100%;
+      max-width: 595px;
+      min-height: 842px;
+      border-radius: 2px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+      padding: 48px 56px;
+    }
+    .pdf-page h2 { font-size: 20px; color: #0f172a; margin-bottom: 16px; }
+    .pdf-page p { font-size: 13px; line-height: 1.8; color: #334155; margin-bottom: 10px; }
+
+    /* ============ DOCX Preview ============ */
+    .docx-preview {
+      max-width: 680px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 56px 64px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+      min-height: 800px;
+    }
+    .docx-preview h1 { font-size: 22px; color: #0f172a; margin-bottom: 20px; text-align: center; }
+    .docx-preview h2 { font-size: 16px; color: #1e293b; margin: 20px 0 10px; font-weight: 600; }
+    .docx-preview p { font-size: 14px; line-height: 1.8; color: #334155; margin-bottom: 10px; text-indent: 2em; }
+    .docx-preview table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    .docx-preview th { background: #3b82f6; color: #fff; padding: 8px 12px; font-size: 13px; }
+    .docx-preview td { padding: 8px 12px; border: 1px solid #d1d5db; font-size: 13px; }
+
+    /* ============ Demo Controls ============ */
+    .demo-controls {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      gap: 8px;
+      z-index: 200;
+    }
+    .demo-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      font-size: 12px;
+      color: #475569;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .demo-btn:hover { background: #f1f5f9; }
+    .demo-btn.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .preview-panel, .preview-overlay { transition: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m8 12 2 2 4-4"/></svg>
+      SunnyAgent
+    </div>
+    <div class="sidebar-item active">总结今日工作日报</div>
+    <div class="sidebar-item">客诉数据分析</div>
+    <div class="sidebar-item">供应商质量报告</div>
+  </div>
+
+  <!-- Chat Area -->
+  <div class="chat-area" id="chatArea">
+    <div class="chat-header">总结今日工作日报</div>
+
+    <div class="chat-messages">
+      <!-- User message -->
+      <div class="message-bubble user-bubble">
+        <div class="message-avatar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <div class="message-body">帮我总结今天的工作日报，生成 Word 文档</div>
+      </div>
+
+      <!-- Assistant message -->
+      <div class="message-bubble">
+        <div class="message-avatar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></svg>
+        </div>
+        <div class="message-body">
+          <p>日报已生成完毕！根据你今天工作目录中的文件，我整理了以下内容：</p>
+          <p><strong>今日工作概要：</strong></p>
+          <p>1. 股票策略推荐技能开发 — 完成了 strategy-recommend 技能文档</p>
+          <p>2. 活动查询结果备档 — 整理了1月31日活动的查询信息</p>
+
+          <!-- Tool Call: Present Files -->
+          <div class="tool-call-card">
+            <div class="tool-call-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              <span>文件展示</span>
+            </div>
+
+            <!-- File cards - clickable for preview -->
+            <div class="file-card" onclick="openPreview('docx')">
+              <div class="file-card-icon docx">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <div class="file-card-info">
+                <div class="file-card-name">工作日报 2026 03 20.docx</div>
+                <div class="file-card-meta">Document &middot; DOCX</div>
+              </div>
+              <div class="file-card-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              </div>
+            </div>
+
+            <div class="file-card" onclick="openPreview('pdf')">
+              <div class="file-card-icon pdf">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <div class="file-card-info">
+                <div class="file-card-name">查询结果导出 20260128.pdf</div>
+                <div class="file-card-meta">Document &middot; PDF</div>
+              </div>
+              <div class="file-card-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              </div>
+            </div>
+
+            <div class="file-card" onclick="openPreview('xlsx')">
+              <div class="file-card-icon xlsx">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <div class="file-card-info">
+                <div class="file-card-name">客诉数据统计.xlsx</div>
+                <div class="file-card-meta">Spreadsheet &middot; XLSX</div>
+              </div>
+              <div class="file-card-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              </div>
+            </div>
+
+            <div class="file-card" onclick="openPreview('md')">
+              <div class="file-card-icon md">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </div>
+              <div class="file-card-info">
+                <div class="file-card-name">技术方案.md</div>
+                <div class="file-card-meta">Document &middot; Markdown</div>
+              </div>
+              <div class="file-card-action">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat Input -->
+    <div class="chat-input-wrapper">
+      <div class="chat-input">
+        <input type="text" placeholder="Reply..." />
+        <button aria-label="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preview Panel Overlay -->
+  <div class="preview-overlay" id="previewOverlay" onclick="closePreview()"></div>
+
+  <!-- Preview Panel -->
+  <div class="preview-panel" id="previewPanel">
+    <div class="preview-header">
+      <div class="preview-header-icon" id="previewIcon"></div>
+      <div class="preview-header-info">
+        <div class="preview-header-name" id="previewName">文件名</div>
+        <div class="preview-header-type" id="previewType">类型</div>
+      </div>
+      <div class="preview-actions">
+        <div class="preview-btn" onclick="toggleDownload()" aria-label="Download" style="position:relative;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <!-- Download Dropdown -->
+          <div class="download-dropdown" id="downloadDropdown">
+            <div class="download-option" id="dlOption1">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span>下载原始文件</span>
+            </div>
+            <div class="download-option" onclick="event.stopPropagation()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span>导出为 PDF</span>
+            </div>
+          </div>
+        </div>
+        <div class="preview-btn" onclick="closePreview()" aria-label="Close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </div>
+      </div>
+    </div>
+    <div class="preview-content" id="previewContent"></div>
+  </div>
+</div>
+
+<!-- Demo Controls -->
+<div class="demo-controls">
+  <div class="demo-btn" onclick="openPreview('md')">MD</div>
+  <div class="demo-btn" onclick="openPreview('pdf')">PDF</div>
+  <div class="demo-btn" onclick="openPreview('docx')">DOCX</div>
+  <div class="demo-btn" onclick="openPreview('xlsx')">XLSX</div>
+  <div class="demo-btn" onclick="closePreview()">Close</div>
+</div>
+
+<script>
+const previewData = {
+  md: {
+    name: '技术方案.md',
+    type: 'Markdown',
+    iconBg: '#f0fdf4',
+    iconColor: '#10b981',
+    content: `<div class="md-preview">
+      <h1>ADX 指标策略推荐技能文档</h1>
+      <h2>一、功能概述</h2>
+      <p>基于 ADX (Average Directional Index) 指标判断股票适合趋势交易还是震荡交易，支持股票代码和 CSV 两种输入方式。</p>
+      <h2>二、分档规则</h2>
+      <table>
+        <tr><th>条件</th><th>判定</th><th>建议策略</th></tr>
+        <tr><td>ADX &gt; 25</td><td>趋势明确</td><td>趋势跟踪策略</td></tr>
+        <tr><td>15 &lt; ADX &le; 25</td><td>灰色地带</td><td>观望或轻仓</td></tr>
+        <tr><td>ADX &le; 15</td><td>震荡市</td><td>震荡策略（网格/均值回归）</td></tr>
+      </table>
+      <h2>三、技术栈</h2>
+      <ul>
+        <li>Python + talib + pandas + numpy</li>
+        <li>xtquant (MiniQMT) 行情接口</li>
+        <li>支持实时和历史数据分析</li>
+      </ul>
+      <hr>
+      <p><strong>当前状态：</strong>已完成技能文档编写，包含参数说明、执行流程、触发示例及输出格式。</p>
+    </div>`
+  },
+  pdf: {
+    name: '查询结果导出 20260128.pdf',
+    type: 'PDF',
+    iconBg: '#fef2f2',
+    iconColor: '#ef4444',
+    content: `<div class="pdf-preview">
+      <div class="pdf-page">
+        <h2 style="text-align:center;border-bottom:2px solid #1e293b;padding-bottom:12px;">活动查询结果备档</h2>
+        <p style="text-align:center;color:#64748b;font-size:12px;margin-bottom:24px;">生成日期：2026年1月28日</p>
+        <p><strong>活动名称：</strong>五年级活动信息查询结果导出</p>
+        <p><strong>活动时间：</strong>1月31日 10:30-12:00</p>
+        <p><strong>活动地点：</strong>杭州市钱塘区11号大街469号2幢北方云考试中心（402教室）</p>
+        <p><strong>座位号：</strong>312</p>
+        <hr style="margin:20px 0;">
+        <p>备注：五年级活动，座位号312，已完成信息导出备档。以上信息来源于官方查询系统，数据截止至查询当日。</p>
+      </div>
+    </div>`
+  },
+  docx: {
+    name: '工作日报 2026 03 20.docx',
+    type: 'DOCX',
+    iconBg: '#eff6ff',
+    iconColor: '#3b82f6',
+    content: `<div class="docx-preview">
+      <h1>工作日报</h1>
+      <p style="text-align:center;text-indent:0;color:#64748b;font-size:13px;">日期：2026年3月20日（周五）&emsp;报告人：Stephen</p>
+      <hr style="margin:16px 0;">
+      <h2 style="color:#ef4444;">一、今日完成的工作</h2>
+      <p><strong>1. 股票策略推荐技能开发（SKILL.md）</strong></p>
+      <table>
+        <tr><th style="width:30%">项目</th><th>详细内容</th></tr>
+        <tr><td>技能名称</td><td>strategy-recommend（策略推荐）</td></tr>
+        <tr><td>功能说明</td><td>基于 ADX 指标判断股票适合趋势交易还是震荡交易</td></tr>
+        <tr><td>技术栈</td><td>Python + talib + pandas + numpy + xtquant (MiniQMT)</td></tr>
+        <tr><td>当前状态</td><td>已完成技能文档编写</td></tr>
+      </table>
+      <p><strong>2. 活动查询结果备档</strong></p>
+      <table>
+        <tr><th style="width:30%">项目</th><th>详细内容</th></tr>
+        <tr><td>文件名称</td><td>查询结果导出 20260128.pdf</td></tr>
+        <tr><td>活动时间</td><td>1月31日 10:30-12:00</td></tr>
+        <tr><td>活动地点</td><td>杭州市钱塘区（402教室）</td></tr>
+      </table>
+      <h2 style="color:#ef4444;">二、工作要点总结</h2>
+      <p>完成了股票策略推荐技能的文档编写，技能基于 ADX 指标对股票进行趋势/震荡分类判断，支持股票代码和 CSV 文件两种输入方式。</p>
+      <p>整理并归档了1月31日活动的查询结果，确认了活动时间、地点、教室及座位信息。</p>
+    </div>`
+  },
+  xlsx: {
+    name: '客诉数据统计.xlsx',
+    type: 'XLSX',
+    iconBg: '#f0fdf4',
+    iconColor: '#059669',
+    content: `<div>
+      <div class="excel-tabs">
+        <div class="excel-tab active" onclick="switchTab(this)">按客户统计</div>
+        <div class="excel-tab" onclick="switchTab(this)">按供应商统计</div>
+        <div class="excel-tab" onclick="switchTab(this)">月度趋势</div>
+      </div>
+      <table class="excel-table">
+        <thead>
+          <tr><th>排名</th><th>客户名称</th><th>客诉数量</th><th>占比</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>小米汽车科技有限公司</td><td>358</td><td>32.1%</td></tr>
+          <tr><td>2</td><td>肇庆小鹏新能源投资有限公司</td><td>226</td><td>20.3%</td></tr>
+          <tr><td>3</td><td>上海蔚来汽车有限公司</td><td>189</td><td>17.0%</td></tr>
+          <tr><td>4</td><td>采埃孚汽车科技（上海）有限公司</td><td>48</td><td>4.3%</td></tr>
+          <tr><td>5</td><td>肇庆小鹏新能源投资有限公司广州分公司</td><td>44</td><td>3.9%</td></tr>
+          <tr><td>6</td><td>比亚迪精密制造有限公司</td><td>40</td><td>3.6%</td></tr>
+          <tr><td>7</td><td>极氪汽车（宁波杭州湾新区）有限公司</td><td>38</td><td>3.4%</td></tr>
+          <tr><td>8</td><td>北京理想汽车有限公司常州分公司</td><td>27</td><td>2.4%</td></tr>
+          <tr><td>9</td><td>小鹏汽车华中（武汉）有限公司</td><td>21</td><td>1.9%</td></tr>
+          <tr><td>10</td><td>上海理想汽车科技有限公司</td><td>16</td><td>1.4%</td></tr>
+        </tbody>
+      </table>
+    </div>`
+  }
+};
+
+function openPreview(type) {
+  const data = previewData[type];
+  if (!data) return;
+
+  document.getElementById('previewName').textContent = data.name;
+  document.getElementById('previewType').textContent = data.type;
+  document.getElementById('previewContent').innerHTML = data.content;
+
+  const icon = document.getElementById('previewIcon');
+  icon.style.background = data.iconBg;
+  icon.style.color = data.iconColor;
+  icon.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+  document.getElementById('previewPanel').classList.add('active');
+  document.getElementById('previewOverlay').classList.add('active');
+  document.getElementById('downloadDropdown').classList.remove('show');
+}
+
+function closePreview() {
+  document.getElementById('previewPanel').classList.remove('active');
+  document.getElementById('previewOverlay').classList.remove('active');
+  document.getElementById('downloadDropdown').classList.remove('show');
+}
+
+function toggleDownload() {
+  event.stopPropagation();
+  document.getElementById('downloadDropdown').classList.toggle('show');
+}
+
+function switchTab(el) {
+  el.parentElement.querySelectorAll('.excel-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.preview-actions')) {
+    document.getElementById('downloadDropdown').classList.remove('show');
+  }
+});
+</script>
+
+</body>
+</html>
