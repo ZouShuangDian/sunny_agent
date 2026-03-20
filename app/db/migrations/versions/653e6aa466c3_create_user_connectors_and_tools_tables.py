@@ -31,6 +31,7 @@ def upgrade() -> None:
         sa.Column('connector_name', sa.String(128), nullable=False, comment='展示名称'),
         sa.Column('connector_desc', sa.Text, nullable=True, comment='描述'),
         sa.Column('classify', sa.String(64), nullable=True, comment='分类'),
+        sa.Column('connector_code', sa.String(128), nullable=True, comment='MCP 平台 code'),
         sa.Column('mcp_url', sa.Text, nullable=False, comment='MCP Server 地址'),
         sa.Column('mcp_env', sa.String(8), server_default='2', comment='环境：1=测试 2=生产'),
         sa.Column('tool_prefix', sa.String(32), nullable=False, comment='工具名前缀'),
