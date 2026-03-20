@@ -27,7 +27,7 @@ _CUSTOM_MCP_SERVICES: list[dict] = [
         "urlList": [
             {
                 "env": "2",
-                "url": "https://mcp.api-inference.modelscope.net/1d4ddc316dde48/mcp",
+                "url": "https://mcp.api-inference.modelscope.net/18d9732d0a3d46/mcp",
                 "authType": "NONE",
                 "apiState": "1",
             }
@@ -87,29 +87,18 @@ async def fetch_available_connectors(usernumb: str) -> list[dict]:
     return infos
 
 
-def generate_tool_prefix(classify: str | None, code: str | None, existing_prefixes: set[str]) -> str:
+def generate_tool_prefix(classify: str | None, existing_prefixes: set[str]) -> str:
     """根据 classify 生成工具名前缀
 
     规则：
     1. classify（如 MCP_GX_FOUR）→ 去 MCP_ 前缀 → 转小写 → gx_four
-    2. classify 为空则取 code 前 8 位转小写
+    2. classify 为空则用 "mcp"
     3. 与已有前缀冲突则追加数字后缀
-
-    Args:
-        classify: 连接器分类
-        code: 连接器编码
-        existing_prefixes: 当前用户已有的前缀集合
-
-    Returns:
-        生成的前缀
     """
-    # 生成基础前缀
     if classify:
         prefix = classify.lower()
         if prefix.startswith("mcp_"):
             prefix = prefix[4:]
-    elif code:
-        prefix = code[:8].lower()
     else:
         prefix = "mcp"
 

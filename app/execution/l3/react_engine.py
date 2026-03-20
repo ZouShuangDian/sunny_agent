@@ -371,7 +371,7 @@ class L3ReActEngine:
             )
             # 普通对话：追加用户已启用的 MCP 连接器工具
             from app.execution.user_context import get_user_id
-            from app.mcp.tool_loader import load_mcp_tool_schemas
+            from app.connector.tool_loader import load_mcp_tool_schemas
             mcp_schemas = await load_mcp_tool_schemas(get_user_id() or "")
             if mcp_schemas:
                 tool_schemas = tool_schemas + mcp_schemas

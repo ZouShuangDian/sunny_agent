@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.response import ok
 from app.db.engine import get_db
 from app.db.models.connector import UserConnector, UserConnectorTool
-from app.mcp.client import MCPClient, MCPError
-from app.mcp.platform import fetch_available_connectors, generate_tool_prefix
+from app.connector.client import MCPClient, MCPError
+from app.connector.platform import fetch_available_connectors, generate_tool_prefix
 from app.security.auth import AuthenticatedUser, get_current_user
 
 router = APIRouter(prefix="/api/connectors", tags=["MCP 连接器"])
@@ -33,7 +33,6 @@ class AddConnectorRequest(BaseModel):
     connector_id: str = Field(..., description="MCP 平台连接器 ID")
     connector_name: str = Field(..., description="展示名称")
     connector_desc: str | None = Field(None, description="描述")
-    connector_code: str | None = Field(None, description="MCP 平台 code")
     classify: str | None = Field(None, description="分类")
     mcp_url: str = Field(..., description="MCP Server URL")
     env: str = Field("2", description="环境选择：1=测试 2=生产")
@@ -124,13 +123,12 @@ async def add_connector(
         select(UserConnector.tool_prefix).where(UserConnector.usernumb == user.usernumb)
     )
     existing_prefixes = {row[0] for row in existing_prefixes_result.all()}
-    prefix = generate_tool_prefix(body.classify, body.connector_code, existing_prefixes)
+    prefix = generate_tool_prefix(body.classify, existing_prefixes)
 
     # 写入 user_connectors（字段直接从前端传入，不回查平台）
     connector = UserConnector(
         usernumb=user.usernumb,
         connector_id=body.connector_id,
-        connector_code=body.connector_code,
         connector_name=body.connector_name,
         connector_desc=body.connector_desc,
         classify=body.classify,

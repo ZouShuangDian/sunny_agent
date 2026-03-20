@@ -28,7 +28,6 @@ def upgrade() -> None:
         sa.Column('id', UUID(as_uuid=True), primary_key=True),
         sa.Column('usernumb', sa.String(32), nullable=False, comment='用户工号'),
         sa.Column('connector_id', sa.String(128), nullable=False, comment='MCP 平台 ID'),
-        sa.Column('connector_code', sa.String(128), nullable=True, comment='MCP 平台 code'),
         sa.Column('connector_name', sa.String(128), nullable=False, comment='展示名称'),
         sa.Column('connector_desc', sa.Text, nullable=True, comment='描述'),
         sa.Column('classify', sa.String(64), nullable=True, comment='分类'),

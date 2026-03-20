@@ -117,7 +117,7 @@ class ToolRegistry:
         from app.db.engine import async_session
         from app.db.models.connector import UserConnector
         from app.execution.user_context import get_user_id
-        from app.mcp.client import MCPClient
+        from app.connector.client import MCPClient
         from sqlalchemy import select
 
         prefix, _, tool_name = full_name.partition("__")

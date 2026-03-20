@@ -92,9 +92,6 @@ async def lifespan(application: FastAPI):
     # 关闭数据库连接池
     await engine.dispose()
     # 关闭 Redis 连接池
-    # 关闭 MCP 共享 httpx 连接
-    from app.mcp.client import close_mcp_client
-    await close_mcp_client()
     await redis_client.aclose()
     log.info("应用关闭，资源已释放")
 

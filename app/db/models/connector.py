@@ -36,9 +36,6 @@ class UserConnector(Base):
     connector_id: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="MCP 平台 ID",
     )
-    connector_code: Mapped[str | None] = mapped_column(
-        String(128), comment="MCP 平台 code",
-    )
     connector_name: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="展示名称",
     )
