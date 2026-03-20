@@ -101,6 +101,21 @@ class PresentFilesTool(BaseTool):
             filename = os.path.basename(normalized)
             # 将容器内路径转换为宿主机相对路径（去掉 /mnt/ 前缀）
             relative = normalized.removeprefix("/mnt/")
+
+            # 校验文件在宿主机上是否存在（防止生成无效下载链接）
+            host_path = Path(settings.SANDBOX_HOST_VOLUME) / relative
+            if not host_path.exists():
+                log.warning(
+                    "present_files 文件不存在",
+                    container_path=path,
+                    host_path=str(host_path),
+                    sandbox_host_volume=settings.SANDBOX_HOST_VOLUME,
+                )
+                return ToolResult.fail(
+                    f"文件不存在：{path}（宿主机路径 {host_path} 未找到，"
+                    f"请检查 SANDBOX_HOST_VOLUME 配置是否正确）"
+                )
+
             # 生成带 HMAC 签名的下载 URL（5 分钟有效，浏览器直接点击即可下载）
             download_url = sign_download_url(relative)
 
@@ -132,7 +147,13 @@ class PresentFilesTool(BaseTool):
         )
 
         return ToolResult.success(
-            message=f"已生成 {len(files)} 个文件的下载链接，请在回复中告知用户点击下载",
+            message=(
+                f"已生成 {len(files)} 个文件的下载链接。"
+                "【重要】在回复中引用文件时，必须使用 download_url 作为链接地址，"
+                "格式：<a href=\"download_url\" download=\"文件名\">文件名</a>。"
+                "必须包含 download 属性且值为文件名，确保浏览器直接下载而非打开。"
+                "禁止使用 path 字段作为链接，path 是容器内路径，用户无法访问。"
+            ),
             files=files,
         )
 
