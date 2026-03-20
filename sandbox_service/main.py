@@ -122,6 +122,7 @@ async def _get_or_create_container(session_id: str, user_id: str) -> docker.mode
                 network_mode="bridge",
                 volumes={
                     f"{SANDBOX_VOLUME_HOST}/skills": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/skills", "mode": "ro"},
+                    f"{SANDBOX_VOLUME_HOST}/plugins": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/plugins", "mode": "ro"},
                     f"{user_volume_path}": {"bind": f"{SANDBOX_VOLUME_CONTAINER}/users/{user_id}", "mode": "rw"},
                 },
                 detach=True,

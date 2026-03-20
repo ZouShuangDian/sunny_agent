@@ -275,8 +275,47 @@ async def upload_plugin(
 async def list_plugins(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """列出当前用户所有 Plugin（含命令数）"""
-    plugins = await plugin_service.list_user_plugins(user.usernumb)
+    """列出当前用户所有可见 Plugin（系统 + 个人），含命令数和 scope"""
+    async with async_session() as session:
+        result = await session.execute(text("""
+            SELECT
+                p.id,
+                p.name,
+                p.version,
+                p.description,
+                p.path,
+                p.is_active,
+                p.owner_usernumb,
+                p.created_at,
+                p.updated_at,
+                CASE WHEN p.owner_usernumb = 'system' THEN 'system' ELSE 'user' END AS scope,
+                COUNT(pc.id) AS command_count
+            FROM sunny_agent.plugins p
+            LEFT JOIN sunny_agent.plugin_commands pc
+                ON pc.plugin_id = p.id
+            WHERE p.owner_usernumb IN (:usernumb, 'system')
+              AND p.is_active = TRUE
+            GROUP BY p.id, p.name, p.version, p.description, p.path,
+                     p.is_active, p.owner_usernumb, p.created_at, p.updated_at
+            ORDER BY scope ASC, p.name ASC
+        """), {"usernumb": user.usernumb})
+        rows = result.fetchall()
+
+    plugins = [
+        {
+            "id": str(row.id),
+            "name": row.name,
+            "version": row.version,
+            "description": row.description,
+            "scope": row.scope,
+            "is_active": row.is_active,
+            "command_count": row.command_count,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+        }
+        for row in rows
+    ]
+
     return ok(data={"plugins": plugins, "total": len(plugins)})
 
 
@@ -302,7 +341,7 @@ async def list_available_commands(
             FROM sunny_agent.plugins p
             JOIN sunny_agent.plugin_commands pc
                 ON pc.plugin_id = p.id
-            WHERE p.owner_usernumb = :usernumb
+            WHERE p.owner_usernumb IN (:usernumb, 'system')
               AND p.is_active = TRUE
             ORDER BY p.name, pc.name
         """), {"usernumb": user.usernumb})
@@ -338,8 +377,8 @@ async def delete_plugin(
     async with async_session() as session:
         async with session.begin():
             result = await session.execute(text("""
-                SELECT id, path FROM sunny_agent.plugins
-                WHERE name = :name AND owner_usernumb = :usernumb
+                SELECT id, path, owner_usernumb FROM sunny_agent.plugins
+                WHERE name = :name AND owner_usernumb IN (:usernumb, 'system')
             """), {"name": plugin_name, "usernumb": user.usernumb})
             row = result.fetchone()
 
@@ -347,6 +386,12 @@ async def delete_plugin(
                 raise HTTPException(
                     status_code=404,
                     detail=f"Plugin '{plugin_name}' 不存在或无权限删除",
+                )
+
+            if row.owner_usernumb == "SYSTEM":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"系统 Plugin '{plugin_name}' 不允许删除",
                 )
 
             plugin_id, plugin_path = row.id, row.path
@@ -390,9 +435,27 @@ async def toggle_plugin(
     body: _ToggleBody,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """启用/禁用 Plugin（仅能操作自己的 Plugin）"""
+    """启用/禁用 Plugin（仅能操作自己的 Plugin，系统 Plugin 不允许操作）"""
     async with async_session() as session:
         async with session.begin():
+            # 先查询确认存在性和归属
+            check = await session.execute(text("""
+                SELECT owner_usernumb FROM sunny_agent.plugins
+                WHERE name = :name AND owner_usernumb IN (:usernumb, 'system')
+            """), {"name": plugin_name, "usernumb": user.usernumb})
+            check_row = check.fetchone()
+
+            if check_row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Plugin '{plugin_name}' 不存在或无权限操作",
+                )
+            if check_row.owner_usernumb == "SYSTEM":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"系统 Plugin '{plugin_name}' 不允许修改状态",
+                )
+
             result = await session.execute(text("""
                 UPDATE sunny_agent.plugins
                 SET is_active = :is_active, updated_at = now()
@@ -430,9 +493,9 @@ async def get_plugin_files(
     """
     async with async_session() as session:
         result = await session.execute(text("""
-            SELECT name, description, version, path
+            SELECT name, description, version, path, owner_usernumb
             FROM sunny_agent.plugins
-            WHERE name = :name AND owner_usernumb = :usernumb
+            WHERE name = :name AND owner_usernumb IN (:usernumb, 'system')
         """), {"name": plugin_name, "usernumb": user.usernumb})
         row = result.fetchone()
 

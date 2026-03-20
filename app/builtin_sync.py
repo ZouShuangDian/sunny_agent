@@ -28,7 +28,7 @@ _BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills" / "builtin_skills"
 _BUILTIN_PLUGINS_DIR = Path(__file__).parent / "plugins" / "builtin_plugins"
 
 # 系统 Plugin 使用的哨兵 owner_usernumb（与 Skill 的 NULL 不同，Plugin 字段 NOT NULL）
-SYSTEM_OWNER = "SYSTEM"
+SYSTEM_OWNER = "system"
 
 
 async def sync_builtin_skills_and_plugins() -> None:
