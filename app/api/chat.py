@@ -48,9 +48,15 @@ from app.execution.mode_context import (
     reset_mode_context,
     set_mode_context,
 )
+from app.execution.skill_directive_context import (
+    SkillDirectiveContext,
+    reset_skill_directive_context,
+    set_skill_directive_context,
+)
 from app.modes import BUILTIN_MODES
 from app.chat_ops import agent_scope, set_session_running, finalize_execution, cleanup_session
 from app.plugins.service import plugin_service
+from app.skills.service import skill_service
 from app.security.audit import audit_logger
 from app.security.auth import AuthenticatedUser, get_current_user
 
@@ -308,6 +314,74 @@ async def _build_mode_intent(
     return intent_result, mode_token
 
 
+# ── Skill 指令处理（/skill:skillname）──
+
+async def _build_skill_directive_intent(
+    message: str,
+    skill_name: str,
+    user: AuthenticatedUser,
+    session_id: str,
+    memory: WorkingMemory,
+    trace_id: str,
+) -> tuple[IntentResult, CtxToken] | tuple[None, None]:
+    """
+    /skill:skillname 指令处理：从 DB 查询 Skill，读取 SKILL.md，设置 ContextVar。
+
+    返回值：
+    - 成功：(IntentResult, skill_directive_token)
+    - 失败：(None, None)  ← Skill 不存在或未启用
+    """
+    # 从 DB 查询用户可用的 Skill 列表，匹配指定名称
+    user_skills = await skill_service.get_user_skills(user.usernumb)
+    skill_info = next((s for s in user_skills if s.name == skill_name), None)
+
+    if skill_info is None:
+        return None, None
+
+    # 读取 SKILL.md 文件内容
+    try:
+        host_dir = skill_info.get_host_skill_dir()
+        skill_md_path = host_dir / "SKILL.md"
+        if not skill_md_path.exists():
+            log.warning("Skill SKILL.md 不存在", name=skill_name, path=str(skill_md_path))
+            return None, None
+        skill_md_content = skill_md_path.read_text(encoding="utf-8")
+    except (ValueError, OSError) as e:
+        log.warning("读取 Skill SKILL.md 失败", name=skill_name, error=str(e))
+        return None, None
+
+    # 设置 SkillDirectiveContext ContextVar
+    skill_ctx = SkillDirectiveContext(
+        skill_name=skill_name,
+        skill_md_content=skill_md_content,
+        scripts_dir=skill_info.get_container_scripts_path(),
+        skill_dir=f"/mnt/{skill_info.path}",
+    )
+    skill_token = set_skill_directive_context(skill_ctx)
+
+    # 提取 /skill:xxx 之后的用户输入
+    _, _, user_input = message.partition(" ")
+    user_input = user_input.strip()
+    raw_input = user_input if user_input else f"使用 {skill_name} Skill"
+
+    # 加载历史消息
+    context_builder = ContextBuilder(memory)
+    history_messages = await context_builder.load_history_messages(session_id)
+
+    intent_result = IntentResult(
+        intent=IntentDetail(
+            primary="skill_directive",
+            sub_intent=f"skill:{skill_name}",
+            user_goal=raw_input,
+        ),
+        raw_input=raw_input,
+        session_id=session_id,
+        trace_id=trace_id,
+        history_messages=history_messages,
+    )
+    return intent_result, skill_token
+
+
 # ── 公共意图管线 ──
 
 async def _run_intent_pipeline(
@@ -317,12 +391,12 @@ async def _run_intent_pipeline(
     memory: WorkingMemory,
     redis: aioredis.Redis,
     trace_id: str,
-) -> tuple[IntentResult, CtxToken | None, CtxToken | None]:
+) -> tuple[IntentResult, CtxToken | None, CtxToken | None, CtxToken | None]:
     """
     公共意图管线，/chat 和 /chat/stream 共享。
-    返回 (intent_result, plugin_token, mode_token)。
+    返回 (intent_result, plugin_token, mode_token, skill_directive_token)。
 
-    检测优先级：/mode:xxx（内置模式）→ /plugin:command（Plugin）→ 常规对话。
+    检测优先级：/mode:xxx → /skill:xxx → /plugin:command → 常规对话。
     """
     # 斜杠命令快速路径
     if message.startswith("/") and ":" in message.split()[0]:
@@ -334,16 +408,37 @@ async def _run_intent_pipeline(
             intent_result, mode_token = await _build_mode_intent(
                 message, command, user, session_id, memory, trace_id,
             )
-            return intent_result, None, mode_token
+            return intent_result, None, mode_token, None
+
+        # Skill 指令：/skill:skillname
+        if prefix == "skill" and command:
+            intent_result, skill_token = await _build_skill_directive_intent(
+                message, command, user, session_id, memory, trace_id,
+            )
+            if intent_result is not None:
+                return intent_result, None, None, skill_token
+            # Skill 未找到 → 构造错误提示
+            error_result = IntentResult(
+                intent=IntentDetail(
+                    primary="skill_directive",
+                    sub_intent="not_found",
+                    user_goal=f"未找到 Skill: {command}",
+                ),
+                raw_input=f"未找到 Skill `{command}`，请确认 Skill 名称正确且已启用。",
+                session_id=session_id,
+                trace_id=trace_id,
+                history_messages=[],
+            )
+            return error_result, None, None, None
 
         # Plugin 命令：/plugin-name:command-name
         intent_result, plugin_token = await _build_plugin_intent(
             message, user, session_id, memory, trace_id,
         )
         if intent_result is not None:
-            return intent_result, plugin_token, None
+            return intent_result, plugin_token, None, None
         # Plugin 未找到 → 直接返回错误
-        return _build_plugin_error_result(message, session_id, trace_id), None, None
+        return _build_plugin_error_result(message, session_id, trace_id), None, None, None
 
     # 常规对话：加载历史 + 直接构造 IntentResult
     context_builder = ContextBuilder(memory)
@@ -356,7 +451,7 @@ async def _run_intent_pipeline(
         trace_id=trace_id,
         history_messages=history_messages,
     )
-    return intent_result, None, None
+    return intent_result, None, None, None
 
 
 # ── 公共会话初始化（含 PG 回源） ──
@@ -438,8 +533,8 @@ async def chat(
             trace_name="chat_request",
         ) if langfuse else contextlib.nullcontext()
     ):
-        # 意图管线（Plugin / Mode 命令在管线内部处理）
-        final_result, plugin_token, mode_token = await _run_intent_pipeline(
+        # 意图管线（Plugin / Mode / Skill 命令在管线内部处理）
+        final_result, plugin_token, mode_token, skill_directive_token = await _run_intent_pipeline(
             message=body.message, user=user, session_id=session_id,
             memory=memory, redis=redis, trace_id=trace_id,
         )
@@ -528,6 +623,8 @@ async def chat(
                 reset_plugin_context(plugin_token)
             if mode_token is not None:
                 reset_mode_context(mode_token)
+            if skill_directive_token is not None:
+                reset_skill_directive_context(skill_directive_token)
 
 
 # ── POST /chat/stream — SSE 流式响应 ──
@@ -591,8 +688,8 @@ async def chat_stream(
                     trace_name="chat_request",
                 ) if langfuse else contextlib.nullcontext()
             ):
-                # 返回三元组：Plugin/Mode 路径返回对应 token，其余为 None
-                final_result, plugin_token, mode_token = await _run_intent_pipeline(
+                # 返回四元组：Plugin/Mode/Skill 路径返回对应 token，其余为 None
+                final_result, plugin_token, mode_token, skill_directive_token = await _run_intent_pipeline(
                     message=body.message, user=user, session_id=session_id,
                     memory=memory, redis=redis, trace_id=trace_id,
                 )
