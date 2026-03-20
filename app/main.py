@@ -45,6 +45,13 @@ async def lifespan(application: FastAPI):
     await redis_client.ping()
     log.info("Redis 连接正常")
 
+    # ── 内置 Skill / Plugin 同步：扫描源码目录 → UPSERT DB → 复制到挂载目录 ──
+    from app.builtin_sync import sync_builtin_skills_and_plugins
+    try:
+        await sync_builtin_skills_and_plugins()
+    except Exception as e:
+        log.warning("内置 Skill/Plugin 同步失败（不影响主流程）", error=str(e))
+
     # ── Langfuse 配置加载：从 DB 读取加密配置并初始化 ──
     from app.services.langfuse_config_loader import load_langfuse_config
     from app.services.langfuse_manager import LangfuseManager
