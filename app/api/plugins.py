@@ -65,15 +65,6 @@ def _validate_plugin_json(plugin_json_path: Path, usernumb: str) -> dict:
         if not data.get(field):
             raise HTTPException(status_code=400, detail=f"plugin.json 缺少必填字段：{field}")
 
-    # author.usernumb 校验：有 author 且有 usernumb 时才校验一致性，否则跳过
-    author = data.get("author") or {}
-    if isinstance(author, dict) and author.get("usernumb"):
-        if author["usernumb"] != usernumb:
-            raise HTTPException(
-                status_code=403,
-                detail=f"author.usernumb（{author['usernumb']}）与登录用户（{usernumb}）不符",
-            )
-
     # name 格式校验
     name = data["name"]
     if not NAME_RE.match(name):
