@@ -431,7 +431,6 @@ async def _run_intent_pipeline(
     redis: aioredis.Redis,
     trace_id: str,
     extra_context_messages: list[dict] | None = None,
-) -> tuple[IntentResult, CtxToken | None, CtxToken | None]:
 ) -> tuple[IntentResult, CtxToken | None, CtxToken | None, CtxToken | None]:
     """
     公共意图管线，/chat 和 /chat/stream 共享。
