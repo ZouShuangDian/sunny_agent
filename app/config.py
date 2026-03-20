@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # ── Sandbox Service（沙箱代码执行） ──
     SANDBOX_SERVICE_URL: str = "http://localhost:8020"  # sandbox-service HTTP 地址
     SANDBOX_HOST_VOLUME: str = "/Users/zoushuangdian/docker/volumes/sunny_agent"  # 宿主机挂载根目录
-    SANDBOX_BASH_TIMEOUT: int = 30  # bash_tool 单次执行超时（秒）
+    SANDBOX_BASH_TIMEOUT: int = 120  # bash_tool 单次执行超时（秒）
 
     # ── 工具注册中心 ──
     DEFAULT_TOOL_TIMEOUT_MS: int = 60_000  # 工具默认超时（毫秒），BaseTool 引用此值

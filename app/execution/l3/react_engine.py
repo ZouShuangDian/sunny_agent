@@ -51,6 +51,7 @@ from app.cache.redis_client import redis_client
 from app.execution.l3.live_steps_writer import LiveStepsWriter
 from app.execution.mode_context import get_mode_context
 from app.execution.plugin_context import PluginCommandContext, get_plugin_context
+from app.execution.skill_directive_context import SkillDirectiveContext, get_skill_directive_context
 from app.streaming.events import SSEEvent
 from app.tools.registry import ToolRegistry
 
@@ -121,6 +122,29 @@ def _build_plugin_context_block(ctx: PluginCommandContext) -> str:
         f"{skills_section}\n\n"
         f"使用插件 Skill 时：通过 `read_file` 读取对应 SKILL.md 路径，按指引操作。\n"
         f"**禁止**通过 `skill_call` 调用——插件 Skill 不在全局 skill catalog 中。\n"
+    )
+
+
+def _build_skill_directive_block(ctx: SkillDirectiveContext) -> str:
+    """
+    将 SkillDirectiveContext 序列化为 system prompt 注入块。
+
+    用户通过 /skill:skillname 显式指定 Skill 时，
+    将 SKILL.md 完整内容注入 system prompt，跳过 skill_call 间接调用。
+    """
+    return (
+        f"\n\n---\n## Skill 指令执行上下文\n\n"
+        f"用户指定使用 Skill `{ctx.skill_name}`，请严格按照下方指引执行。\n\n"
+        f"**⚠️ 重要：SKILL.md 指引已直接提供，无需调用 `skill_call` 工具。"
+        f"直接按指引使用 `read_file` 和 `bash_tool` 执行即可。**\n\n"
+        f"### Skill 工作目录\n\n"
+        f"- Skill 根目录: `{ctx.skill_dir}/`\n"
+        f"- Scripts 目录: `{ctx.scripts_dir}/`\n\n"
+        f"工作流指引中的相对路径（如 `scripts/xxx.py`）必须基于 Skill 根目录执行：\n"
+        f"```\ncd {ctx.skill_dir} && python3 scripts/xxx.py\n```\n"
+        f"或使用绝对路径：`python3 {ctx.scripts_dir}/xxx.py`\n\n"
+        f"### SKILL.md 指引\n\n"
+        f"{ctx.skill_md_content}\n"
     )
 
 
@@ -590,6 +614,15 @@ class L3ReActEngine:
                     command=plugin_ctx.command_name,
                     content_len=len(plugin_ctx.command_md_content),
                     skills_count=len(plugin_ctx.plugin_skills),
+                )
+
+            skill_directive_ctx = get_skill_directive_context()
+            if skill_directive_ctx:
+                system_prompt += _build_skill_directive_block(skill_directive_ctx)
+                log.info(
+                    "Skill 指令上下文已注入 system prompt",
+                    skill=skill_directive_ctx.skill_name,
+                    content_len=len(skill_directive_ctx.skill_md_content),
                 )
 
             if mode_ctx:

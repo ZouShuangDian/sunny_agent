@@ -87,7 +87,7 @@ class PluginService:
                 ON pc.plugin_id = p.id
             WHERE
                 p.name = :plugin_name
-                AND p.owner_usernumb = :usernumb
+                AND p.owner_usernumb IN (:usernumb, 'system')
                 AND p.is_active = TRUE
                 AND pc.name = :command_name
             LIMIT 1
@@ -199,7 +199,7 @@ class PluginService:
             FROM sunny_agent.plugins p
             LEFT JOIN sunny_agent.plugin_commands pc
                 ON pc.plugin_id = p.id
-            WHERE p.owner_usernumb = :usernumb
+            WHERE p.owner_usernumb IN (:usernumb, 'system')
             GROUP BY p.id, p.name, p.version, p.description, p.path,
                      p.is_active, p.created_at, p.updated_at
             ORDER BY p.created_at DESC
