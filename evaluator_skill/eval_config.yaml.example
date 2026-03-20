@@ -1,0 +1,48 @@
+# 评测工具配置模板
+# 复制为 eval_config.yaml 并填入实际值：cp eval_config.yaml.example eval_config.yaml
+
+# 被测业务系统
+target:
+  base_url: http://localhost:8000
+  chat_endpoint: /api/chat
+  usernumb: ""                         # 登录用户名，自动获取 token
+  password: ""                         # 登录密码
+  token: ""                            # 手动指定 Bearer Token（填了则跳过自动登录）
+  timeout: 120                         # 单次请求超时（秒）
+
+# Langfuse 连接
+langfuse:
+  host: http://localhost:3000
+  public_key: ""                       # Langfuse Public Key
+  secret_key: ""                       # Langfuse Secret Key，可用环境变量 LANGFUSE_SECRET_KEY 覆盖
+
+# LLM-as-a-Judge 评分配置
+judge:
+  model: deepseek/deepseek-chat        # litellm 模型格式
+  dimensions:
+    - name: correctness
+      description: 数据和数字的准确性，关键事实是否正确
+      weight: 0.5
+    - name: completeness
+      description: 是否涵盖了期望输出中的关键信息点
+      weight: 0.3
+    - name: relevance
+      description: 回答是否紧扣问题，没有跑题或添加无关内容
+      weight: 0.2
+
+# 数据环境配置
+data:
+  excel_file: evaluator_skill/qmsdata/客诉问题整理清单.xlsx
+  pg:
+    host: 127.0.0.1
+    port: 5432
+    dbname: postgres
+    user: root
+    password: ""
+    schema: chat_qms
+  milvus:
+    uri: http://localhost:19530
+    db: sunny_agent
+    user: root
+    password: ""
+    collection: quality_knowledge

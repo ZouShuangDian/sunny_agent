@@ -12,3 +12,5 @@ tests/
 .opencode/
 .mcp.json
 .coverage
+evaluator_skill/eval_config.yaml
+*.xlsx
