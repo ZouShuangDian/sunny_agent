@@ -56,28 +56,6 @@ def _normalize_final_reply(reply: str) -> str:
     return normalize_markdown_headings(reply, max_level=4)
 
 
-async def _log_context_budget(session_id: str, history_messages: list[dict]) -> None:
-    try:
-        history_tokens = await estimate_history_tokens(history_messages, settings.LLM_DEFAULT_MODEL)
-        snapshot = build_budget_snapshot(history_tokens)
-        log.info(
-            "Context budget observed",
-            session_id=session_id,
-            model=settings.LLM_DEFAULT_MODEL,
-            history_tokens=snapshot["history_tokens"],
-            available_budget=snapshot["available_budget"],
-            trigger_ratio=snapshot["trigger_ratio"],
-            hard_stop_ratio=snapshot["hard_stop_ratio"],
-            would_compact=snapshot["would_compact"],
-            must_compact=snapshot["must_compact"],
-        )
-    except Exception as exc:
-        log.warning(
-            "Failed to observe context budget",
-            session_id=session_id,
-            error=str(exc),
-        )
-
 
 # 流式事件类型
 class PipelineStreamEvent:
@@ -88,33 +66,6 @@ class PipelineStreamEvent:
     ERROR = "error"                   # 执行错误
     GENERATING = "generating"
     THINKING = "thinking"
-
-
-# 工具展示配置: tool_name -> (图标, 格式化函数)
-# _TOOL_DISPLAY_CONFIG = {
-#     "web_search": ("🔍", lambda args: f"搜索: {args.get('query', '')}"),
-#     "web_fetch": ("🌐", lambda args: f"获取网页: {args.get('url', '')[:50]}..."),
-#     "bash_tool": ("⚡", lambda args: "执行命令"),
-#     "read_file": ("📄", lambda args: f"读取: {args.get('path', '').split('/')[-1]}"),
-#     "write_file": ("✏️", lambda args: f"写入: {args.get('path', '').split('/')[-1]}"),
-#     "str_replace_file": ("📝", lambda args: f"编辑: {args.get('path', '').split('/')[-1]}"),
-#     "ask_user": ("❓", lambda args: "询问用户"),
-#     "todo_read": ("✅", lambda args: "查看待办"),
-#     "todo_write": ("✅", lambda args: "更新待办"),
-#     "cron_create": ("⏰", lambda args: "创建定时任务"),
-#     "cron_manage": ("⏰", lambda args: "管理定时任务"),
-#     "create_task": ("📋", lambda args: "创建异步任务"),
-#     "present_files": ("📁", lambda args: "展示文件"),
-#     "skill_call": ("🛠️", lambda args: f"调用技能: {args.get('skill_name', 'unknown')}"),
-#     "subagent_call": ("🤖", lambda args: f"调用子代理: {args.get('agent_name', 'unknown')}"),
-# }
-
-
-# def _format_step_info(tool_name: str, args: dict) -> str:
-#     """格式化步骤信息，只显示操作描述，不显示结果"""
-#     config = _TOOL_DISPLAY_CONFIG.get(tool_name, ("🔧", lambda a: tool_name))
-#     icon, formatter = config
-#     return f"{icon} {formatter(args)}"
 
 
 async def run_agent_pipeline(
@@ -179,7 +130,6 @@ async def run_agent_pipeline(
         # -- Step 2: 构造 IntentResult --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
-        # await _log_context_budget(sid, history_messages)
 
         actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
         intent_result = IntentResult(
@@ -374,9 +324,6 @@ async def run_agent_pipeline_stream(
         # -- Step 2: 构造 IntentResult --
         context_builder = ContextBuilder(memory)
         history_messages = await context_builder.load_history_messages(sid)
-        # await _log_context_budget(sid, history_messages)
-        # history_tokens = await estimate_history_tokens(history_messages, settings.LLM_DEFAULT_MODEL)
-        # budget_snapshot = build_budget_snapshot(history_tokens)
 
         actual_sub_intent = sub_intent or _SOURCE_SUB_INTENT_MAP.get(source, source)
 

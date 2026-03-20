@@ -372,7 +372,7 @@ async def _run_intent_pipeline(
         # 内置模式：/mode:deep-research
         if prefix == "mode" and command in BUILTIN_MODES:
             intent_result, mode_token = await _build_mode_intent(
-                message, command, user, session_id, memory, trace_id, extra_context_messages,
+                message, command, user, session_id, memory, trace_id
             )
             return intent_result, None, mode_token
 
