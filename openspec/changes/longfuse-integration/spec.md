@@ -1,10 +1,19 @@
 # Feature Specification: Langfuse 可观测性集成
 
-**Feature Branch**: `007-langfuse-integration`
+**Feature Branch**: `feature/langfuse`
 **Created**: 2026-02-19
-**Updated**: 2026-03-06
+**Updated**: 2026-03-13
 **Status**: Draft
 **Input**: User description: "集成 Langfuse 进行可观测性管理，改动现有 Agent 代码，监控 Agent 运行状态，并支持测试数据集管理和评估"
+
+## Repositories
+
+| 仓库 | 路径 | 职责 |
+|------|------|------|
+| **sunny_agent** (后端) | `/Users/yanwen/Documents/github/sunny_agent` | FastAPI API、Trace 集成、Langfuse 服务管理、数据聚合 |
+| **sunny-agent-web** (前端) | `/Users/yanwen/Documents/github/sunny-agent-web` | Vue 3 UI、可观测性 Tab 页面、用量图表、管理员面板扩展 |
+
+> 本 spec 覆盖前后端完整功能。后端任务在 `sunny_agent` 仓库执行，前端任务在 `sunny-agent-web` 仓库执行。
 
 ## Scope
 
@@ -29,6 +38,14 @@
 
 ## Clarifications
 
+### Session 2026-03-13
+
+- Q: 内置 Langfuse 服务的启停管理方式？ → A: 通过 Docker Compose CLI（`docker compose up/down`）管理容器生命周期，要求宿主机安装 Docker
+- Q: Langfuse 控制台自动登录机制？ → A: 后端代理登录获取 session token 并重定向；Langfuse 不支持时降级为手动登录。权限双层保障：SunnyAgent 仅管理员可见入口 + Langfuse 仅同步管理员账号
+- Q: 费用预估的模型价格策略？ → A: 直接使用 Langfuse 原生 cost 字段聚合，不自行维护价格表
+- Q: Langfuse Admin API 认证与初始化方式？ → A: 内置服务通过 docker-compose 环境变量（`LANGFUSE_INIT_*`）预配置初始组织、项目和 API Key，启动时自动完成初始化，无需运行时调用 Admin API
+- Q: 内置与外部 Langfuse 的登录和账号同步统一方案？ → A: .env 统一配置一套 Langfuse 管理员凭据（email/password）。内置服务将其作为 `LANGFUSE_INIT_USER_*` 创建初始账号；外部服务填写已有账号。控制台跳转时后端用该凭据代理登录获取 session。所有 SunnyAgent 管理员共用一个 Langfuse 账号，不做逐人同步
+
 ### Session 2026-03-06
 
 - Q: Prompt Playground 是否需要集成？ → A: 本期不实现，完整 Agent 测试使用 Dataset + Experiment 方式
@@ -52,7 +69,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 用户发送一条消息触发 Agent 执行, **When** Agent 处理完成, **Then** 系统通过 LangGraph Callback 自动记录完整的执行 Trace，包含各阶段耗时和关键参数
+1. **Given** 用户发送一条消息触发 Agent 执行, **When** Agent 处理完成, **Then** 系统通过 LiteLLM Langfuse Callback 和 Langfuse SDK Span 自动记录完整的执行 Trace，包含各阶段耗时和关键参数
 2. **Given** 运维人员打开 Langfuse 界面, **When** 选择某次对话的 Trace, **Then** 可以看到从用户输入到最终输出的完整调用链路（包括 AIME 各组件）
 3. **Given** Agent 执行过程中发生错误, **When** 查看该次执行的 Trace, **Then** 错误位置和错误信息清晰标注
 
@@ -173,10 +190,9 @@
 9. **Given** 当前用户是管理员, **When** 查看用量统计, **Then** 可以看到所有用户的汇总数据，并可按用户筛选
 10. **Given** 当前用户是普通用户, **When** 查看用量统计, **Then** 只能看到自己的用量数据
 
-**账号同步（仅管理员）**
-11. **Given** SunnyAgent 创建新管理员, **When** 管理员首次访问 Langfuse, **Then** Langfuse 自动创建对应账号
-12. **Given** SunnyAgent 取消某用户的管理员权限, **When** 该用户尝试访问 Langfuse, **Then** Langfuse 拒绝访问
-13. **Given** 普通用户发起对话, **When** Trace 记录完成, **Then** Trace 中包含该用户的 user_id，管理员可在 Langfuse 中按 user_id 筛选
+**共用管理员账号**
+11. **Given** 管理员点击"打开 Langfuse 控制台", **When** 系统处理跳转, **Then** 使用 .env 中配置的管理员凭据自动登录 Langfuse
+12. **Given** 普通用户发起对话, **When** Trace 记录完成, **Then** Trace 中包含该用户的 user_id，管理员可在 Langfuse 中按 user_id 筛选
 
 ---
 
@@ -235,7 +251,7 @@
 ### Functional Requirements
 
 **Trace 追踪（P1）**
-- **FR-001**: 系统 MUST 通过 Langfuse LangChain/LangGraph Callback 自动记录 Agent 执行链路
+- **FR-001**: 系统 MUST 通过 LiteLLM 内置 Langfuse Callback 自动记录 Agent 执行链路（LLM 调用），并通过 Langfuse Python SDK `@observe()` / `start_span()` 记录非 LLM Span
 - **FR-002**: 系统 MUST 记录 AIME 核心组件（IntentAnalyzer、Planner、ActorFactory、Actor）的执行信息作为 Span
 - **FR-003**: 系统 MUST 记录每个执行阶段的耗时、输入参数、输出结果、Token 消耗
 - **FR-004**: 系统 MUST 在 Agent 执行出错时记录错误类型、错误位置和堆栈信息
@@ -270,12 +286,12 @@
 - **FR-021**: 系统 MUST 在切换到内置服务时断开外部服务连接
 
 **Langfuse 项目自动初始化（P1）**
-- **FR-022**: 系统 MUST 在 Langfuse 服务可用后自动检测是否需要初始化
-- **FR-023**: 系统 MUST 自动创建 Langfuse 项目并生成 Public Key 和 Secret Key
-- **FR-024**: 系统 MUST 将生成的 API Key 自动写入 .env 文件（LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY）
-- **FR-025**: 系统 MUST 在 .env 中同时写入 LANGFUSE_HOST 配置
-- **FR-026**: 系统 MUST 在启动时从 .env 读取配置，若已存在有效配置则跳过初始化
-- **FR-027**: 系统 SHOULD 在自动初始化失败时记录详细日志并提供排查指引
+- **FR-022**: 内置服务 MUST 通过 docker-compose 环境变量（`LANGFUSE_INIT_*`）预配置初始组织、项目和 API Key，Langfuse 启动时自动完成初始化
+- **FR-023**: 系统 MUST 将预配置的 API Key 写入 .env 文件（LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY）
+- **FR-024**: 系统 MUST 在 .env 中同时写入 LANGFUSE_HOST 配置
+- **FR-025**: 系统 MUST 在启动时从 .env 读取配置，若已存在有效配置则直接使用
+- **FR-026**: 外部服务场景 MUST 支持管理员手动配置已有的 API Key
+- **FR-027**: 系统 SHOULD 在初始化失败时记录详细日志并提供排查指引
 
 **Observability 改造（P1）**
 - **FR-028**: 系统 MUST 改造现有 observability 代码以支持 Langfuse Trace 上报
@@ -305,17 +321,16 @@
 - **FR-044**: 系统 MUST 显示统计卡片：总调用次数、总 Token 数（含输入/输出明细）、预估费用
 - **FR-045**: 系统 MUST 显示按日维度的 Token 用量趋势图（柱状图）
 - **FR-046**: 系统 MUST 支持刷新按钮，手动更新用量数据
-- **FR-047**: 系统 MUST 按用户维度统计用量，不按模型维度区分
+- **FR-047**: 系统 MUST 按用户维度统计用量，费用直接使用 Langfuse 原生 cost 字段聚合（Langfuse 内置模型价格表，按实际模型计算）
 
 *用户权限控制*
 - **FR-048**: 系统 MUST 对管理员显示所有用户的汇总数据，并支持按用户筛选
 - **FR-049**: 系统 MUST 对普通用户仅显示其个人的用量数据
 
-*账号同步（仅管理员）*
-- **FR-050**: 系统 MUST 仅同步管理员账号到 Langfuse，普通用户不同步
-- **FR-051**: 系统 MUST 在 SunnyAgent 创建管理员时自动在 Langfuse 创建对应账号
-- **FR-052**: 系统 MUST 在 SunnyAgent 取消管理员权限或禁用管理员时同步移除 Langfuse 访问权限
-- **FR-053**: 系统 MUST 确保普通用户的对话 Trace 仍记录 user_id，供管理员在 Langfuse 中筛选定位
+*Langfuse 账号管理*
+- **FR-050**: 系统 MUST 通过 .env 统一管理一套 Langfuse 管理员凭据（`LANGFUSE_ADMIN_EMAIL`、`LANGFUSE_ADMIN_PASSWORD`），所有 SunnyAgent 管理员共用该账号访问 Langfuse 控制台
+- **FR-051**: 内置服务 MUST 将 .env 中的管理员凭据作为 `LANGFUSE_INIT_USER_*` 传入 docker-compose，启动时自动创建 Langfuse 管理员账号
+- **FR-052**: 系统 MUST 确保普通用户的对话 Trace 仍记录 user_id，供管理员在 Langfuse 中按 user_id 筛选定位
 
 **Trace 数据导出（P2）**
 - **FR-054**: 系统 MUST 支持将 Trace 数据导出为 JSON 格式
@@ -336,11 +351,11 @@
 **可靠性要求**
 - **NFR-004**: 当 Langfuse 服务不可用时，Agent MUST 继续正常工作
 - **NFR-005**: Trace 上报失败时 SHOULD 记录本地日志便于排查
-- **NFR-006**: 账号同步失败时 MUST 有重试机制，并记录失败日志
+- **NFR-006**: Langfuse 管理员凭据验证失败时 SHOULD 记录日志并在控制台跳转时提示管理员检查 .env 配置
 
 **安全要求**
 - **NFR-007**: Langfuse API 认证信息 MUST 通过环境变量或密钥管理服务获取，不得硬编码
-- **NFR-008**: 敏感数据（如用户密码、Token）MUST NOT 被记录到 Trace 中
+- **NFR-008**: 敏感数据（如用户密码、Token）MUST NOT 被记录到 Trace 中。系统 MUST 在 Langfuse SDK flush 前通过 `before_send` hook 对 input/output 进行 PII 脱敏（正则匹配手机号、身份证号、邮箱、密码等模式并替换为 `[REDACTED]`）
 - **NFR-009**: 账号同步 API 调用 MUST 使用 HTTPS 加密传输
 
 **可维护性要求**
@@ -388,7 +403,7 @@
 - **SC-006**: 监控仪表盘数据延迟不超过 30 秒
 - **SC-007**: 当 Langfuse 服务不可用时，Agent 响应时间不受影响
 - **SC-008**: 管理员可从系统管理界面一键跳转到 Langfuse，无需再次登录
-- **SC-009**: SunnyAgent 创建/禁用用户后，Langfuse 账号状态在 5 秒内同步完成
+- **SC-009**: 管理员点击控制台跳转后，3 秒内完成自动登录并打开 Langfuse 界面
 - **SC-010**: SunnyAgent 首次启动时，Langfuse 自动初始化在 30 秒内完成
 - **SC-011**: 100% 的 Trace 包含有效的 user_id 和 session_id
 - **SC-012**: 运维人员可通过 user_id 或 session_id 在 Langfuse 中快速筛选相关 Trace
@@ -403,7 +418,7 @@
 
 - Langfuse 服务将被私有化部署，与 SunnyAgent 在同一网络环境
 - 团队成员可以访问 Langfuse 的 Web 界面（英文界面，数据内容支持中文）
-- 现有 Agent 代码基于 LangChain/LangGraph 框架，Langfuse 提供原生 Callback 支持
+- 现有 Agent 代码基于 LiteLLM（`litellm.acompletion`）进行 LLM 调用，LiteLLM 内置 Langfuse Callback 支持
 - 评估脚本通过 Langfuse Python SDK 编写，调用 SunnyAgent `/api/chat` 接口
 - SunnyAgent 具有调用 Langfuse Admin API 的权限（用于自动初始化和账号同步）
 - 现有 observability 代码结构支持改造为 Langfuse 集成（无需完全重写）
@@ -436,23 +451,24 @@
 
 - Langfuse Admin API 可用（用于账号同步）
 - SunnyAgent `/api/chat` 接口稳定可用（用于评估）
-- 现有 AIME Agent 核心代码支持添加 Langfuse Callback
+- 现有 AIME Agent 核心代码支持添加 Langfuse Span（通过 ContextVar 传递 Trace 上下文）
 - SunnyAgent 前端系统管理页面存在（用于嵌入 Langfuse 链接）
 
 ## Architecture Decisions
 
-1. **部署方式**: Langfuse v3 使用 Docker Compose 部署，包含 ClickHouse + Redis + MinIO + PostgreSQL 完整栈
-2. **Trace 集成**: 使用 Langfuse 原生的 LangChain/LangGraph Callback，几乎零代码改动
+1. **部署方式**: Langfuse v3 使用 Docker Compose 部署，包含 ClickHouse + Redis + MinIO + PostgreSQL 完整栈。SunnyAgent 后端通过 Docker Compose CLI（`docker compose up -d` / `docker compose down`）管理内置服务生命周期，要求宿主机预装 Docker Engine
+2. **Trace 集成**: LLM 调用通过 LiteLLM 内置 Langfuse Callback 自动采集（零改动 LLMClient）；非 LLM Span（ReAct 循环、工具调用等）通过 Langfuse Python SDK 手动创建
 3. **Agent 评估**: 不使用 Langfuse Playground 测试完整 Agent，而是通过 Dataset + Experiment + 自定义任务函数调用 `/api/chat`
 4. **LLM-as-a-Judge**: 评估时复用 SunnyAgent 已配置的 LLM（通过环境变量），无需在 Langfuse 单独配置
-5. **账号同步方案**: 采用 Admin API 方案 — SunnyAgent 用户 CRUD 操作时调用 Langfuse Instance Management API 同步账号（创建、禁用、删除）
-6. **系统管理集成**: 在 SunnyAgent 管理后台添加 Langfuse 外链，点击后在新窗口（新标签页）打开 Langfuse 完整界面
+5. **统一凭据管理与自动登录**: .env 中统一配置一套 Langfuse 管理员凭据（`LANGFUSE_ADMIN_EMAIL`、`LANGFUSE_ADMIN_PASSWORD`）。内置服务将其作为 `LANGFUSE_INIT_USER_EMAIL`/`LANGFUSE_INIT_USER_PASSWORD` 传入 docker-compose 创建初始账号；外部服务由管理员填写已有账号。控制台跳转时后端用该凭据调用 Langfuse 登录 API 获取 session，重定向管理员；不支持时降级为跳转登录页手动登录
+6. **账号同步策略**: 所有 SunnyAgent 管理员共用一个 Langfuse 管理员账号访问控制台，不做逐人同步。普通用户不能访问 Langfuse 控制台，但其对话 Trace 通过 user_id 记录，管理员可在 Langfuse 中按 user_id 筛选
 7. **Span 处理模式**: 在 async generator 中使用直接 span 引用（`start_span()`/`start_generation()`）而非上下文管理器，避免 OpenTelemetry context 丢失问题（详见 research.md）
+7.1. **Trace 数据脱敏**: 在 Langfuse SDK flush 前通过 `before_send` hook 过滤 PII 数据（手机号、身份证号、邮箱、密码等）。使用正则匹配替换敏感模式，确保 NFR-008 合规。脱敏规则可通过 `LANGFUSE_PII_PATTERNS` 环境变量扩展自定义模式
 8. **两种部署场景 + 自动初始化**：
-   - **内置服务场景**：启动内置 Langfuse v3 → 自动初始化项目 → API Key 写入 .env
-   - **外部服务场景**：配置外部服务地址 → 验证连接 → 自动初始化项目 → API Key 写入 .env
+   - **内置服务场景**：通过 docker-compose 环境变量（`LANGFUSE_INIT_ORG_ID`、`LANGFUSE_INIT_PROJECT_NAME`、`LANGFUSE_INIT_PROJECT_PUBLIC_KEY`、`LANGFUSE_INIT_PROJECT_SECRET_KEY` 等）预配置初始化参数，Langfuse 启动时自动创建组织、项目和 API Key，无需运行时调用 Admin API
+   - **外部服务场景**：配置外部服务地址 → 验证连接 → 管理员手动提供已有的 API Key（不自动在外部实例上创建项目）
 
-   API Key 统一通过 .env 文件管理，无需界面手动配置
+   API Key 统一通过 .env 文件管理，内置服务的 Key 由 docker-compose 预配置生成
 
 9. **单项目 + user_id 隔离策略**：
    - **项目设计**：一个 SunnyAgent 实例对应一个 Langfuse 项目，所有用户的 Trace 存储在同一项目中
@@ -461,8 +477,10 @@
      - 管理员：可访问 Langfuse 控制台，查看所有用户的 Trace，通过 user_id 筛选定位问题
      - 普通用户：不能访问 Langfuse 控制台，只能在 SunnyAgent 界面查看自己的用量统计
    - **账号同步**：只同步管理员到 Langfuse，普通用户不同步（但其对话 Trace 会记录 user_id）
-9. **Trace 用户关联**: 每个 Trace 必须携带 `user_id` 和 `session_id`，其中 `user_id` 从请求上下文获取，`session_id` 由对话管理模块生成
-10. **存储设计**: Trace 原始数据存储在 Langfuse（ClickHouse），SunnyAgent 仅存储 Langfuse 配置信息和用户-Trace 的索引映射（用于快速定位）
+10. **Trace 用户关联**: 每个 Trace 必须携带 `user_id` 和 `session_id`，其中 `user_id` 从请求上下文获取，`session_id` 由对话管理模块生成
+11. **存储设计**: Trace 原始数据存储在 Langfuse（ClickHouse），SunnyAgent 仅存储 Langfuse 配置信息（`langfuse_config` 表）。用量查询通过 Langfuse Public API + Redis 缓存实现，不维护本地索引
+12. **配置 Source of Truth**: 数据库 `langfuse_config` 表为运行时配置的唯一权威来源。`.env` 文件仅用于**首次初始化种子值**和 Docker Compose 环境变量注入。运行时配置变更（通过管理 API）只写数据库，不修改 .env 文件。启动时优先读数据库，数据库无记录时回退读 .env 并写入数据库
+13. **Secret Key 加密存储**: 使用 `cryptography.fernet.Fernet` 对称加密存储 Langfuse Secret Key。加密密钥从环境变量 `ENCRYPTION_KEY` 获取（必填项，首次部署时自动生成并写入 .env）。提供 `encrypt_secret()` / `decrypt_secret()` 工具函数
 
 ## Risks & Mitigations
 
@@ -470,7 +488,7 @@
 |------|------|--------|----------|
 | Langfuse 服务宕机影响 Agent 可用性 | 高 | 中 | 异步上报 + 优雅降级，Langfuse 不可用时 Agent 继续正常工作 |
 | Trace 数据量过大导致存储成本增加 | 中 | 高 | 支持采样率配置，生产环境可设置较低采样率 |
-| 账号同步延迟导致用户无法访问 | 中 | 低 | 同步操作在用户 CRUD 时实时触发，并有重试机制 |
+| .env 管理员凭据泄露 | 高 | 低 | .env 文件权限控制（600），生产环境使用密钥管理服务 |
 | SDK 版本升级带来兼容性问题 | 中 | 中 | 锁定 SDK 版本，升级前在测试环境验证 |
 | 敏感信息泄露到 Trace | 高 | 低 | 实现数据脱敏层，过滤密码、Token 等敏感字段 |
 | LLM-as-a-Judge 评估不准确 | 低 | 中 | 支持人工复核评分，评估结果仅作参考 |
@@ -483,8 +501,8 @@
 ### SunnyAgent → Langfuse SDK
 
 **Trace 上报接口**
-- 使用 `langfuse.openai.OpenAI` 包装器或 `@observe()` 装饰器
-- 通过 LangChain/LangGraph Callback Handler 自动采集
+- LLM 调用通过 LiteLLM 内置 Langfuse Callback 自动采集
+- 非 LLM Span 使用 Langfuse Python SDK `@observe()` 装饰器或 `start_span()` 手动创建
 - Trace 必须携带 `user_id` 和 `session_id` 参数
 - 配置来源：自动初始化生成的 API Key（从数据库读取）
 
@@ -500,10 +518,8 @@
 - `POST /api/v1/projects/{projectId}/api-keys` - 生成 API Key
 - `GET /api/v1/projects` - 检查项目是否已存在
 
-**账号同步接口**
-- `POST /api/v1/organizations/{orgId}/members` - 创建用户
-- `PATCH /api/v1/organizations/{orgId}/members/{memberId}` - 更新用户状态
-- `DELETE /api/v1/organizations/{orgId}/members/{memberId}` - 删除用户
+**管理员登录接口**
+- `POST /api/auth/sign-in` - 使用 .env 中的管理员凭据登录 Langfuse，获取 session token（用于控制台跳转自动登录）
 
 ### SunnyAgent 后端 API（前端调用）
 
@@ -714,13 +730,11 @@ POST /api/v1/observability/usage/refresh
 | `/api/v1/projects` | GET | 检查项目是否已存在 |
 | `/api/v1/projects/{projectId}/api-keys` | POST | 生成 API Key |
 
-#### 账号同步接口
+#### 管理员登录接口
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/api/v1/organizations/{orgId}/members` | POST | 创建用户 |
-| `/api/v1/organizations/{orgId}/members/{memberId}` | PATCH | 更新用户状态 |
-| `/api/v1/organizations/{orgId}/members/{memberId}` | DELETE | 删除用户 |
+| `/api/auth/sign-in` | POST | 使用管理员凭据登录，获取 session token |
 
 #### 用量统计接口（Langfuse 原生）
 
@@ -767,8 +781,10 @@ GET /api/public/health
 
 **SunnyAgent 数据库存储**
 - `langfuse_config` 表：存储 Langfuse 配置信息（project_id, public_key, encrypted_secret_key, initialized_at）
-- `trace_index` 表（可选）：存储 user_id/session_id 到 trace_id 的映射，用于快速查询
 
 **Langfuse 存储**
 - Trace/Span 原始数据存储在 ClickHouse
 - 用户/项目元数据存储在 PostgreSQL
+
+**Redis 缓存**
+- 用量统计结果按 user_id + 时间维度缓存（5min TTL），避免频繁调用 Langfuse API

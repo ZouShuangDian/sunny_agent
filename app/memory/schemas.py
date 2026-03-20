@@ -114,6 +114,28 @@ _COMPACTION_INJECT_TEMPLATE = (
 )
 
 
+def _extract_text_for_llm(m: "Message") -> str:
+    """从 deep_research 的 blocks JSON content 中提取纯文本供 LLM 使用。
+
+    blocks 格式：[{"type": "research_report", "content": "markdown..."}, ...]
+    提取 research_report.content 和 text.content 拼接。
+    """
+    try:
+        blocks = json.loads(m.content)
+        if not isinstance(blocks, list):
+            return m.content
+        parts = []
+        for block in blocks:
+            btype = block.get("type", "")
+            if btype == "research_report":
+                parts.append(block.get("content", ""))
+            elif btype == "text":
+                parts.append(block.get("content", ""))
+        return "\n\n".join(parts) if parts else m.content
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return m.content  # 兜底：解析失败返回原始内容
+
+
 class ConversationHistory(BaseModel):
     """完整对话历史"""
 
@@ -164,21 +186,28 @@ class ConversationHistory(BaseModel):
                 })
                 continue
 
-            entry: dict = {"role": m.role, "content": m.content}
-            if m.role == "assistant" and m.tool_calls:
-                entry["tool_calls"] = [
-                    {
-                        "id": tc.tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.tool_name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in m.tool_calls
-                ]
-            if m.role == "tool" and m.tool_call_id:
-                entry["tool_call_id"] = m.tool_call_id
+            # deep_research 消息的 content 是 blocks JSON，需提取纯文本供 LLM 使用
+            content = _extract_text_for_llm(m) if m.intent_primary == "deep_research" else m.content
+            entry: dict = {"role": m.role, "content": content}
+            # tool_calls 和 tool result 不注入 LLM 历史上下文：
+            # 完整工具调用记录在 l3_steps 表中，messages 只保留纯文本对话。
+            # 避免 LLM 看到 tool_call 但没有对应 tool result 导致上下文错位。
+            if m.role == "tool":
+                continue  # 跳过 tool result 消息
+            # if m.role == "assistant" and m.tool_calls:
+            #     entry["tool_calls"] = [
+            #         {
+            #             "id": tc.tool_call_id,
+            #             "type": "function",
+            #             "function": {
+            #                 "name": tc.tool_name,
+            #                 "arguments": json.dumps(tc.arguments),
+            #             },
+            #         }
+            #         for tc in m.tool_calls
+            #     ]
+            # if m.role == "tool" and m.tool_call_id:
+            #     entry["tool_call_id"] = m.tool_call_id
             result.append(entry)
         return result
 

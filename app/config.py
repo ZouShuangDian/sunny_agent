@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     RERANK_API_KEY: str = ""
     RERANK_MODEL: str = "Bge-reranker-v2-m3"
 
+    # ── Perplexity Deep Research ──
+    PERPLEXITY_API_KEY: str = ""
+
+    # ── MCP 连接器 ──
+    MCP_PLATFORM_URL: str = "https://po-api.sunnyoptical.cn"                # 公司 MCP 管理平台地址
+    MCP_PLATFORM_TOKEN: str = "syDNhE4Fnjie6QY"              # 平台鉴权 Token（mcp-token Header）
+    MCP_PLATFORM_TIMEOUT: int = 10            # 平台接口超时（秒）
+    MCP_SERVER_TIMEOUT: int = 30              # MCP Server 连接超时（秒）
+    MCP_TOOL_CALL_TIMEOUT: int = 120           # 工具调用超时（秒）
+
     # ── Sandbox Service（沙箱代码执行） ──
     SANDBOX_SERVICE_URL: str = "http://localhost:8020"  # sandbox-service HTTP 地址
     SANDBOX_HOST_VOLUME: str = "/Users/zoushuangdian/docker/volumes/sunny_agent"  # 宿主机挂载根目录
@@ -105,7 +115,7 @@ class Settings(BaseSettings):
     # ── arq Worker ──
     ARQ_QUEUE_NAME: str = "sunny:queue"
     ARQ_MAX_JOBS: int = 10               # 单实例最大并发任务数
-    ARQ_JOB_TIMEOUT: int = 600           # 单任务超时（秒）
+    ARQ_JOB_TIMEOUT: int = 900           # 单任务超时（秒），15 分钟
     ARQ_MAX_TRIES: int = 1               # 不自动重试（失败直接标记 failed）
 
     # ── Cron 调度 ──
@@ -119,6 +129,20 @@ class Settings(BaseSettings):
     # ── 通知 ──
     NOTIFICATION_RETENTION_DAYS: int = 30  # 已读通知保留天数（清理策略）
     SSE_HEARTBEAT_SECONDS: int = 30        # SSE 心跳间隔（秒）
+
+    # ── Langfuse 可观测性 ──
+    # host/public_key/secret_key 已改为通过管理后台 UI 配置并存储在 DB 中，
+    # 以下字段保留为可选，仅供 docker-compose INIT 等场景引用
+    LANGFUSE_ENABLED: bool = False
+    LANGFUSE_HOST: str = ""
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_ADMIN_EMAIL: str = ""
+    LANGFUSE_ADMIN_PASSWORD: str = ""
+    LANGFUSE_SAMPLE_RATE: float = 1.0
+    LANGFUSE_FLUSH_INTERVAL: int = 5
+    ENCRYPTION_KEY: str = ""
+    LANGFUSE_PII_PATTERNS: str = ""
 
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 允许的跨域来源，生产环境建议改为具体域名列表

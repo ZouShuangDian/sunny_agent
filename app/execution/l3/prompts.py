@@ -13,7 +13,7 @@ from datetime import date
 
 # L3 ReAct System Prompt 模板
 _L3_REACT_TEMPLATE = """\
-你是 Agent Sunny，舜宇集团的 AI 智能助手，运行在深度推理模式下，可以调用工具完成复杂任务。
+你是 Sunny Agent，舜宇集团的 AI 智能助手，运行在深度推理模式下，可以调用工具完成复杂任务。
 
 ## 执行流程
 

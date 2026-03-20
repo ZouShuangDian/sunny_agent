@@ -45,6 +45,26 @@ async def lifespan(application: FastAPI):
     await redis_client.ping()
     log.info("Redis 连接正常")
 
+    # ── Langfuse 配置加载：从 DB 读取加密配置并初始化 ──
+    from app.services.langfuse_config_loader import load_langfuse_config
+    from app.services.langfuse_manager import LangfuseManager
+    from app.observability.langfuse_client import configure_langfuse
+
+    async with async_session() as db:
+        try:
+            await load_langfuse_config(db)
+            manager = LangfuseManager()
+            decrypted = await manager.get_decrypted_config(db)
+            configure_langfuse(decrypted)
+            if decrypted:
+                log.info("Langfuse 已启用", host=decrypted["host"])
+                import litellm
+                litellm.callbacks = ["langfuse_otel"]
+            else:
+                log.info("Langfuse 未配置，跳过")
+        except Exception as e:
+            log.warning("Langfuse 配置加载失败，跳过（不影响主流程）", error=str(e))
+
     yield
 
     # ── Graceful Shutdown：等待后台 create_task 完成，防止消息/审计日志丢失 ──
@@ -64,6 +84,10 @@ async def lifespan(application: FastAPI):
     # 关闭 arq 入队连接池
     from app.tasks.arq_pool import close_arq_pool
     await close_arq_pool()
+
+    # 关闭 Langfuse（flush pending data）
+    from app.observability.langfuse_client import shutdown_langfuse
+    shutdown_langfuse()
 
     # 关闭数据库连接池
     await engine.dispose()
@@ -145,6 +169,8 @@ from app.api.skills import router as skills_router
 from app.api.cron_jobs import router as cron_jobs_router
 from app.api.notifications import router as notifications_router
 from app.api.tasks import router as tasks_router
+from app.api.observability import router as observability_router
+from app.api.connectors import router as connectors_router
 
 app.include_router(health_router)
 app.include_router(auth_router)
@@ -160,6 +186,8 @@ app.include_router(roles_router)
 app.include_router(cron_jobs_router)
 app.include_router(notifications_router)
 app.include_router(tasks_router)
+app.include_router(observability_router)
+app.include_router(connectors_router)
 
 
 if __name__ == "__main__":

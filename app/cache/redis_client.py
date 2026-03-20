@@ -71,11 +71,42 @@ class RedisKeys:
         """异步任务事件日志 List（断线续传缓冲，TTL=1h）"""
         return f"task_events:{task_id}"
 
+    @staticmethod
+    def task_channel(task_id: str) -> str:
+        """异步任务进度 Pub/Sub channel（任务 SSE 端点订阅用）"""
+        return f"task_ch:{task_id}"
+
     # ── 通知 Pub/Sub ──
     @staticmethod
     def notify_channel(usernumb: str) -> str:
         """用户级通知 Pub/Sub channel（SSE 订阅用）"""
         return f"notify:{usernumb}"
+
+    # ── Langfuse 可观测性缓存 ──
+    @staticmethod
+    def langfuse_health() -> str:
+        """Langfuse 健康状态缓存 (TTL 5min)"""
+        return "sunny:langfuse:health"
+
+    @staticmethod
+    def langfuse_usage(date: str, user_id: str = "all") -> str:
+        """Langfuse 用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:{date}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_summary(start: str, end: str, user_id: str = "all") -> str:
+        """Langfuse 用量汇总缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:summary:{start}:{end}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_daily(start: str, end: str, user_id: str = "all") -> str:
+        """Langfuse 每日用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:daily:{start}:{end}:{user_id}"
+
+    @staticmethod
+    def langfuse_usage_by_user(start: str, end: str) -> str:
+        """Langfuse 按用户用量缓存 (TTL 5min)"""
+        return f"sunny:langfuse:usage:by_user:{start}:{end}"
 
 
 class RateLimitRedisKeys:

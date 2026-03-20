@@ -4,10 +4,18 @@
 
 import contextvars
 import uuid
+from typing import Any
 
 # ── 全局上下文变量 ──
-trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
-user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_id", default="anonymous")
+trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "trace_id", default=""
+)
+user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "user_id", default="anonymous"
+)
+langfuse_trace_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "langfuse_trace", default=None
+)
 
 
 def new_trace_id() -> str:

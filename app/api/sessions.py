@@ -74,6 +74,7 @@ class MessageItem(BaseModel):
     message_id: str
     role: str
     content: str
+    intent_primary: str | None = None  # 前端据此判断消息类型（如 deep_research → 按 blocks 渲染）
     created_at: datetime
     tool_calls: list[ToolCallItem] | None = None
     l3_steps: list[L3StepItem] | None = None
@@ -285,6 +286,7 @@ async def get_session_messages(
             message_id=r.message_id,
             role=r.role,
             content=r.content,
+            intent_primary=r.intent_primary,
             created_at=r.created_at,
             tool_calls=_build_tool_calls(r.tool_calls),
             l3_steps=steps_map.get(r.message_id) if r.role == "assistant" else None,

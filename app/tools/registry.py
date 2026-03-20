@@ -73,6 +73,10 @@ class ToolRegistry:
         - 工具内部应自行管理更短的超时，内部超时触发时返回具体错误信息
         - 正常情况下 Registry 层超时不应被触发
         """
+        # MCP 连接器工具：name 包含 __ 前缀（如 gx_four__query_status）
+        if "__" in name:
+            return await self._execute_mcp_tool(name, arguments)
+
         tool = self._tools.get(name)
         if not tool:
             return ToolResult.fail(f"未知工具: {name}").to_json()
@@ -107,6 +111,60 @@ class ToolRegistry:
         except Exception as e:
             log.error("工具执行异常", tool=name, error=str(e), exc_info=True)
             return ToolResult.fail(f"工具执行异常: {e}").to_json()
+
+    async def _execute_mcp_tool(self, full_name: str, arguments: dict) -> str:
+        """执行 MCP 连接器工具：拆分前缀 → 查 DB 找 mcp_url → MCPClient.call_tool"""
+        from app.db.engine import async_session
+        from app.db.models.connector import UserConnector
+        from app.execution.user_context import get_user_id
+        from app.connector.client import MCPClient
+        from sqlalchemy import select
+
+        prefix, _, tool_name = full_name.partition("__")
+
+        usernumb = get_user_id()
+        if not usernumb:
+            return ToolResult.fail("无法获取用户信息").to_json()
+
+        # 查 DB 找连接器的 mcp_url
+        async with async_session() as db:
+            result = await db.execute(
+                select(UserConnector.mcp_url).where(
+                    UserConnector.usernumb == usernumb,
+                    UserConnector.tool_prefix == prefix,
+                    UserConnector.is_enabled == True,  # noqa: E712
+                )
+            )
+            row = result.first()
+
+        if not row:
+            return ToolResult.fail(f"连接器 {prefix} 未找到或已关闭").to_json()
+
+        mcp_url = row[0]
+        client = MCPClient(mcp_url=mcp_url)
+
+        _start = time.monotonic()
+        try:
+            mcp_result = await asyncio.wait_for(
+                client.call_tool(tool_name, arguments),
+                timeout=60,
+            )
+            # MCP 返回格式：{"content": [{"type": "text", "text": "..."}]}
+            content = mcp_result.get("content", [])
+            texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+            result_text = "\n".join(texts) if texts else json.dumps(mcp_result, ensure_ascii=False)
+
+            duration_ms = int((time.monotonic() - _start) * 1000)
+            log.info("MCP 工具执行完成", tool=full_name, duration_ms=duration_ms)
+
+            return ToolResult.success(result=result_text).to_json()
+
+        except asyncio.TimeoutError:
+            log.warning("MCP 工具超时", tool=full_name)
+            return ToolResult.fail(f"MCP 工具 {tool_name} 执行超时").to_json()
+        except Exception as e:
+            log.error("MCP 工具异常", tool=full_name, error=str(e))
+            return ToolResult.fail(f"MCP 工具执行异常: {e}").to_json()
 
     @property
     def tool_names(self) -> list[str]:
