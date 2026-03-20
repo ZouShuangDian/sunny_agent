@@ -64,7 +64,7 @@ class LLMClient:
         messages: list[dict],
         model: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 0,
+        max_tokens: int = 2048,
         response_format: dict | None = None,
     ) -> LLMResponse:
         """
@@ -74,7 +74,7 @@ class LLMClient:
             messages: OpenAI 格式的消息列表
             model: 模型名称，不传则用默认模型
             temperature: 温度（意图识别建议 0.0）
-            max_tokens: 最大输出 token 数（不传则用配置默认值）
+            max_tokens: 最大输出 token 数
             response_format: JSON mode（如 {"type": "json_object"}）
         """
         use_model = model or self.default_model
@@ -83,7 +83,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
+            "max_tokens": max_tokens,
             "timeout": self.timeout,
         }
         if self.api_key:
@@ -144,7 +144,7 @@ class LLMClient:
         messages: list[dict],
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 0,
+        max_tokens: int = 2048,
         tools: list[dict] | None = None,
     ) -> AsyncIterator[dict]:
         """
@@ -161,7 +161,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
+            "max_tokens": max_tokens,
             "timeout": settings.LLM_STREAM_TIMEOUT,
             "stream": True,
             "stream_options": {"include_usage": True},  # 确保 finish chunk 携带 token 用量
@@ -189,8 +189,6 @@ class LLMClient:
         # 缓存 finish 信息，等 usage chunk 到达后再 yield
         cached_finish_reason: str | None = None
         usage_dict: dict = {}
-        stream_started_at = time.perf_counter()
-        first_event_logged = False
 
         async for chunk in response:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -199,26 +197,10 @@ class LLMClient:
             if delta:
                 # 文本内容
                 if delta.content:
-                    if not first_event_logged:
-                        first_event_logged = True
-                        log.info(
-                            "LLM first stream event",
-                            model=use_model,
-                            event_type="delta",
-                            first_token_latency_ms=round((time.perf_counter() - stream_started_at) * 1000, 2),
-                        )
                     yield {"type": "delta", "content": delta.content}
 
                 # 工具调用（流式分片到达）
                 if delta.tool_calls:
-                    if not first_event_logged:
-                        first_event_logged = True
-                        log.info(
-                            "LLM first stream event",
-                            model=use_model,
-                            event_type="tool_call",
-                            first_token_latency_ms=round((time.perf_counter() - stream_started_at) * 1000, 2),
-                        )
                     for tc in delta.tool_calls:
                         idx = tc.index
                         if idx not in tool_call_buffers:
@@ -256,13 +238,6 @@ class LLMClient:
                 "name": buf["name"],
                 "arguments": buf["arguments"],
             }
-        if not first_event_logged:
-            log.info(
-                "LLM stream completed without delta",
-                model=use_model,
-                first_token_latency_ms=round((time.perf_counter() - stream_started_at) * 1000, 2),
-                finish_reason=cached_finish_reason or "stop",
-            )
         yield {"type": "finish", "reason": cached_finish_reason or "stop", "usage": usage_dict}
 
     async def chat_with_tools(
@@ -271,7 +246,7 @@ class LLMClient:
         tools: list[dict],
         model: str | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 0,
+        max_tokens: int = 2048,
     ) -> LLMResponse:
         """
         带工具定义的非流式调用（L1 Bounded Loop 使用）。
@@ -283,7 +258,7 @@ class LLMClient:
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or settings.LLM_MAX_TOKENS,
+            "max_tokens": max_tokens,
             "timeout": self.timeout,
             "tools": tools,
         }

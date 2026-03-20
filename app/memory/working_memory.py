@@ -105,19 +105,6 @@ class WorkingMemory:
 
     # ── 上一轮意图 ──
 
-    async def set_history(
-        self,
-        session_id: str,
-        history: ConversationHistory,
-    ) -> None:
-        """Replace session history after compaction or recovery."""
-        await self._hset_and_expire(
-            session_id,
-            self.FIELD_HISTORY,
-            history.model_dump_json(),
-        )
-
-
     async def get_last_intent(self, session_id: str) -> LastIntent | None:
         """读取上一轮意图"""
         raw = await self.redis.hget(self._key(session_id), self.FIELD_LAST_INTENT)

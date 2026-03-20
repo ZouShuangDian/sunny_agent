@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     MODEL_CONTEXT_LIMIT: int = 98_000        # 模型上下文 token 输入上限（实测精确值）
     COMPACTION_BUFFER: int = 20_000          # Level 2 触发阈值（剩余空间低于此值触发摘要）
     PRUNE_PROTECT_TOKENS: int = 20_000       # 保护区 token 数（最近步骤不被剪枝）
-    HISTORY_TOKEN_BUDGET: int = 30_000       # 历史消息加载预算（独立于保护区）
+    HISTORY_TOKEN_BUDGET: int = 60_000       # 历史消息加载预算（独立于保护区）
     COMPACTION_MAX_TOKENS: int = 2_000       # 摘要生成 max_tokens
 
     # ── 冷存储（聊天记录持久化） ──
@@ -100,8 +100,8 @@ class Settings(BaseSettings):
     WORKING_MEMORY_TTL: int = 1800  # 工作记忆 TTL（秒），默认 30min
     FEISHU_SESSION_IDLE_ARCHIVE_HOURS: int = 24  # Feishu 归档 session
     FEISHU_SESSION_ARCHIVE_ENABLED: bool = True
-    FEISHU_SESSION_ARCHIVE_CUTOFF_HOUR: int = 15
-    FEISHU_SESSION_ARCHIVE_CUTOFF_MINUTE: int = 2
+    FEISHU_SESSION_ARCHIVE_CUTOFF_HOUR: int = 4
+    FEISHU_SESSION_ARCHIVE_CUTOFF_MINUTE: int = 0
     FEISHU_SESSION_ARCHIVE_BATCH_SIZE: int = 100
     FEISHU_SESSION_ARCHIVE_MIN_MESSAGES: int = 6
     FEISHU_SESSION_ARCHIVE_MODEL: str = "openai/deepseek-ai/DeepSeek-V3"
@@ -122,9 +122,6 @@ class Settings(BaseSettings):
     MAX_CRON_JOBS_PER_USER: int = 20     # 单用户最大定时任务数
     CRON_SCAN_INTERVAL: int = 1          # Scanner 扫描间隔（分钟），默认每分钟
     CRON_MIN_INTERVAL_MINUTES: int = 30  # 定时任务最小触发间隔（分钟），防止资源滥用
-    # 外部 Webhook 服务配置（由 feishu-sunnyagent-api 项目提供）
-    # Webhook URL: https://larkchannel.51dnbsc.top/webhook
-    # 消息队列: Redis List "feishu:webhook:queue"
 
     # ── 通知 ──
     NOTIFICATION_RETENTION_DAYS: int = 30  # 已读通知保留天数（清理策略）
