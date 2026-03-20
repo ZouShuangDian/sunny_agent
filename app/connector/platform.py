@@ -26,7 +26,7 @@ _CUSTOM_MCP_SERVICES: list[dict] = [
         "scope": "PUBLIC",
         "urlList": [
             {
-                "env": "2",
+                "env": "1",
                 "url": "https://mcp.api-inference.modelscope.net/18d9732d0a3d46/mcp",
                 "authType": "NONE",
                 "apiState": "1",
