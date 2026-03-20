@@ -10,21 +10,13 @@ from datetime import datetime
 from uuid import UUID
 
 import structlog
-from arq import create_pool
-from arq.connections import RedisSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
-from app.cache.redis_client import FeishuRedisKeys, redis_client
 from app.config import get_settings
 from app.db.engine import async_session
 from app.feishu.access_control import get_access_controller
-from app.feishu.block_streaming import get_block_streaming_manager
-from app.feishu.card_status_manager import (
-    get_card_status_manager,
-    CardStatus,
-    cleanup_card_status_manager,
-)
+from app.feishu.card_status_manager import get_card_status_manager
 from app.feishu.client import FeishuClient, FeishuError, get_feishu_client
 
 from app.feishu.media_downloader import get_media_downloader
@@ -40,8 +32,6 @@ logger = structlog.get_logger()
 
 # 卡片显示配置
 MAX_VISIBLE_STEPS = 3    # 最多显示最近 3 个步骤
-PROCESSING_QUEUE_WARN_THRESHOLD = 20
-PROCESSING_QUEUE_WARN_INTERVAL_SECONDS = 60
 
 
 async def _send_rejected_card(
@@ -104,7 +94,6 @@ async def _process_message_internal(
         logger.warning("Message missing app_id, using default", event_id=event_id)
         app_id = settings.FEISHU_APP_ID
 
-    card_status = None
     log_entry = None
     processing_message_id = message_id
     
@@ -115,11 +104,6 @@ async def _process_message_internal(
     
     try:
         # ← 新增：创建卡片状态管理器
-        card_status = await get_card_status_manager(
-            open_id=open_id,
-            chat_id=chat_id,
-            app_id=app_id,
-        )
 
         # ← 新增：开始卡片会话（显示"⏳ 思考中..."）
         receive_id = chat_id if chat_type == "group" else open_id
@@ -242,15 +226,10 @@ async def _process_message_internal(
             await db.commit()  # 拒绝时需要提交
             
             # ← 新增：拒绝时也显示状态
-            await card_status.update_status(CardStatus.VALIDATING)
-            await asyncio.sleep(0.5)  # 短暂显示校验状态
-            
-            # 发送拒绝提示
             rejection_msg = access_controller.get_rejection_message(reason)
-            await card_status.update_status(custom_text=rejection_msg)
+            await _send_progress_text(rejection_msg, min_interval_seconds=0.0)
             
             # 清理状态管理器
-            await cleanup_card_status_manager(open_id=open_id, chat_id=chat_id, app_id=app_id)
             
             return {"status": "rejected", "reason": reason}
         
@@ -502,14 +481,14 @@ async def _process_message_internal(
                     current_step = f"正在调用工具：{tool_name}"
                     await _send_progress_text(current_step)
 
-                elif evt_type == "tool_result":
-                    tool_name = evt_data.get("name", "unknown")
-                    result = evt_data.get("result", {})
-                    if isinstance(result, dict) and "error" in result:
-                        current_step = f"工具执行失败：{tool_name}"
-                    else:
-                        current_step = f"工具执行完成：{tool_name}"
-                    await _send_progress_text(current_step)
+                # elif evt_type == "tool_result":
+                #     tool_name = evt_data.get("name", "unknown")
+                #     result = evt_data.get("result", {})
+                #     if isinstance(result, dict) and "error" in result:
+                #         current_step = f"工具执行失败：{tool_name}"
+                #     else:
+                #         current_step = f"工具执行完成：{tool_name}"
+                #     await _send_progress_text(current_step)
 
                 elif evt_type == "compaction_start":
                     current_step = "历史对话较长，正在整理上下文。"
@@ -618,6 +597,11 @@ async def _process_message_internal(
         
         # 关闭流式卡片并发送最终答案
         # 最终答案通过卡片发送，过程消息继续使用普通文本
+        card_status = await get_card_status_manager(
+            open_id=open_id,
+            chat_id=chat_id,
+            app_id=app_id,
+        )
         complete_ok = await card_status.complete(
             final_answer=final_answer,
             send_as_message=True,
@@ -628,11 +612,6 @@ async def _process_message_internal(
         )
         if not complete_ok:
             raise RuntimeError("Feishu final reply delivery failed")
-        await cleanup_card_status_manager(
-            open_id=open_id,
-            chat_id=chat_id,
-            app_id=app_id,
-        )
         
         # 13. 完成处理
         processing_end = datetime.utcnow()
@@ -660,15 +639,10 @@ async def _process_message_internal(
                     event_id=event_id,
                     error=str(e),
                     exc_info=True)
-        if card_status:
-            try:
-                await _send_progress_text(f"处理失败：{str(e)}", min_interval_seconds=0.0)
-            finally:
-                await cleanup_card_status_manager(
-                    open_id=open_id,
-                    chat_id=chat_id,
-                    app_id=app_id,
-                )
+        try:
+            await _send_progress_text(f"Processing failed: {str(e)}", min_interval_seconds=0.0)
+        except Exception:
+            pass
 
         if log_entry is not None:
             log_entry.status = "failed"
@@ -779,371 +753,3 @@ def _extract_text_content(content: dict, msg_type: str) -> str:
             return text.strip()
     
     return ""
-
-
-async def _startup(ctx):
-    """Worker启动钩子（内部实现）"""
-    logger.info("Feishu Worker starting up")
-    
-    # 预初始化执行管线（避免请求时延迟）
-    # 这会触发 pipeline.py 模块级初始化：
-    # - LLMClient 创建
-    # - ExecutionRouter 初始化（工具注册、SubAgent 加载）
-    logger.info("Pre-initializing execution pipeline...")
-    import time
-    start_time = time.time()
-    
-    from app.execution import pipeline
-    # 触发模块级单例初始化
-    _ = pipeline._execution_router
-    _ = pipeline._llm_client
-    
-    elapsed_ms = int((time.time() - start_time) * 1000)
-    logger.info(f"Execution pipeline pre-initialized", elapsed_ms=elapsed_ms)
-    
-    # 启动消息转移循环
-    ctx["message_transfer_task"] = asyncio.create_task(
-        message_transfer_loop()
-    )
-
-
-async def _shutdown(ctx):
-    """Worker关闭钩子（内部实现）"""
-    logger.info("Feishu Worker shutting down")
-    
-    # 取消任务
-    if "message_transfer_task" in ctx:
-        ctx["message_transfer_task"].cancel()
-    
-    # 关闭所有 FeishuClient 实例（多应用支持）
-    from app.feishu.client import close_all_feishu_clients
-    await close_all_feishu_clients()
-
-
-# ARQ Worker 配置
-class WorkerSettings:
-    """ARQ Worker配置"""
-    
-    functions = [process_feishu_message]
-    redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    queue_name = FeishuRedisKeys.ARQ_QUEUE
-    
-    max_jobs = 10
-    job_timeout = 300  # 5分钟
-    retry_jobs = True
-    max_tries = 3
-    keep_result = 3600  # 1小时
-    
-    on_startup = _startup
-    on_shutdown = _shutdown
-
-
-# 保持向后兼容的导出
-startup = _startup
-shutdown = _shutdown
-
-
-async def message_transfer_loop():
-    """
-    消息转移循环（桥接器）
-    
-    从外部 Webhook 服务的 Redis List 消费消息
-    转移到 ARQ 队列进行处理
-    
-    外部 Webhook 服务信息：
-    - 项目: feishu-sunnyagent-api
-    - URL: https://larkchannel.51dnbsc.top/webhook
-    - 推送队列: Redis List "feishu:webhook:queue"
-    
-    工作流程：
-    1. 使用 BRPOP 从 feishu:webhook:queue 阻塞读取消息
-    2. 消息推送到 processing:queue（用于故障恢复）
-    3. 幂等校验（防止重复处理）
-    4. 入队到 ARQ 队列
-    5. 从 processing:queue 删除（确认处理）
-    """
-    logger.info("Message transfer loop started",
-               source_queue=FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE,
-               target_queue=FeishuRedisKeys.ARQ_QUEUE)
-    arq_pool = await create_pool(WorkerSettings.redis_settings)
-    last_backlog_warn_at = 0.0
-
-    try:
-        while True:
-            try:
-                last_backlog_warn_at = await _maybe_warn_processing_backlog(last_backlog_warn_at)
-                message_json, source_queue = await _claim_next_transfer_message()
-                if not message_json:
-                    continue
-
-                try:
-                    feishu_event = json.loads(message_json)
-                    message = _convert_feishu_event_to_message(feishu_event)
-
-                    event_id = message.get("event_id")
-                    message_id = message.get("message_id")
-                    processed_key = FeishuRedisKeys.processed(event_id, message_id)
-
-                    if await redis_client.exists(processed_key):
-                        logger.info(
-                            "Message already processed, acking processing queue item",
-                            event_id=event_id,
-                            message_id=message_id,
-                            source_queue=source_queue,
-                        )
-                        await _ack_transfer_message(message_json)
-                        continue
-
-                    await arq_pool.enqueue_job(
-                        "process_feishu_message",
-                        message,
-                        _queue_name=FeishuRedisKeys.ARQ_QUEUE,
-                    )
-                    try:
-                        await redis_client.setex(processed_key, 86400, "1")
-                    except Exception as marker_err:
-                        logger.error(
-                            "Failed to write processed marker after ARQ enqueue",
-                            event_id=event_id,
-                            message_id=message_id,
-                            error=str(marker_err),
-                        )
-                    await _ack_transfer_message(message_json)
-
-                    logger.info(
-                        "Message transferred to ARQ queue",
-                        event_id=event_id,
-                        message_id=message_id,
-                        source_queue=source_queue,
-                    )
-
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        "Failed to parse message JSON",
-                        error=str(e),
-                        message_preview=message_json[:200] if len(message_json) > 200 else message_json,
-                    )
-                    await _ack_transfer_message(message_json)
-
-                except Exception as e:
-                    logger.error(
-                        "Failed to transfer message into ARQ",
-                        error=str(e),
-                        event_id=event_id if 'event_id' in locals() else "unknown",
-                        source_queue=source_queue,
-                    )
-                    await asyncio.sleep(0.5)
-
-            except asyncio.CancelledError:
-                logger.info("Message transfer loop cancelled")
-                break
-            except Exception as e:
-                logger.error("Message transfer error", error=str(e))
-                await asyncio.sleep(0.1)  # 短暂休息避免忙循环
-    finally:
-        await arq_pool.close()
-
-
-async def _claim_next_transfer_message() -> tuple[str | None, str | None]:
-    """Claim one message for transfer using processing backlog first, then atomic move from source queue."""
-    pending_message = await redis_client.lindex(FeishuRedisKeys.PROCESSING_QUEUE, -1)
-    if pending_message:
-        return pending_message, FeishuRedisKeys.PROCESSING_QUEUE
-
-    moved_message = await redis_client.brpoplpush(
-        FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE,
-        FeishuRedisKeys.PROCESSING_QUEUE,
-        timeout=1,
-    )
-    if moved_message:
-        return moved_message, FeishuRedisKeys.EXTERNAL_WEBHOOK_QUEUE
-    return None, None
-
-
-async def _ack_transfer_message(message_json: str) -> None:
-    """Ack a claimed transfer message by removing it from the processing queue."""
-    await redis_client.lrem(FeishuRedisKeys.PROCESSING_QUEUE, 1, message_json)
-
-
-async def _maybe_warn_processing_backlog(last_warn_at: float) -> float:
-    """Emit a periodic warning when the processing backlog grows too large."""
-    now = time.monotonic()
-    if now - last_warn_at < PROCESSING_QUEUE_WARN_INTERVAL_SECONDS:
-        return last_warn_at
-
-    try:
-        backlog_size = await redis_client.llen(FeishuRedisKeys.PROCESSING_QUEUE)
-    except Exception as e:
-        logger.warning("Failed to inspect processing queue backlog", error=str(e))
-        return last_warn_at
-
-    if backlog_size >= PROCESSING_QUEUE_WARN_THRESHOLD:
-        logger.warning(
-            "Feishu processing backlog is growing",
-            queue=FeishuRedisKeys.PROCESSING_QUEUE,
-            backlog_size=backlog_size,
-            warn_threshold=PROCESSING_QUEUE_WARN_THRESHOLD,
-        )
-        return now
-
-    return last_warn_at
-
-
-def _convert_feishu_event_to_message(feishu_event: dict) -> dict:
-    """
-    将飞书原始事件格式转换为内部标准消息格式
-    
-    飞书事件格式示例（schema 2.0）：
-    {
-        "schema": "2.0",
-        "header": {
-            "event_id": "556857e248f93e03a71fa1fad3aa5dbe",
-            "token": "...",
-            "create_time": "1234567890",
-            ...
-        },
-        "event": {
-            "message": {
-                "message_id": "om_12345",
-                "chat_type": "p2p",
-                "chat_id": "oc_12345",
-                "sender": {
-                    "sender_id": {
-                        "open_id": "ou_12345"
-                    }
-                },
-                "message_type": "text",
-                "content": '{"text": "hello"}',
-                "mentions": []
-            }
-        }
-    }
-    """
-    header = feishu_event.get("header", {})
-    event = feishu_event.get("event", {})
-    message = event.get("message", {})
-    sender = event.get("sender", {})  # sender 在 event 下，不是 message 下
-    sender_id = sender.get("sender_id", {})
-    
-    # 解析 content（飞书的 content 是 JSON 字符串）
-    content_str = message.get("content", "{}")
-    try:
-        content = json.loads(content_str)
-    except json.JSONDecodeError:
-        content = {"text": content_str}
-    
-    # 解析 mentions
-    mentions = message.get("mentions", [])
-    
-    # 提取 app_id（支持多机器人）
-    app_id = header.get("app_id", "")
-    
-    return {
-        "event_id": header.get("event_id", ""),
-        "message_id": message.get("message_id", ""),
-        "event_type": header.get("event_type", ""),
-        "app_id": app_id,  # ← 关键：提取 app_id 支持多机器人
-        "open_id": sender_id.get("open_id", ""),
-        "chat_id": message.get("chat_id", ""),
-        "chat_type": message.get("chat_type", "p2p"),
-        "msg_type": message.get("message_type", "text"),  # 飞书字段名是 message_type
-        "content": content,
-        "mentions": mentions,
-        "create_time": header.get("create_time", ""),
-        # 保留原始事件，便于调试
-        "_raw_event": feishu_event,
-    }
-
-
-def _build_card_content(
-    steps: list[str], 
-    answer: str, 
-    is_answering: bool
-) -> str:
-    """构建卡片显示内容
-    
-    显示逻辑：
-    - 最多显示最近 MAX_VISIBLE_STEPS 个步骤
-    - 旧步骤折叠显示 "[还有 X 个步骤...]"
-    - 不显示工具结果，只显示操作描述
-    
-    Args:
-        steps: 步骤列表，每个元素是格式化后的步骤字符串
-        answer: 当前累积的最终答案
-        is_answering: 是否正在生成最终答案
-    
-    Returns:
-        格式化后的卡片内容文本
-    """
-    lines = ["🤖 Agent 正在工作", ""]
-    
-    # 步骤区域（最多显示最近 MAX_VISIBLE_STEPS 步）
-    if steps:
-        visible_steps, hidden_count = _get_visible_steps(steps, MAX_VISIBLE_STEPS)
-        
-        if hidden_count > 0:
-            lines.append(f"*[还有 {hidden_count} 个步骤...]*")
-            lines.append("")
-        
-        for step in visible_steps:
-            lines.append(step)
-        
-        lines.append("")  # 空行分隔
-    
-    # 答案区域
-    if is_answering:
-        # lines.append("📖 **最终答案：**")
-        lines.append(answer)
-    elif steps:
-        lines.append("⏳ 生成答案中...")
-    
-    return "\n".join(lines)
-
-
-def _get_visible_steps(steps: list[str], max_visible: int) -> tuple[list[str], int]:
-    """获取可见步骤和隐藏步骤数
-    
-    Args:
-        steps: 完整步骤列表
-        max_visible: 最大可见步骤数
-    
-    Returns:
-        (可见步骤列表, 隐藏步骤数)
-    """
-    if len(steps) <= max_visible:
-        return steps, 0
-    
-    return steps[-max_visible:], len(steps) - max_visible
-
-
-def _build_streaming_card_content(
-    current_step: str | None, 
-    answer: str, 
-    is_generating: bool
-) -> str:
-    """构建流式处理卡片内容
-    
-    显示逻辑：
-    - 生成中：只显示当前步骤（覆盖式），不累积所有步骤
-    - 完成后：只显示最终答案，步骤完全清除
-    
-    Args:
-        current_step: 当前执行的步骤（只显示最后一条）
-        answer: 当前累积的答案
-        is_generating: 是否正在生成中
-    
-    Returns:
-        格式化后的卡片内容文本
-    """
-    lines = []
-    
-    if is_generating:
-        if current_step:
-            lines.append(current_step)
-        else:
-            lines.append("正在生成答案...")
-    else:
-        # 已完成：只显示最终答案，步骤完全清除
-        lines.append(answer)
-    
-    return "\n".join(lines)

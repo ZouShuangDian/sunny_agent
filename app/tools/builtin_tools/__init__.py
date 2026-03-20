@@ -14,6 +14,7 @@ from app.tools.builtin_tools.cron_create import CronCreateTool
 from app.tools.builtin_tools.cron_manage import CronManageTool
 from app.tools.builtin_tools.present_files import PresentFilesTool
 from app.tools.builtin_tools.read_file import ReadFileTool
+from app.tools.builtin_tools.read_uploaded_file import ReadUploadedFileTool
 from app.tools.builtin_tools.str_replace_file import StrReplaceFileTool
 from app.tools.builtin_tools.todo_read import TodoReadTool
 from app.tools.builtin_tools.todo_write import TodoWriteTool
@@ -41,6 +42,7 @@ def create_builtin_registry() -> ToolRegistry:
     # 沙箱执行工具（tier=L3）
     registry.register(BashTool())
     registry.register(ReadFileTool())
+    registry.register(ReadUploadedFileTool())
     registry.register(WriteFileTool())
     registry.register(StrReplaceFileTool())
     registry.register(PresentFilesTool())
